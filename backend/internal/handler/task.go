@@ -84,15 +84,10 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 
 	projectID := c.Query("project_id")
 	if projectID != "" {
-		agentName := "unknown"
-		var a model.Agent
-		if model.DB.Where("id = ?", aid).First(&a).Error == nil {
-			agentName = a.Name
-		}
-		service.BroadcastEvent(projectID, "MILESTONE_UPDATE", gin.H{
-			"block_type": "task",
-			"content":    task.Name,
-			"reason":     "claimed by " + agentName,
+		service.BroadcastEvent(projectID, "TASK_CLAIMED", gin.H{
+			"task_id":     task.ID,
+			"task_name":   task.Name,
+			"assignee_id": aid,
 		})
 	}
 
@@ -143,10 +138,9 @@ func (h *TaskHandler) Complete(c *gin.Context) {
 
 	projectID := c.Query("project_id")
 	if projectID != "" {
-		service.BroadcastEvent(projectID, "MILESTONE_UPDATE", gin.H{
-			"block_type": "task",
-			"content":    task.Name,
-			"reason":     "task completed",
+		service.BroadcastEvent(projectID, "TASK_COMPLETED", gin.H{
+			"task_id":   task.ID,
+			"task_name": task.Name,
 		})
 	}
 
@@ -211,10 +205,11 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		return
 	}
 
-	service.BroadcastEvent(projectID, "MILESTONE_UPDATE", gin.H{
-		"block_type": "task",
-		"content":    req.Name,
-		"reason":     "new task created",
+	service.BroadcastEvent(projectID, "TASK_CREATED", gin.H{
+		"task_id":     task.ID,
+		"task_name":   req.Name,
+		"priority":    priority,
+		"milestone_id": task.MilestoneID,
 	})
 
 	c.JSON(200, gin.H{
@@ -251,10 +246,9 @@ func (h *TaskHandler) Delete(c *gin.Context) {
 
 	projectID := c.Query("project_id")
 	if projectID != "" {
-		service.BroadcastEvent(projectID, "MILESTONE_UPDATE", gin.H{
-			"block_type": "task",
-			"content":    task.Name,
-			"reason":     "task deleted",
+		service.BroadcastEvent(projectID, "TASK_DELETED", gin.H{
+			"task_id":   task.ID,
+			"task_name": task.Name,
 		})
 	}
 

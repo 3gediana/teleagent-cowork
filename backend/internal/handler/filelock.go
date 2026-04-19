@@ -68,28 +68,36 @@ func (h *FileLockHandler) Acquire(c *gin.Context) {
 			continue
 		}
 
-		var lockFiles []string
-		json.Unmarshal([]byte(lock.Files), &lockFiles)
-		for _, lf := range lockFiles {
-			for _, rf := range req.Files {
-				if lf == rf {
-					c.JSON(409, gin.H{
-						"success": false,
-						"error": gin.H{
-							"code":    "LOCK_CONFLICT",
-							"message": "Some files are already locked",
-							"conflict_files": []gin.H{{
-								"file":       lf,
-								"locked_by":  lockGetAgentName(lock.AgentID),
-								"task_id":    lock.TaskID,
-								"expires_at": lock.ExpiresAt.Format(time.RFC3339),
-							}},
-						},
-					})
-					return
+		if lock.AgentID != agentID.(string) {
+			var lockFiles []string
+			json.Unmarshal([]byte(lock.Files), &lockFiles)
+			for _, lf := range lockFiles {
+				for _, rf := range req.Files {
+					if lf == rf {
+						c.JSON(409, gin.H{
+							"success": false,
+							"error": gin.H{
+								"code":    "LOCK_CONFLICT",
+								"message": "Some files are already locked",
+								"conflict_files": []gin.H{{
+									"file":       lf,
+									"locked_by":  lockGetAgentName(lock.AgentID),
+									"task_id":    lock.TaskID,
+									"expires_at": lock.ExpiresAt.Format(time.RFC3339),
+								}},
+							},
+						})
+						return
+					}
 				}
 			}
 		}
+	}
+
+	var task model.Task
+	if err := model.DB.Where("id = ? AND status = 'claimed' AND assignee_id = ?", req.TaskID, agentID.(string)).First(&task).Error; err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_CLAIMED_BY_YOU", "message": "Task not claimed by you"}})
+		return
 	}
 
 	now := time.Now()
@@ -112,10 +120,12 @@ func (h *FileLockHandler) Acquire(c *gin.Context) {
 		return
 	}
 
-	service.BroadcastEvent(projectID, "MILESTONE_UPDATE", gin.H{
-		"block_type": "lock",
-		"content":   "file locked",
-		"reason":    req.Reason,
+	service.BroadcastEvent(projectID, "LOCK_ACQUIRED", gin.H{
+		"lock_id":      lock.ID,
+		"task_id":      req.TaskID,
+		"agent_id":     agentID.(string),
+		"locked_files": req.Files,
+		"reason":       req.Reason,
 	})
 
 	c.JSON(200, gin.H{

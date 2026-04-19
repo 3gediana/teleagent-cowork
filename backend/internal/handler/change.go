@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,11 +19,11 @@ func NewChangeHandler() *ChangeHandler {
 }
 
 type SubmitChangeRequest struct {
-	TaskID      string   `json:"task_id"`
-	Description string   `json:"description"`
-	Version     string   `json:"version"`
+	TaskID      string                `json:"task_id"`
+	Description string                `json:"description"`
+	Version     string                `json:"version"`
 	Writes      []model.ChangeFileEntry `json:"writes"`
-	Deletes     []string `json:"deletes"`
+	Deletes     []string              `json:"deletes"`
 }
 
 func (h *ChangeHandler) Submit(c *gin.Context) {
@@ -66,18 +68,52 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	modifiedFiles, _ := json.Marshal(req.Writes)
-	deletedFiles, _ := json.Marshal(req.Deletes)
+	changeID := model.GenerateID("chg")
+	pendingDir := filepath.Join("data", "pending", projectID, changeID)
+	os.MkdirAll(pendingDir, 0755)
+
+	modifiedFiles := make([]model.ChangeFileEntry, 0)
+	newFiles := make([]string, 0)
+	repoPath := filepath.Join("data", "projects", projectID, "repo")
+
+	for _, w := range req.Writes {
+		if w.Content == "" {
+			content, err := os.ReadFile(filepath.Join(repoPath, w.Path))
+			if err == nil {
+				w.Content = string(content)
+			}
+		}
+
+		fullPath := filepath.Join(pendingDir, w.Path)
+		os.MkdirAll(filepath.Dir(fullPath), 0755)
+		os.WriteFile(fullPath, []byte(w.Content), 0644)
+
+		existingPath := filepath.Join(repoPath, w.Path)
+		if _, err := os.Stat(existingPath); os.IsNotExist(err) {
+			newFiles = append(newFiles, w.Path)
+		} else {
+			modifiedFiles = append(modifiedFiles, w)
+		}
+	}
+
+	for _, d := range req.Deletes {
+		pendingDelPath := filepath.Join(pendingDir, d+".deleted")
+		os.WriteFile(pendingDelPath, []byte{}, 0644)
+	}
+
+	modifiedFilesJSON, _ := json.Marshal(modifiedFiles)
+	newFilesJSON, _ := json.Marshal(newFiles)
+	deletedFilesJSON, _ := json.Marshal(req.Deletes)
 
 	change := model.Change{
-		ID:            model.GenerateID("chg"),
+		ID:            changeID,
 		ProjectID:     projectID,
 		AgentID:       agentID.(string),
 		TaskID:        &req.TaskID,
 		Version:       currentVersion,
-		ModifiedFiles: string(modifiedFiles),
-		NewFiles:      "[]",
-		DeletedFiles:  string(deletedFiles),
+		ModifiedFiles: string(modifiedFilesJSON),
+		NewFiles:      string(newFilesJSON),
+		DeletedFiles:  string(deletedFilesJSON),
 		Diff:          "{}",
 		Description:   req.Description,
 		Status:        "pending",
@@ -88,16 +124,17 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	service.BroadcastEvent(projectID, "AUDIT_RESULT", gin.H{
-		"change_id": change.ID,
-		"agent":     agentID.(string),
-		"status":    "pending",
+	service.BroadcastEvent(projectID, "CHANGE_SUBMITTED", gin.H{
+		"change_id": changeID,
+		"agent_id":  agentID.(string),
+		"task_id":   req.TaskID,
+		"version":   currentVersion,
 	})
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"change_id": change.ID,
+			"change_id": changeID,
 			"message":   "Submitted, waiting for audit result",
 		},
 	})
@@ -122,13 +159,13 @@ func (h *ChangeHandler) List(c *gin.Context) {
 	result := make([]gin.H, 0, len(changes))
 	for _, ch := range changes {
 		item := gin.H{
-			"id":         ch.ID,
-			"task_id":    ch.TaskID,
-			"agent_id":   ch.AgentID,
-			"version":    ch.Version,
+			"id":          ch.ID,
+			"task_id":     ch.TaskID,
+			"agent_id":    ch.AgentID,
+			"version":     ch.Version,
 			"description": ch.Description,
-			"status":     ch.Status,
-			"created_at": ch.CreatedAt,
+			"status":      ch.Status,
+			"created_at":  ch.CreatedAt,
 		}
 		if ch.AuditLevel != nil {
 			item["audit_level"] = *ch.AuditLevel
@@ -162,7 +199,7 @@ func (h *ChangeHandler) Review(c *gin.Context) {
 	}
 
 	if change.Status != "pending" {
-		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "CHANGE_SUBMIT_FAILED", "message": "Change already reviewed"}})
+		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "CHANGE_ALREADY_APPROVED", "message": "Change already reviewed"}})
 		return
 	}
 

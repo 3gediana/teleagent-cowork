@@ -125,6 +125,13 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 		model.RDB.Del(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat")
 
+		if agent.CurrentProjectID != nil {
+			service.BroadcastEvent(*agent.CurrentProjectID, "AGENT_OFFLINE", gin.H{
+				"agent_id":   agent.ID,
+				"agent_name": agent.Name,
+			})
+		}
+
 		releasedFiles := make([]string, 0)
 		for _, l := range locks {
 			releasedFiles = append(releasedFiles, l.ID)
@@ -152,7 +159,14 @@ func (h *AuthHandler) Heartbeat(c *gin.Context) {
 		agent.LastHeartbeat = &now
 		agent.Status = "online"
 		model.DB.Save(agent)
-		model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 300*time.Second)
+	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 300*time.Second)
+
+	if agent.CurrentProjectID != nil {
+		service.BroadcastEvent(*agent.CurrentProjectID, "AGENT_ONLINE", gin.H{
+			"agent_id":   agent.ID,
+			"agent_name": agent.Name,
+		})
+	}
 
 		var locks []model.FileLock
 		model.DB.Where("agent_id = ? AND released_at IS NULL AND expires_at > NOW()", agent.ID).Find(&locks)
