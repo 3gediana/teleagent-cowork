@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 
@@ -32,68 +31,13 @@ func main() {
 		return opencode.DefaultScheduler.Dispatch(session)
 	})
 
-	opencode.RegisterToolCallHandler(func(sessionID string, changeID string, projectID string, toolName string, args map[string]interface{}) {
-		switch toolName {
-		case "audit_output":
-			level, _ := args["level"].(string)
-			var issues []service.AuditIssue
-			if raw, ok := args["issues"]; ok {
-				if b, err := json.Marshal(raw); err == nil {
-					json.Unmarshal(b, &issues)
-				}
-			}
-			rejectReason, _ := args["reject_reason"].(string)
-			result := &service.AuditResult{
-				Level:        level,
-				Issues:       issues,
-				RejectReason: rejectReason,
-			}
-			if err := service.ProcessAuditOutput(changeID, result); err != nil {
-				log.Printf("[ToolHandler] audit_output error: %v", err)
-			}
-		case "fix_output":
-			action, _ := args["action"].(string)
-			fixed, _ := args["fixed"].(bool)
-			delegateTo, _ := args["delegate_to"].(string)
-			rejectReason, _ := args["reject_reason"].(string)
-			result := &service.FixResult{
-				Action:       action,
-				Fixed:        fixed,
-				DelegateTo:   delegateTo,
-				RejectReason: rejectReason,
-			}
-			if err := service.ProcessFixOutput(changeID, result); err != nil {
-				log.Printf("[ToolHandler] fix_output error: %v", err)
-			}
-		case "audit2_output":
-			resultStr, _ := args["result"].(string)
-			rejectReason, _ := args["reject_reason"].(string)
-			result := &service.Audit2Result{
-				Result:        resultStr,
-				RejectReason: rejectReason,
-			}
-			if err := service.ProcessAudit2Output(changeID, result); err != nil {
-				log.Printf("[ToolHandler] audit2_output error: %v", err)
-			}
-		case "create_task":
-			name, _ := args["name"].(string)
-			priority, _ := args["priority"].(string)
-			if priority == "" {
-				priority = "medium"
-			}
-			log.Printf("[ToolHandler] create_task: project=%s name=%s priority=%s", projectID, name, priority)
-		case "assess_output":
-			content, _ := args["content"].(string)
-			log.Printf("[ToolHandler] assess_output received, length=%d", len(content))
-		default:
-			log.Printf("[ToolHandler] Unknown tool: %s", toolName)
-		}
-	})
-
 	gin.SetMode(cfg.Server.Mode)
-	r := gin.Default()
+	r := gin.New()
 
+	r.Use(middleware.RecoveryMiddleware())
+	r.Use(middleware.RequestIDMiddleware())
 	r.Use(middleware.CORSMiddleware())
+	r.Use(middleware.RateLimitMiddleware(100))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -114,6 +58,7 @@ func main() {
 	consultHandler := handler.NewConsultHandler()
 	milestoneHandler := handler.NewMilestoneHandler()
 	rollbackHandler := handler.NewRollbackHandler()
+	gitHandler := handler.NewGitHandler()
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -171,10 +116,18 @@ func main() {
 		internal.POST("/agent/session/:session_id/output", agentHandler.SubmitOutput)
 		internal.GET("/agent/sessions", agentHandler.ListSessions)
 		internal.POST("/project/:id/import-assess", projectHandler.ImportAssess)
+		internal.POST("/git/diff", gitHandler.Diff)
+		internal.POST("/git/commit", gitHandler.Commit)
+		internal.POST("/git/revert", gitHandler.Revert)
+		internal.POST("/git/push", gitHandler.Push)
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("Server starting on %s", addr)
+
+	service.StartMaintainTimer()
+	service.StartHeartbeatChecker()
+
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}

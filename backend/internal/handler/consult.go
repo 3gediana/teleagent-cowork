@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/service"
 )
 
@@ -28,20 +31,39 @@ func (h *ConsultHandler) ProjectInfo(c *gin.Context) {
 
 	session, err := service.TriggerConsultAgent(projectID, req.Query)
 	if err != nil {
-		c.JSON(200, gin.H{
-			"success": true,
-			"data": gin.H{
-				"answer":     "Project info query received. Session created for processing.",
-				"session_id": session.ID,
-			},
-		})
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": err.Error()}})
 		return
+	}
+
+	for i := 0; i < 60; i++ {
+		time.Sleep(2 * time.Second)
+		s := agent.DefaultManager.GetSession(session.ID)
+		if s == nil {
+			continue
+		}
+		if s.Status == "completed" {
+			c.JSON(200, gin.H{
+				"success": true,
+				"data": gin.H{
+					"answer":     s.Output,
+					"session_id": session.ID,
+				},
+			})
+			return
+		}
+		if s.Status == "failed" {
+			c.JSON(500, gin.H{
+				"success": false,
+				"error": gin.H{"code": "SYSTEM_ERROR", "message": "Consult agent failed to process query"},
+			})
+			return
+		}
 	}
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"answer":     "Your query is being processed by the consult agent.",
+			"answer":     "Query is taking longer than expected. Check session " + session.ID + " for results.",
 			"session_id": session.ID,
 		},
 	})

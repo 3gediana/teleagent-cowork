@@ -12,6 +12,7 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/config"
+	"github.com/a3c/platform/internal/service"
 )
 
 type Scheduler struct {
@@ -201,19 +202,13 @@ func (s *Scheduler) processJSONOutput(session *agent.Session) {
 func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inputRaw json.RawMessage, outputRaw string) {
 	log.Printf("[OpenCode] Session %s: tool_call=%s input=%s", session.ID, toolName, string(inputRaw))
 
-	handler := GetToolCallHandler()
-	if handler == nil {
-		log.Printf("[OpenCode] WARNING: no tool call handler registered for %s", toolName)
-		return
-	}
-
 	var args map[string]interface{}
 	if err := json.Unmarshal(inputRaw, &args); err != nil {
 		log.Printf("[OpenCode] Failed to parse tool args for %s: %v", toolName, err)
 		return
 	}
 
-	handler(session.ID, session.ChangeID, session.ProjectID, toolName, args)
+	service.HandleToolCallResult(session.ID, session.ChangeID, session.ProjectID, toolName, args)
 }
 
 func (s *Scheduler) PollSession(session *agent.Session) error {

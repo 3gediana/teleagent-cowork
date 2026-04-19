@@ -47,9 +47,14 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 	fullStaging := filepath.Join(stagingBase, "full")
 	os.MkdirAll(fullStaging, 0755)
 
+	type FileInfo struct {
+		Path    string `json:"path"`
+		Content string `json:"content,omitempty"`
+	}
+
 	noChange := []string{}
-	unlockedModify := []string{}
-	lockedModify := []string{}
+	unlockedModify := []FileInfo{}
+	lockedModify := []FileInfo{}
 
 	var allLocks []model.FileLock
 	model.DB.Where("project_id = ? AND released_at IS NULL AND expires_at > ?", projectID, time.Now()).Find(&allLocks)
@@ -80,10 +85,11 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 			stagingData, stagingErr := os.ReadFile(stagingPath)
 
 			if stagingErr != nil || string(srcData) != string(stagingData) {
+				fileInfo := FileInfo{Path: relPath, Content: string(srcData)}
 				if lockedFiles[relPath] {
-					lockedModify = append(lockedModify, relPath)
+					lockedModify = append(lockedModify, fileInfo)
 				} else {
-					unlockedModify = append(unlockedModify, relPath)
+					unlockedModify = append(unlockedModify, fileInfo)
 				}
 				os.WriteFile(stagingPath, srcData, 0644)
 			} else {

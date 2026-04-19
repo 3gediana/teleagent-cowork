@@ -17,8 +17,8 @@ async function main() {
     version: '0.2.0',
   })
 
-  server.tool('a3c_platform', 'Connect to A3C platform - login, logout, or check status', {
-    action: z.enum(['login', 'logout', 'status']).describe('Action to perform'),
+  server.tool('a3c_platform', 'Connect to A3C platform - login or logout', {
+    action: z.enum(['login', 'logout']).describe('Action to perform'),
     project: z.string().optional().describe('Project ID to connect to (for login)'),
   }, async ({ action, project }) => {
     switch (action) {
@@ -32,67 +32,39 @@ async function main() {
         const data = await api.logout()
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
-      case 'status': {
-        const data = await api.syncStatus()
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-      }
     }
   })
 
-  server.tool('task', 'Manage A3C tasks - create, claim, complete, list, or delete', {
-    action: z.enum(['create', 'claim', 'complete', 'list', 'delete']).describe('Action to perform'),
-    task_id: z.string().optional().describe('Task ID (required for claim/complete/delete)'),
-    name: z.string().optional().describe('Task name (for create)'),
-    description: z.string().optional().describe('Task description (for create)'),
-    priority: z.enum(['high', 'medium', 'low']).optional().describe('Task priority (for create, default medium)'),
-    milestone_id: z.string().optional().describe('Milestone ID (for create)'),
-  }, async ({ action, task_id, name, description, priority, milestone_id }) => {
+  server.tool('task', 'Claim or complete A3C tasks', {
+    action: z.enum(['claim', 'complete']).describe('Action to perform'),
+    task_id: z.string().describe('Task ID (required)'),
+  }, async ({ action, task_id }) => {
     switch (action) {
-      case 'create': {
-        if (!name) return { content: [{ type: 'text', text: 'Error: name required for create' }] }
-        const data = await api.createTask(name, description || '', priority || 'medium', milestone_id)
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-      }
       case 'claim': {
-        if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required' }] }
         const data = await api.claimTask(task_id)
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
       case 'complete': {
-        if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required' }] }
         const data = await api.completeTask(task_id)
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-      }
-      case 'list': {
-        const data = await api.listTasks(PROJECT)
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-      }
-      case 'delete': {
-        if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required' }] }
-        const data = await api.deleteTask(task_id)
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
     }
   })
 
-  server.tool('filelock', 'Acquire, release, or renew file locks', {
-    action: z.enum(['acquire', 'release', 'renew']).describe('Action to perform'),
+  server.tool('filelock', 'Acquire or release file locks', {
+    action: z.enum(['acquire', 'release']).describe('Action to perform'),
     task_id: z.string().optional().describe('Task ID (required for acquire)'),
-    files: z.array(z.string()).optional().describe('Files to lock (for acquire/release)'),
-    reason: z.string().optional().describe('Reason for locking (for acquire)'),
+    files: z.array(z.string()).optional().describe('Files to lock (for acquire) or release (optional, releases all if omitted)'),
+    reason: z.string().optional().describe('Reason for locking (required for acquire)'),
   }, async ({ action, task_id, files, reason }) => {
     switch (action) {
       case 'acquire': {
-        if (!task_id || !files) return { content: [{ type: 'text', text: 'Error: task_id and files required' }] }
+        if (!task_id || !files) return { content: [{ type: 'text', text: 'Error: task_id and files required for acquire' }] }
         const data = await api.acquireLock(task_id, files, reason || '')
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
       case 'release': {
         const data = await api.releaseLock(files)
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-      }
-      case 'renew': {
-        const data = await api.renewLock()
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
     }
@@ -115,16 +87,6 @@ async function main() {
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })
 
-  server.tool('change_review', 'Review a submitted change (approve or reject)', {
-    change_id: z.string().describe('Change ID to review'),
-    level: z.enum(['L0', 'L1', 'L2']).describe('Audit level'),
-    approved: z.boolean().describe('Whether to approve the change'),
-    reason: z.string().optional().describe('Reason for rejection or notes'),
-  }, async ({ change_id, level, approved, reason }) => {
-    const data = await api.reviewChange(change_id, level, approved, reason || '')
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  })
-
   server.tool('file_sync', 'Sync platform files to local staging area', {
     version: z.string().describe('Current local version'),
   }, async ({ version }) => {
@@ -141,19 +103,6 @@ async function main() {
     query: z.string().describe('Question about the project'),
   }, async ({ query }) => {
     const data = await api.projectInfo(query)
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  })
-
-  server.tool('milestone_switch', 'Switch to next milestone (all tasks must be completed)', {}, async () => {
-    const data = await api.milestoneSwitch()
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  })
-
-  server.tool('version_rollback', 'Rollback project to a specific version', {
-    version: z.string().describe('Target version to rollback to (e.g., v2.1)'),
-    reason: z.string().optional().describe('Reason for rollback'),
-  }, async ({ version, reason }) => {
-    const data = await api.versionRollback(version, reason || '')
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })
 

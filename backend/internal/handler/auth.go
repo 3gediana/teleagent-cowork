@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
+	"github.com/a3c/platform/internal/service"
 )
 
 type AuthHandler struct{}
@@ -33,6 +34,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 	if agent == nil {
 		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Invalid access key"}})
+		return
+	}
+
+	if agent.Status == "online" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "AUTH_ALREADY_ONLINE", "message": "Agent is already online. Logout first."}})
 		return
 	}
 
@@ -172,6 +178,13 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
 		return
+	}
+
+	if req.ProjectID != "" {
+		if err := service.EnforceAgentLimit(req.ProjectID); err != nil {
+			c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "PROJECT_FULL", "message": err.Error()}})
+			return
+		}
 	}
 
 	agent := model.Agent{
