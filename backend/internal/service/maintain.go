@@ -56,6 +56,8 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 	session := agent.DefaultManager.CreateSession(agent.RoleMaintain, projectID, ctx, trigger)
 	log.Printf("[Maintain] Created session %s for project %s, trigger=%s", session.ID, projectID, trigger)
 
+	agent.DispatchSession(session)
+
 	return nil
 }
 
@@ -100,6 +102,8 @@ func TriggerConsultAgent(projectID string, query string) (*agent.Session, error)
 	session := agent.DefaultManager.CreateSession(agent.RoleConsult, projectID, ctx, "project_info")
 	log.Printf("[Consult] Created session %s for project %s", session.ID, projectID)
 
+	agent.DispatchSession(session)
+
 	return session, nil
 }
 
@@ -108,8 +112,10 @@ func TriggerAssessAgent(projectID string, projectPath string) (*agent.Session, e
 		ProjectPath: projectPath,
 	}
 
-	session := agent.DefaultManager.CreateSession(agent.RoleAssess, projectID, ctx, "project_import")
-	log.Printf("[Assess] Created session %s for project %s", session.ID, projectID)
+session := agent.DefaultManager.CreateSession(agent.RoleAssess, projectID, ctx, "project_import")
+	log.Printf("[Assess] Created session %s for project %s", session.ID, projectPath)
+
+	agent.DispatchSession(session)
 
 	return session, nil
 }

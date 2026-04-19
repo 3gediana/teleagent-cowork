@@ -3,20 +3,22 @@ package agent
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"text/template"
 
 	"github.com/a3c/platform/internal/model"
 )
 
 type Session struct {
-	ID           string
-	Role         Role
-	ProjectID    string
-	ChangeID     string
-	TriggerReason string
-	Context      *SessionContext
-	Status       string // pending, running, completed, failed
-	Output       string
+	ID                string
+	Role              Role
+	ProjectID         string
+	ChangeID          string
+	TriggerReason     string
+	Context           *SessionContext
+	Status            string // pending, running, completed, failed
+	Output            string
+	OpenCodeSessionID string // opencode serve session ID
 }
 
 type SessionContext struct {
@@ -48,6 +50,26 @@ type AgentManager struct {
 
 var DefaultManager = &AgentManager{
 	sessions: make(map[string]*Session),
+}
+
+type SessionDispatcher func(session *Session) error
+
+var dispatcher SessionDispatcher
+
+func RegisterDispatcher(d SessionDispatcher) {
+	dispatcher = d
+}
+
+func DispatchSession(session *Session) {
+	if dispatcher != nil {
+		go func() {
+			if err := dispatcher(session); err != nil {
+				log.Printf("[Agent] Failed to dispatch session %s: %v", session.ID, err)
+			}
+		}()
+	} else {
+		log.Printf("[Agent] No dispatcher registered, session %s stays pending", session.ID)
+	}
 }
 
 func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionContext, trigger string) *Session {

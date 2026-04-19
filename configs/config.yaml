@@ -18,3 +18,9 @@ redis:
 
 git:
   repo_path: "./data/repos"
+
+opencode:
+  serve_url: "http://127.0.0.1:4096"
+  project_path: "D:\\claude-code\\coai"
+  default_model_provider: "minimax-coding-plan"
+  default_model_id: "MiniMax-M2.7"

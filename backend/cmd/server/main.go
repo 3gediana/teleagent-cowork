@@ -1,14 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/handler"
 	"github.com/a3c/platform/internal/middleware"
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/opencode"
+	"github.com/a3c/platform/internal/service"
 )
 
 func main() {
@@ -21,6 +25,70 @@ func main() {
 	if err := model.InitRedis(&cfg.Redis); err != nil {
 		log.Fatalf("Redis init failed: %v", err)
 	}
+
+	opencode.InitScheduler(cfg.OpenCode)
+
+	agent.RegisterDispatcher(func(session *agent.Session) error {
+		return opencode.DefaultScheduler.Dispatch(session)
+	})
+
+	opencode.RegisterToolCallHandler(func(sessionID string, changeID string, projectID string, toolName string, args map[string]interface{}) {
+		switch toolName {
+		case "audit_output":
+			level, _ := args["level"].(string)
+			var issues []service.AuditIssue
+			if raw, ok := args["issues"]; ok {
+				if b, err := json.Marshal(raw); err == nil {
+					json.Unmarshal(b, &issues)
+				}
+			}
+			rejectReason, _ := args["reject_reason"].(string)
+			result := &service.AuditResult{
+				Level:        level,
+				Issues:       issues,
+				RejectReason: rejectReason,
+			}
+			if err := service.ProcessAuditOutput(changeID, result); err != nil {
+				log.Printf("[ToolHandler] audit_output error: %v", err)
+			}
+		case "fix_output":
+			action, _ := args["action"].(string)
+			fixed, _ := args["fixed"].(bool)
+			delegateTo, _ := args["delegate_to"].(string)
+			rejectReason, _ := args["reject_reason"].(string)
+			result := &service.FixResult{
+				Action:       action,
+				Fixed:        fixed,
+				DelegateTo:   delegateTo,
+				RejectReason: rejectReason,
+			}
+			if err := service.ProcessFixOutput(changeID, result); err != nil {
+				log.Printf("[ToolHandler] fix_output error: %v", err)
+			}
+		case "audit2_output":
+			resultStr, _ := args["result"].(string)
+			rejectReason, _ := args["reject_reason"].(string)
+			result := &service.Audit2Result{
+				Result:        resultStr,
+				RejectReason: rejectReason,
+			}
+			if err := service.ProcessAudit2Output(changeID, result); err != nil {
+				log.Printf("[ToolHandler] audit2_output error: %v", err)
+			}
+		case "create_task":
+			name, _ := args["name"].(string)
+			priority, _ := args["priority"].(string)
+			if priority == "" {
+				priority = "medium"
+			}
+			log.Printf("[ToolHandler] create_task: project=%s name=%s priority=%s", projectID, name, priority)
+		case "assess_output":
+			content, _ := args["content"].(string)
+			log.Printf("[ToolHandler] assess_output received, length=%d", len(content))
+		default:
+			log.Printf("[ToolHandler] Unknown tool: %s", toolName)
+		}
+	})
 
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.Default()

@@ -94,6 +94,8 @@ func StartAuditWorkflow(changeID string) error {
 
 	log.Printf("[Audit] Created session %s for change %s, role=audit_1", session.ID, changeID)
 
+	agent.DispatchSession(session)
+
 	return nil
 }
 
@@ -174,6 +176,8 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 
 		log.Printf("[Audit] Change %s needs fix (L1), session %s", changeID, session.ID)
 
+		agent.DispatchSession(session)
+
 	case "L2":
 		change.Status = "rejected"
 		change.AuditLevel = &result.Level
@@ -233,6 +237,8 @@ func ProcessFixOutput(changeID string, result *FixResult) error {
 		session := agent.DefaultManager.CreateSession(agent.RoleAudit2, change.ProjectID, ctx, "re_audit")
 		session.ChangeID = changeID
 		log.Printf("[Audit] Change %s delegated to audit_2, session %s", changeID, session.ID)
+
+		agent.DispatchSession(session)
 
 	case "reject":
 		change.Status = "rejected"

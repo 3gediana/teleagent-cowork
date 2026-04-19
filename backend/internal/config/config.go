@@ -8,10 +8,11 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Git      GitConfig      `yaml:"git"`
+	Server   ServerConfig    `yaml:"server"`
+	Database DatabaseConfig   `yaml:"database"`
+	Redis    RedisConfig      `yaml:"redis"`
+	Git      GitConfig        `yaml:"git"`
+	OpenCode OpenCodeConfig   `yaml:"opencode"`
 }
 
 type ServerConfig struct {
@@ -37,6 +38,13 @@ type RedisConfig struct {
 
 type GitConfig struct {
 	RepoPath string `yaml:"repo_path"` 
+}
+
+type OpenCodeConfig struct {
+	ServeURL          string `yaml:"serve_url"`
+	ProjectPath       string `yaml:"project_path"`
+	DefaultModelProvider string `yaml:"default_model_provider"`
+	DefaultModelID    string `yaml:"default_model_id"`
 }
 
 func Load(path string) *Config {
