@@ -1,31 +1,69 @@
-# A3C 平台 - 项目设计文档
+# A3C - Agent Coordination Platform
 
-> 本文档整合所有讨论结果，作为项目的核心设计参考。
-> 项目定位：**个人项目**，但功能齐全（5-10万行代码规模）
+Agent协作协调平台MVP，支持看板管理、MCP远程连接、自动版本追踪。
 
----
+## 快速开始
 
+### 环境要求
 
-## 文档导航
+- Go 1.22+
+- Node.js 18+
+- MySQL 8.0+
+- Redis 7+
 
-### 第一阶段：MVP 核心协作流 (docs/phase1)
-- [1. 项目概述](docs/phase1/01_overview.md)
-  - 项目目的、效果预期、开发规划
-- [2. 架构设计](docs/phase1/02_architecture.md)
-  - 技术突破、系统架构、核心功能模块
-- [3. MCP 工具集](docs/phase1/03_mcp_tools.md)
-  - 用户端工具详细定义、平台端 Agent 交互
-- [4. 消息与状态](docs/phase1/04_message_and_state.md)
-  - 内容分块、广播推送机制
-- [5. 数据模型](docs/phase1/05_data_model.md)
-  - MySQL 表结构、Redis 缓存设计
-- [6. 运维监控](docs/phase1/06_operations.md)
-  - 监控维度、告警规则
-- [7. 待讨论事项](docs/phase1/07_discussions.md)
-  - 目前遗留的开放性问题
-- [8. 附录与日志](docs/phase1/08_appendix_and_changelog.md)
-  - 参考文档、更新历史
+### 启动开发环境
 
-### 第二阶段：Git 原生分支流 (docs/phase2)
-- [1. AI 分支工作流](docs/phase2/01_ai_branching_workflow.md)
-  - 分支沙盒概念、PR 机制、工具扩展、Agent 职责进阶
+```bash
+# 启动MySQL和Redis
+docker-compose up -d
+
+# 启动后端
+cd backend
+go mod tidy
+go run cmd/server/main.go
+
+# 启动前端（新终端）
+cd frontend
+npm install
+npm run dev
+```
+
+### 访问地址
+
+- 前端看板: http://localhost:33303
+- 后端API: http://localhost:3303
+- 健康检查: http://localhost:3303/health
+
+## 项目结构
+
+```
+coai/
+├── backend/              # Go后端
+│   ├── cmd/server/       # 入口
+│   ├── internal/         # 核心代码
+│   │   ├── config/       # 配置
+│   │   ├── handler/      # HTTP处理器
+│   │   ├── model/        # 数据模型
+│   │   ├── repository/   # 数据访问
+│   │   └── service/      # 业务逻辑
+│   └── pkg/              # 公共包
+│       ├── logger/       # 日志
+│       └── response/     # 响应封装
+├── frontend/             # React前端
+│   ├── src/
+│   │   ├── api/          # API客户端
+│   │   ├── components/   # 组件
+│   │   ├── hooks/        # Hooks
+│   │   ├── pages/        # 页面
+│   │   ├── stores/       # 状态管理
+│   │   └── utils/        # 工具函数
+│   └── public/           # 静态资源
+├── configs/              # 配置文件
+└── docs/                 # 设计文档
+```
+
+## 技术栈
+
+- **后端**: Go + Gin + GORM + MySQL + Redis
+- **前端**: React + TypeScript + Vite + Tailwind + Zustand
+- **MCP**: TypeScript + @modelcontextprotocol/sdk
