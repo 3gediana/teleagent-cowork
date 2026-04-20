@@ -1,6 +1,8 @@
 server:
-  port: 3303
+  port: 3003
   mode: debug
+
+data_dir: "D:/claude-code/coai/platform/data"
 
 database:
   host: localhost
