@@ -84,6 +84,18 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 		data["version"] = version.Content
 	}
 
+	// Add current agent's claimed task
+	var myTask model.Task
+	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID.(string)).First(&myTask).Error; err == nil {
+		data["my_task"] = gin.H{
+			"id":          myTask.ID,
+			"name":        myTask.Name,
+			"description": myTask.Description,
+			"priority":    myTask.Priority,
+			"status":      myTask.Status,
+		}
+	}
+
 	c.JSON(200, gin.H{"success": true, "data": data})
 }
 

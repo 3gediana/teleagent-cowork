@@ -69,12 +69,12 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	}
 
 	changeID := model.GenerateID("chg")
-	pendingDir := filepath.Join("data", "pending", projectID, changeID)
+	pendingDir := filepath.Join(service.DataPath, "..", "pending", projectID, changeID)
 	os.MkdirAll(pendingDir, 0755)
 
 	modifiedFiles := make([]model.ChangeFileEntry, 0)
 	newFiles := make([]string, 0)
-	repoPath := filepath.Join("data", "projects", projectID, "repo")
+	repoPath := filepath.Join(service.DataPath, projectID, "repo")
 
 	for _, w := range req.Writes {
 		if w.Content == "" {
@@ -101,6 +101,23 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		os.WriteFile(pendingDelPath, []byte{}, 0644)
 	}
 
+	// Build diff content for audit
+	diffMap := make(map[string]interface{})
+	for _, w := range req.Writes {
+		if w.Content != "" {
+			diffMap[w.Path] = map[string]interface{}{
+				"status":  "new",
+				"content": w.Content,
+			}
+		}
+	}
+	for _, d := range req.Deletes {
+		diffMap[d] = map[string]interface{}{
+			"status": "deleted",
+		}
+	}
+	diffJSON, _ := json.Marshal(diffMap)
+
 	modifiedFilesJSON, _ := json.Marshal(modifiedFiles)
 	newFilesJSON, _ := json.Marshal(newFiles)
 	deletedFilesJSON, _ := json.Marshal(req.Deletes)
@@ -114,7 +131,7 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		ModifiedFiles: string(modifiedFilesJSON),
 		NewFiles:      string(newFilesJSON),
 		DeletedFiles:  string(deletedFilesJSON),
-		Diff:          "{}",
+		Diff:          string(diffJSON),
 		Description:   req.Description,
 		Status:        "pending",
 	}
@@ -124,14 +141,28 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	// Trigger audit workflow asynchronously
-	go service.StartAuditWorkflow(changeID)
+	// Trigger audit workflow and wait for result
+	result, err := service.StartAuditWorkflowAndWait(changeID, 120*time.Second)
+	if err != nil {
+		c.JSON(200, gin.H{
+			"success": true,
+			"data": gin.H{
+				"change_id": changeID,
+				"status":    "pending",
+				"message":   "Audit timeout or error, check status later",
+			},
+		})
+		return
+	}
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"change_id": changeID,
-			"message":   "Submitted, waiting for audit result",
+			"change_id":    changeID,
+			"status":       result.Status,
+			"audit_level":  result.AuditLevel,
+			"audit_reason": result.AuditReason,
+			"message":      "Audit completed",
 		},
 	})
 }

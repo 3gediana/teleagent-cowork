@@ -61,6 +61,23 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 		return
 	}
 
+	// Check if agent already has a claimed task
+	var existingTask model.Task
+	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID.(string)).First(&existingTask).Error; err == nil {
+		c.JSON(409, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "AGENT_HAS_TASK",
+				"message": "You already have a claimed task",
+			},
+			"data": gin.H{
+				"claimed_task_id":   existingTask.ID,
+				"claimed_task_name": existingTask.Name,
+			},
+		})
+		return
+	}
+
 	var task model.Task
 	if err := model.DB.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
 		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
@@ -84,11 +101,11 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"id":          task.ID,
-			"name":        task.Name,
-			"description": task.Description,
+			"id":           task.ID,
+			"name":         task.Name,
+			"description":  task.Description,
 			"milestone_id": task.MilestoneID,
-			"priority":    task.Priority,
+			"priority":     task.Priority,
 		},
 	})
 }

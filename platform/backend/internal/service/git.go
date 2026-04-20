@@ -13,11 +13,7 @@ import (
 )
 
 func getRepoPath(projectID string) string {
-	project, _ := repo.GetProjectByID(projectID)
-	if project != nil && project.GithubRepo != "" {
-		return filepath.Join("data", "projects", projectID, "repo")
-	}
-	return filepath.Join("data", "projects", projectID, "repo")
+	return filepath.Join(DataPath, projectID, "repo")
 }
 
 func runGit(projectID string, args ...string) (string, error) {

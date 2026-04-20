@@ -1,6 +1,6 @@
 # A3C 平台开发状态
 
-> 更新时间：2026-04-20 21:35
+> 更新时间：2026-04-20 22:28
 
 ---
 
@@ -15,14 +15,31 @@
 | **维护 Agent** | create_task | Dashboard input → 创建任务 → 写 DB + 文件 |
 | **咨询 Agent** | project/info | 回答项目里程碑和任务问题 |
 | **审核 Agent** | audit_1 | 审核改动提交，返回 L0/L1/L2 |
+| **修复 Agent** | fix | L1 级自动修复 |
 | **数据持久化** | MySQL + 文件 | 任务同时写数据库和 TASKS.md |
+| **MCP 客户端** | 8个工具 | 全部测试通过 |
+| **任务限制** | 一Agent一任务 | 领取前检查是否已有任务 |
+| **状态同步** | my_task 字段 | status_sync 返回当前已领取任务 |
+| **同步审核** | 等待审核结果 | change_submit 阻塞等待审核完成 |
+| **Git 能力** | 版本管理 | init, commit, tag, diff, rollback |
+| **版本回滚** | Rollback API | 可回滚到任意版本 |
+| **SSE 广播** | 实时推送 | VERSION_ROLLBACK, AGENT_ONLINE 事件 |
+| **项目隔离** | 数据隔离 | 多项目数据独立存储 |
 
 ### 🔧 本次修复的问题
 
 1. **stdin 传消息** - `--file` 改为 stdin，解决 "must provide a message" 错误
 2. **绝对路径配置** - `data_dir` 改为绝对路径，解决文件写入失败
 3. **create_task 写数据库** - 任务可被 task/list API 查询
-4. **change submit 触发审核** - 添加 `StartAuditWorkflow` 异步调用
+4. **change submit 触发审核** - 添加 `StartAuditWorkflowAndWait` 同步等待
+5. **任务领取限制** - 一个 Agent 只能领取一个任务
+6. **status_sync 增强** - 添加 my_task 字段返回已领取任务
+7. **L2 拒绝后重置** - 10分钟无心跳/无重提交则重置任务状态
+8. **MCP timeout 增加** - change_submit timeout 改为 2 分钟
+9. **Git 路径修复** - 使用 DataPath 而非相对路径
+10. **Diff 字段填充** - 提交时填充文件内容供审核使用
+11. **pending 目录路径** - 修复为绝对路径
+12. **任务自动完成** - L0 审核通过后自动完成任务
 
 ---
 
@@ -47,67 +64,62 @@ POST /project/info (query=...)
   → 返回文本回答
 ```
 
-### 流程 3：改动审核
+### 流程 3：改动审核（同步）
 ```
 POST /task/claim → POST /change/submit
-  → StartAuditWorkflow (异步)
+  → StartAuditWorkflowAndWait (同步等待)
   → opencode run (agent=audit_1)
   → 审核文件内容
   → audit_output (L0/L1/L2)
-  → 更新 change 状态 (approved/pending_fix/rejected)
+  → L0: approved, L1: pending_fix + fix agent, L2: rejected
+  → 返回审核结果给 MCP 客户端
+```
+
+### 流程 4：MCP 客户端测试
+```
+1. a3c_platform action=login → 登录成功
+2. select_project project_id=... → 选择项目
+3. status_sync → 返回任务列表 + my_task
+4. task action=claim → 领取任务（有任务则拒绝）
+5. change_submit → 等待审核结果返回
+```
+
+### 流程 5：Git 版本管理
+```
+1. GitInit → 初始化项目 repo
+2. GitAddAndCommit → 提交改动
+3. GitTagVersion → 创建版本标签
+4. GitListVersions → 获取版本列表
+5. GitRevertToVersion → 回滚到指定版本
 ```
 
 ---
 
-## 三、待办事项
+## 三、测试结果汇总
 
-### 🔴 高优先级
+### ✅ 已测试通过
 
-- [ ] **MCP 客户端对接测试**
-  - MCP Server 是否能连接后端 API
-  - 7 个 MCP 工具是否正常工作
-  - 轮询和心跳机制是否生效
+| 测试项 | 结果 | 备注 |
+|--------|------|------|
+| MCP 客户端登录 | ✅ | a3c_platform |
+| MCP 选择项目 | ✅ | select_project |
+| MCP 状态同步 | ✅ | status_sync 返回 my_task |
+| MCP 任务领取 | ✅ | 已有任务时拒绝 |
+| MCP 提交改动 | ✅ | 同步等待审核结果 |
+| L0 审核通过 | ✅ | 干净代码直接批准 |
+| L1 审核修复 | ✅ | 触发 fix agent |
+| L2 审核拒绝 | ✅ | 返回拒绝原因 |
+| Git 版本列表 | ✅ | /version/list |
+| Git 版本回滚 | ✅ | /version/rollback |
+| SSE 广播 | ✅ | VERSION_ROLLBACK 事件 |
+| 项目隔离 | ✅ | 新项目无任务 |
 
-- [ ] **数据流通性验证**
-  - 前端是否能读取后端数据
-  - SSE 事件是否正确推送
-  - 文件同步是否工作
+### 📋 待测试项
 
-- [ ] **项目隔离验证**
-  - 多项目数据是否隔离
-  - 文件锁是否防止冲突
-  - 任务领取是否互斥
-
-### 🟡 中优先级
-
-- [ ] **广播机制测试**
-  - SSE 连接是否稳定
-  - 广播事件是否正确分发
-  - 离线消息是否缓存
-
-- [ ] **前端可用性测试**
-  - Dashboard 页面是否正常显示
-  - 任务列表是否实时更新
-  - 对话交互是否流畅
-
-- [ ] **修复 Agent 测试**
-  - L1 级审核是否触发修复 Agent
-  - 修复后是否正确合并
-
-### 🟢 低优先级
-
-- [ ] **评估 Agent 测试**
-  - 项目导入时是否触发
-  - assess_output 是否正确
-
-- [ ] **里程碑切换测试**
-  - 所有任务完成时是否提议切换
-  - 归档和新建流程是否正确
-
-- [ ] **Git 操作测试**
-  - commit 是否正确执行
-  - 版本号是否正确递增
-  - rollback 是否工作
+- [ ] 前端可用性测试
+- [ ] Audit2 Agent 测试
+- [ ] 里程碑切换测试
+- [ ] 评估 Agent 测试
 
 ---
 

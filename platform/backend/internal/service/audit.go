@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/a3c/platform/internal/agent"
@@ -35,6 +36,57 @@ type FixResult struct {
 type Audit2Result struct {
 	Result       string `json:"result"`
 	RejectReason string `json:"reject_reason,omitempty"`
+}
+
+// pendingChanges tracks change IDs waiting for audit completion
+var pendingChanges = make(map[string]chan *AuditCompletion)
+var pendingChangesMutex sync.RWMutex
+
+type AuditCompletion struct {
+	Status      string
+	AuditLevel  string
+	AuditReason string
+}
+
+func StartAuditWorkflowAndWait(changeID string, timeout time.Duration) (*AuditCompletion, error) {
+	// Create completion channel
+	done := make(chan *AuditCompletion, 1)
+	pendingChangesMutex.Lock()
+	pendingChanges[changeID] = done
+	pendingChangesMutex.Unlock()
+
+	defer func() {
+		pendingChangesMutex.Lock()
+		delete(pendingChanges, changeID)
+		pendingChangesMutex.Unlock()
+	}()
+
+	// Start audit workflow
+	if err := StartAuditWorkflow(changeID); err != nil {
+		return nil, err
+	}
+
+	// Wait for completion or timeout
+	select {
+	case result := <-done:
+		return result, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("audit timeout")
+	}
+}
+
+func notifyAuditCompletion(changeID string, status, level, reason string) {
+	pendingChangesMutex.RLock()
+	done, ok := pendingChanges[changeID]
+	pendingChangesMutex.RUnlock()
+
+	if ok {
+		done <- &AuditCompletion{
+			Status:      status,
+			AuditLevel:  level,
+			AuditReason: reason,
+		}
+	}
 }
 
 func StartAuditWorkflow(changeID string) error {
@@ -112,6 +164,11 @@ func approveChange(change *model.Change) error {
 		model.DB.Where("id = ?", *change.TaskID).First(&task)
 		taskName = task.Name
 		taskDesc = task.Description
+		// Auto-complete task when change is approved
+		task.Status = "completed"
+		task.CompletedAt = &now
+		model.DB.Save(&task)
+		log.Printf("[Audit] Task %s auto-completed (change approved)", task.ID)
 	}
 
 	GitAddAndCommit(change.ProjectID, taskName, taskDesc)
@@ -145,12 +202,14 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		}
 		change.AuditLevel = &result.Level
 		model.DB.Save(&change)
+		notifyAuditCompletion(changeID, "approved", "L0", "")
 
 	case "L1":
 		change.Status = "pending_fix"
 		change.AuditLevel = &result.Level
 		change.AuditReason = fmt.Sprintf("L1 issues: %d issues found", len(result.Issues))
 		model.DB.Save(&change)
+		notifyAuditCompletion(changeID, "pending_fix", "L1", change.AuditReason)
 
 		issuesJSON, _ := json.Marshal(result.Issues)
 
@@ -176,6 +235,40 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.AuditLevel = &result.Level
 		change.AuditReason = result.RejectReason
 		model.DB.Save(&change)
+
+		// Start 10-minute timer for task reclamation (requires heartbeat or resubmit)
+		go func() {
+			taskID := *change.TaskID
+			agentID := change.AgentID
+			for i := 0; i < 10; i++ {
+				time.Sleep(1 * time.Minute)
+				// Check for heartbeat or new submission each minute
+				var a model.Agent
+				if model.DB.Where("id = ?", agentID).First(&a).Error == nil {
+					lastHeartbeat := a.LastHeartbeat
+					if lastHeartbeat != nil && time.Since(*lastHeartbeat) < 2*time.Minute {
+						continue // Agent is active, keep waiting
+					}
+				}
+				// Check for new change submission from same agent for same task
+				var newerChange model.Change
+				if model.DB.Where("task_id = ? AND agent_id = ? AND created_at > ?", taskID, agentID, change.CreatedAt).First(&newerChange).Error == nil {
+					continue // Agent resubmitted, keep waiting
+				}
+			}
+			// 10 minutes passed without heartbeat or resubmit, reset task
+			var task model.Task
+			if err := model.DB.Where("id = ?", taskID).First(&task).Error; err == nil {
+				if task.Status == "claimed" && task.AssigneeID != nil && *task.AssigneeID == agentID {
+					task.Status = "pending"
+					task.AssigneeID = nil
+					model.DB.Save(&task)
+					log.Printf("[Audit] Task %s reset to pending: no heartbeat/resubmit for 10 minutes after rejection", task.ID)
+				}
+			}
+		}()
+
+		notifyAuditCompletion(changeID, "rejected", "L2", result.RejectReason)
 
 		log.Printf("[Audit] Change %s rejected (L2)", changeID)
 	}
