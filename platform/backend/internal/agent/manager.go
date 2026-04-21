@@ -31,6 +31,7 @@ type SessionContext struct {
 	InputContent   string
 	ProjectPath    string
 	TriggerReason  string
+	LockList       string
 }
 
 type ChangeContext struct {
@@ -137,6 +138,7 @@ func BuildPrompt(role Role, ctx *SessionContext) (string, error) {
 	data["InputContent"] = ctx.InputContent
 	data["ProjectPath"] = ctx.ProjectPath
 	data["TriggerReason"] = ctx.TriggerReason
+	data["LockList"] = ctx.LockList
 
 	if ctx.ChangeInfo != nil {
 		data["ChangeID"] = ctx.ChangeInfo.ChangeID

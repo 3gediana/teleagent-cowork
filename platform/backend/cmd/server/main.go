@@ -84,6 +84,7 @@ func main() {
 		auth.POST("/filelock/acquire", lockHandler.Acquire)
 		auth.POST("/filelock/release", lockHandler.Release)
 		auth.POST("/filelock/renew", lockHandler.Renew)
+		auth.POST("/filelock/check", lockHandler.Check)
 
 		auth.POST("/change/submit", changeHandler.Submit)
 		auth.GET("/change/list", changeHandler.List)

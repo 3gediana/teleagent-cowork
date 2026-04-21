@@ -191,6 +191,59 @@ func (h *FileLockHandler) Release(c *gin.Context) {
 	})
 }
 
+func (h *FileLockHandler) Check(c *gin.Context) {
+	projectID := c.Query("project_id")
+
+	var req struct {
+		Files []string `json:"files" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	var locks []model.FileLock
+	model.DB.Where("project_id = ? AND released_at IS NULL AND expires_at > ?", projectID, time.Now()).Find(&locks)
+
+	// Build lock map: file -> lock info
+	lockMap := make(map[string]gin.H)
+	for _, lock := range locks {
+		var files []string
+		json.Unmarshal([]byte(lock.Files), &files)
+		for _, f := range files {
+			lockMap[f] = gin.H{
+				"locked_by":   lockGetAgentName(lock.AgentID),
+				"task_id":     lock.TaskID,
+				"expires_at":  lock.ExpiresAt.Format(time.RFC3339),
+				"expires_in":  int(time.Until(lock.ExpiresAt).Seconds()),
+			}
+		}
+	}
+
+	result := make([]gin.H, 0, len(req.Files))
+	for _, f := range req.Files {
+		if lockInfo, ok := lockMap[f]; ok {
+			result = append(result, gin.H{
+				"file":    f,
+				"locked":  true,
+				"details": lockInfo,
+			})
+		} else {
+			result = append(result, gin.H{
+				"file":   f,
+				"locked": false,
+			})
+		}
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"files": result,
+		},
+	})
+}
+
 func (h *FileLockHandler) Renew(c *gin.Context) {
 	agentID, _ := c.Get("agent_id")
 	projectID := c.Query("project_id")

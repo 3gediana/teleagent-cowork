@@ -47,6 +47,7 @@ export interface ApiChange {
 }
 
 export interface DashboardState {
+  name?: string
   direction?: string
   milestone?: string
   milestone_id?: string

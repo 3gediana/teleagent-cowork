@@ -13,6 +13,7 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 	milestone, _ := repo.GetCurrentMilestone(projectID)
 	version, _ := repo.GetContentBlock(projectID, "version")
 	tasks, _ := repo.GetTasksByProject(projectID)
+	locks, _ := repo.GetLocksByProject(projectID)
 
 	directionContent := ""
 	if direction != nil {
@@ -20,7 +21,7 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 	}
 	milestoneContent := ""
 	if milestone != nil {
-		milestoneContent = milestone.Name
+		milestoneContent = milestone.Name + "\n" + milestone.Description
 	}
 	versionContent := "v1.0"
 	if version != nil {
@@ -45,6 +46,16 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 		}
 	}
 
+	lockList := ""
+	for _, l := range locks {
+		agentName := l.AgentID
+		var a model.Agent
+		if model.DB.Where("id = ?", l.AgentID).First(&a).Error == nil {
+			agentName = a.Name
+		}
+		lockList += "- " + agentName + " locked files for: " + l.Reason + "\n"
+	}
+
 	ctx := &agent.SessionContext{
 		DirectionBlock: directionContent,
 		MilestoneBlock: milestoneContent,
@@ -52,6 +63,7 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 		Version:       versionContent,
 		InputContent:  inputContent,
 		TriggerReason: trigger,
+		LockList:      lockList,
 	}
 
 	session := agent.DefaultManager.CreateSession(agent.RoleMaintain, projectID, ctx, trigger)
@@ -75,7 +87,7 @@ func TriggerConsultAgent(projectID string, query string) (*agent.Session, error)
 	}
 	milestoneContent := ""
 	if milestone != nil {
-		milestoneContent = milestone.Name
+		milestoneContent = milestone.Name + "\n" + milestone.Description
 	}
 	versionContent := "v1.0"
 	if version != nil {
@@ -83,14 +95,34 @@ func TriggerConsultAgent(projectID string, query string) (*agent.Session, error)
 	}
 
 	taskList := ""
-	for _, t := range tasks {
-		taskList += "- " + t.Name + " [" + t.Status + "]\n"
+	for i, t := range tasks {
+		assignee := "unassigned"
+		if t.AssigneeID != nil {
+			var a model.Agent
+			if model.DB.Where("id = ?", *t.AssigneeID).First(&a).Error == nil {
+				assignee = a.Name
+			}
+		}
+		taskList += "- " + t.Name + " [" + t.Status + "] (priority: " + t.Priority + ", assignee: " + assignee + ")"
+		if t.Description != "" {
+			taskList += " - " + t.Description
+		}
+		if i < len(tasks)-1 {
+			taskList += "\n"
+		}
 	}
 
 	lockList := ""
 	for _, l := range locks {
-		lockList += "- " + l.AgentID + ": " + l.Reason + "\n"
+		agentName := l.AgentID
+		var a model.Agent
+		if model.DB.Where("id = ?", l.AgentID).First(&a).Error == nil {
+			agentName = a.Name
+		}
+		lockList += "- " + agentName + " locked files for: " + l.Reason + "\n"
 	}
+
+	repoPath := DataPath + "/" + projectID + "/repo"
 
 	ctx := &agent.SessionContext{
 		DirectionBlock: directionContent,
@@ -99,6 +131,8 @@ func TriggerConsultAgent(projectID string, query string) (*agent.Session, error)
 		Version:       versionContent,
 		InputContent:   query,
 		TriggerReason: "project_info",
+		LockList:      lockList,
+		ProjectPath:   repoPath,
 	}
 
 	session := agent.DefaultManager.CreateSession(agent.RoleConsult, projectID, ctx, "project_info")

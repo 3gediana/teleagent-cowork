@@ -11,12 +11,12 @@ import (
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
+
+		// No auth header = human user, allow through with human flag
 		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"error":   gin.H{"code": "AUTH_INVALID_KEY", "message": "Missing authorization header"},
-			})
-			c.Abort()
+			c.Set("is_human", true)
+			c.Set("agent_id", "human")
+			c.Next()
 			return
 		}
 
@@ -50,6 +50,7 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		c.Set("agent", agent)
 		c.Set("agent_id", agent.ID)
+		c.Set("is_human", false)
 		c.Next()
 	}
 }

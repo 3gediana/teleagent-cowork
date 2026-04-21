@@ -40,6 +40,21 @@ interface Agent {
   current_task: string | null
 }
 
+export interface BroadcastEvent {
+  id: string
+  type: string
+  payload: Record<string, unknown>
+  timestamp: number
+}
+
+export interface ActivityItem {
+  id: string
+  agentName: string
+  action: string
+  target?: string
+  timestamp: number
+}
+
 interface ChatMessage {
   id: string
   role: 'human' | 'agent' | 'system'
@@ -64,6 +79,9 @@ interface AppState {
   accessKey: string | null
   pendingInput: PendingInput | null
   sessionId: string | null
+  broadcastEvents: BroadcastEvent[]
+  activities: ActivityItem[]
+  sidebarCollapsed: boolean
 
   setProject: (p: ProjectState) => void
   setTargetBlock: (b: 'direction' | 'milestone' | 'task') => void
@@ -75,6 +93,10 @@ interface AppState {
   setSelectedProjectId: (id: string | null) => void
   setPendingInput: (p: PendingInput | null) => void
   setSessionId: (id: string | null) => void
+  addBroadcastEvent: (e: BroadcastEvent) => void
+  clearBroadcastEvents: () => void
+  addActivity: (a: ActivityItem) => void
+  toggleSidebar: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -87,6 +109,9 @@ export const useAppStore = create<AppState>((set) => ({
   accessKey: localStorage.getItem('a3c_access_key'),
   pendingInput: null,
   sessionId: null,
+  broadcastEvents: [],
+  activities: [],
+  sidebarCollapsed: false,
 
   setProject: (p) => set({ project: p }),
   setTargetBlock: (b) => set({ targetBlock: b }),
@@ -102,4 +127,8 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedProjectId: (id) => set({ selectedProjectId: id }),
   setPendingInput: (p) => set({ pendingInput: p }),
   setSessionId: (id) => set({ sessionId: id }),
+  addBroadcastEvent: (e) => set((s) => ({ broadcastEvents: [e, ...s.broadcastEvents].slice(0, 50) })),
+  clearBroadcastEvents: () => set({ broadcastEvents: [] }),
+  addActivity: (a) => set((s) => ({ activities: [a, ...s.activities].slice(0, 100) })),
+  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 }))

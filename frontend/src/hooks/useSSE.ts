@@ -1,11 +1,32 @@
-import { useEffect, useRef, useCallback } from 'react'
-import { useAppStore } from '../stores/appStore'
+import { useEffect, useRef, useCallback, useState } from 'react'
+import { useAppStore, BroadcastEvent, ActivityItem } from '../stores/appStore'
 import { dashboardApi } from '../api/endpoints'
 
 export function useSSE(projectId: string | null) {
   const esRef = useRef<EventSource | null>(null)
   const setProject = useAppStore((s) => s.setProject)
   const addChatMessage = useAppStore((s) => s.addChatMessage)
+  const addBroadcastEvent = useAppStore((s) => s.addBroadcastEvent)
+  const addActivity = useAppStore((s) => s.addActivity)
+  const [isConnected, setIsConnected] = useState(false)
+
+  const refreshState = useCallback(async () => {
+    if (!projectId) return
+    const res = await dashboardApi.getState(projectId)
+    if (res.success) {
+      setProject({
+        id: projectId,
+        name: res.data.name || 'Untitled Project',
+        direction: res.data.direction || null,
+        milestone: res.data.milestone || null,
+        milestoneId: res.data.milestone_id || null,
+        version: res.data.version || 'v1.0',
+        tasks: res.data.tasks || [],
+        locks: res.data.locks || [],
+        agents: res.data.agents || [],
+      })
+    }
+  }, [projectId, setProject])
 
   const connect = useCallback(() => {
     if (!projectId) return
@@ -15,176 +36,81 @@ export function useSSE(projectId: string | null) {
     const es = new EventSource(url)
     esRef.current = es
 
+    es.onopen = () => {
+      console.log('[SSE] Connected')
+      setIsConnected(true)
+    }
+
     const handleEvent = (eventType: string, e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
         console.log(`[SSE] ${eventType}:`, data)
 
+        const event: BroadcastEvent = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          type: eventType,
+          payload: data.payload || {},
+          timestamp: Date.now(),
+        }
+        addBroadcastEvent(event)
+
+        const agentName = data.payload?.agent_name || 'System'
+        const action = getActionText(eventType)
+        const activity: ActivityItem = {
+          id: event.id,
+          agentName: String(agentName),
+          action,
+          target: getTargetText(eventType, data.payload),
+          timestamp: Date.now(),
+        }
+        addActivity(activity)
+
         switch (eventType) {
           case 'DIRECTION_CHANGE':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `Direction updated: ${data.payload?.content || data.payload?.reason || 'Updated'}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
-            break
-
           case 'MILESTONE_UPDATE':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `Milestone update: ${data.payload?.content || data.payload?.reason || 'Updated'}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
-            break
-
           case 'MILESTONE_SWITCH':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `Milestone switched! New: ${data.payload?.content || ''}, Version: ${data.payload?.new_version || ''}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
-            break
-
           case 'VERSION_UPDATE':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `Version updated to ${data.payload?.content || data.payload?.new_version || ''}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
-            break
-
           case 'VERSION_ROLLBACK':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `Version rolled back to ${data.payload?.content || ''}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
-            break
-
           case 'AUDIT_RESULT':
-            addChatMessage({
-              id: Date.now().toString(),
-              role: 'system',
-              content: `[Audit] Change ${data.payload?.change_id || ''}: ${data.payload?.result || 'reviewed'}${data.payload?.new_version ? ', version: ' + data.payload.new_version : ''}`,
-              timestamp: Date.now(),
-            })
-            dashboardApi.getState(projectId).then((res: any) => {
-              if (res.success) {
-                setProject({
-                  id: projectId,
-                  name: '',
-                  direction: res.data.direction || null,
-                  milestone: res.data.milestone || null,
-                  milestoneId: res.data.milestone_id || null,
-                  version: res.data.version || 'v1.0',
-                  tasks: res.data.tasks || [],
-                  locks: res.data.locks || [],
-                  agents: res.data.agents || [],
-                })
-              }
-            })
+          case 'TASK_CLAIMED':
+          case 'TASK_COMPLETED':
+          case 'FILE_LOCKED':
+          case 'FILE_UNLOCKED':
+          case 'AGENT_JOIN':
+          case 'AGENT_LEAVE':
+            refreshState()
             break
+          default:
+            refreshState()
         }
       } catch (err) {
         console.error('[SSE] Parse error:', err)
       }
     }
 
-    const eventTypes = ['DIRECTION_CHANGE', 'MILESTONE_UPDATE', 'MILESTONE_SWITCH', 'VERSION_UPDATE', 'VERSION_ROLLBACK', 'AUDIT_RESULT']
+    const eventTypes = [
+      'DIRECTION_CHANGE', 'MILESTONE_UPDATE', 'MILESTONE_SWITCH',
+      'VERSION_UPDATE', 'VERSION_ROLLBACK', 'AUDIT_RESULT',
+      'TASK_CLAIMED', 'TASK_COMPLETED', 'FILE_LOCKED', 'FILE_UNLOCKED',
+      'AGENT_JOIN', 'AGENT_LEAVE', 'CHANGE_PENDING', 'CHANGE_APPROVED'
+    ]
     eventTypes.forEach((type) => {
       es.addEventListener(type, (e) => handleEvent(type, e))
     })
 
     es.onerror = () => {
+      console.error('[SSE] Connection error')
+      setIsConnected(false)
       es.close()
       setTimeout(connect, 5000)
     }
-  }, [projectId, setProject, addChatMessage])
+  }, [projectId, setProject, addChatMessage, addBroadcastEvent, addActivity, refreshState])
 
   const disconnect = useCallback(() => {
     if (esRef.current) {
       esRef.current.close()
       esRef.current = null
+      setIsConnected(false)
     }
   }, [])
 
@@ -197,5 +123,41 @@ export function useSSE(projectId: string | null) {
     return disconnect
   }, [projectId, connect, disconnect])
 
-  return { connect, disconnect }
+  return { connect, disconnect, refreshState, isConnected }
+}
+
+function getActionText(type: string): string {
+  const actions: Record<string, string> = {
+    DIRECTION_CHANGE: 'updated direction',
+    MILESTONE_UPDATE: 'updated milestone',
+    MILESTONE_SWITCH: 'switched milestone',
+    VERSION_UPDATE: 'created version',
+    VERSION_ROLLBACK: 'rolled back version',
+    AUDIT_RESULT: 'completed audit',
+    TASK_CLAIMED: 'claimed task',
+    TASK_COMPLETED: 'completed task',
+    FILE_LOCKED: 'locked files',
+    FILE_UNLOCKED: 'unlocked files',
+    AGENT_JOIN: 'joined project',
+    AGENT_LEAVE: 'left project',
+    CHANGE_PENDING: 'submitted change',
+    CHANGE_APPROVED: 'approved change',
+  }
+  return actions[type] || 'performed action'
+}
+
+function getTargetText(type: string, payload: Record<string, unknown>): string | undefined {
+  switch (type) {
+    case 'VERSION_UPDATE':
+    case 'VERSION_ROLLBACK':
+      return String(payload.new_version || payload.version || '')
+    case 'TASK_CLAIMED':
+    case 'TASK_COMPLETED':
+      return String(payload.task_name || payload.task_id || '')
+    case 'FILE_LOCKED':
+    case 'FILE_UNLOCKED':
+      return payload.files ? String((payload.files as string[]).join(', ')) : undefined
+    default:
+      return undefined
+  }
 }

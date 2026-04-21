@@ -86,7 +86,7 @@ async function main() {
   })
 
   server.tool('filelock', 'Acquire or release file locks', {
-    action: z.enum(['acquire', 'release']).describe('Action to perform'),
+    action: z.enum(['acquire', 'release', 'check']).describe('Action to perform'),
     task_id: z.string().optional().describe('Task ID (required for acquire)'),
     files: z.array(z.string()).optional().describe('Files to lock (for acquire) or release (optional, releases all if omitted)'),
     reason: z.string().optional().describe('Reason for locking (required for acquire)'),
@@ -99,6 +99,11 @@ async function main() {
       }
       case 'release': {
         const data = await api.releaseLock(files)
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+      }
+      case 'check': {
+        if (!files) return { content: [{ type: 'text', text: 'Error: files required for check' }] }
+        const data = await api.checkLocks(files)
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
       }
     }

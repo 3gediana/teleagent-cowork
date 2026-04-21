@@ -70,6 +70,12 @@ export class ApiClient {
     return data
   }
 
+  async checkLocks(files: string[]) {
+    const { data } = await this.client.post('/api/v1/filelock/check', { files },
+      { params: { project_id: this.project } })
+    return data
+  }
+
   async submitChange(changeData: {
     task_id: string
     description?: string
