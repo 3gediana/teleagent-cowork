@@ -79,7 +79,6 @@ func main() {
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
-	v1.POST("/auth/heartbeat", authHandler.Heartbeat)
 	v1.POST("/agent/register", authHandler.Register)
 
 	v1.POST("/project/create", projectHandler.Create)
@@ -88,6 +87,7 @@ func main() {
 
 	auth := v1.Group("", middleware.AuthMiddleware())
 	{
+		auth.POST("/auth/heartbeat", authHandler.Heartbeat)
 		auth.POST("/auth/select-project", authHandler.SelectProject)
 		auth.POST("/task/create", taskHandler.Create)
 		auth.POST("/task/claim", taskHandler.Claim)

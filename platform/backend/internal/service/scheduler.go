@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -76,7 +77,7 @@ func StartHeartbeatChecker() {
 						log.Printf("[Heartbeat] Failed to release resources for agent %s: %v", a.ID, err)
 					}
 
-					model.RDB.Del(model.DB.Statement.Context, "a3c:agent:"+a.ID+":heartbeat")
+					model.RDB.Del(context.Background(), "a3c:agent:"+a.ID+":heartbeat")
 				}
 			}
 		}

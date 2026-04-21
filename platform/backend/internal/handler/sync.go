@@ -19,8 +19,13 @@ func NewStatusHandler() *StatusHandler {
 }
 
 func (h *StatusHandler) Sync(c *gin.Context) {
-	agentID, _ := c.Get("agent_id")
-	agent, _ := repoGetAgentByID(agentID.(string))
+	agentIDRaw, _ := c.Get("agent_id")
+	agentID, ok := agentIDRaw.(string)
+	if !ok || agentID == "" || agentID == "human" {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
+		return
+	}
+	agent, _ := repoGetAgentByID(agentID)
 	if agent == nil || agent.CurrentProjectID == nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "No project selected"}})
 		return
@@ -89,7 +94,7 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 
 	// Add current agent's claimed task
 	var myTask model.Task
-	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID.(string)).First(&myTask).Error; err == nil {
+	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID).First(&myTask).Error; err == nil {
 		data["my_task"] = gin.H{
 			"id":          myTask.ID,
 			"name":        myTask.Name,
@@ -103,8 +108,13 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 }
 
 func (h *StatusHandler) Poll(c *gin.Context) {
-	agentID, _ := c.Get("agent_id")
-	agent, _ := repoGetAgentByID(agentID.(string))
+	agentIDRaw, _ := c.Get("agent_id")
+	agentID, ok := agentIDRaw.(string)
+	if !ok || agentID == "" || agentID == "human" {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
+		return
+	}
+	agent, _ := repoGetAgentByID(agentID)
 
 	now := time.Now()
 	heartbeatOk := false

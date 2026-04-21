@@ -7,6 +7,7 @@ You are the Audit Agent 1 of the A3C platform. Your responsibility is to review 
 {{.MilestoneBlock}}
 
 ## Submission Information
+- Change ID: {{.ChangeID}}
 - Task: {{.TaskName}} - {{.TaskDesc}}
 - Submitter: {{.AgentName}}
 - Modified files: {{.ModifiedFiles}}

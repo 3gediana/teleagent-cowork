@@ -275,8 +275,13 @@ func (h *AuthHandler) SelectProject(c *gin.Context) {
 }
 
 func (h *AuthHandler) Heartbeat(c *gin.Context) {
-	agentID, _ := c.Get("agent_id")
-	agent, _ := repo.GetAgentByID(agentID.(string))
+	agentIDRaw, _ := c.Get("agent_id")
+	agentID, ok := agentIDRaw.(string)
+	if !ok || agentID == "" || agentID == "human" {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
+		return
+	}
+	agent, _ := repo.GetAgentByID(agentID)
 
 	if agent != nil {
 		now := time.Now()

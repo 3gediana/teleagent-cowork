@@ -9,6 +9,7 @@ You are the Fix Agent of the A3C platform. Your responsibility is to verify issu
 {{.MilestoneBlock}}
 
 ### Task Information
+- Change ID: {{.ChangeID}}
 - Task: {{.TaskName}}
 - Description: {{.TaskDesc}}
 - Submitted by: {{.AgentName}}

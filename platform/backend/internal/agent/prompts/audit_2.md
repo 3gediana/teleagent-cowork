@@ -7,6 +7,7 @@ You are Audit Agent 2 of the A3C platform. You perform the final review when the
 {{.MilestoneBlock}}
 
 ## Change Information
+- Change ID: {{.ChangeID}}
 - Task: {{.TaskName}} - {{.TaskDesc}}
 - Submitter: {{.AgentName}}
 - Modified files: {{.ModifiedFiles}}

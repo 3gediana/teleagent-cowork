@@ -252,13 +252,15 @@ type serveMessageInfo struct {
 }
 
 type servePart struct {
-	Type    string          `json:"type"`
-	Text    string          `json:"text"`
-	Tool    string          `json:"tool"`
-	SessionID string        `json:"sessionID"`
-	MessageID string        `json:"messageID"`
-	ID      string          `json:"id"`
-	State   *serveToolState `json:"state,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Tool      string          `json:"tool"`
+	CallID    string          `json:"callID"`
+	SessionID string          `json:"sessionID"`
+	MessageID string          `json:"messageID"`
+	ID        string          `json:"id"`
+	State     *serveToolState `json:"state,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 type serveToolState struct {
@@ -525,20 +527,102 @@ func (s *Scheduler) processServeToolCalls(session *agent.Session, ocSessionID st
 			continue
 		}
 		for _, part := range msg.Parts {
-			log.Printf("[OpenCode] Found part type=%s tool=%s in session %s", part.Type, part.Tool, ocSessionID)
+			// Debug: dump raw part JSON to see actual structure
+			partJSON, _ := json.Marshal(part)
+			log.Printf("[OpenCode] Part raw JSON: %s", string(partJSON))
+
 			if (part.Type == "tool-invocation" || part.Type == "tool") && part.Tool != "" {
 				var inputRaw json.RawMessage
+
+				// Try 1: Get input from state.input
 				if part.State != nil && len(part.State.Input) > 0 {
 					inputRaw = part.State.Input
-					log.Printf("[OpenCode] Tool %s has state input: %s", part.Tool, string(inputRaw))
-				} else {
-					inputRaw = json.RawMessage("{}")
-					log.Printf("[OpenCode] Tool %s has no state input, using empty", part.Tool)
+					log.Printf("[OpenCode] Tool %s input from state.input: %s", part.Tool, string(inputRaw))
+				} else if part.State != nil {
+					// Try 2: State exists but input is empty - dump full state for debugging
+					stateJSON, _ := json.Marshal(part.State)
+					log.Printf("[OpenCode] Tool %s state exists but input empty, full state: %s", part.Tool, string(stateJSON))
 				}
+
+				// Try 3: Check metadata for input parameters
+				if len(inputRaw) == 0 && len(part.Metadata) > 0 {
+					log.Printf("[OpenCode] Tool %s checking metadata for input: %s", part.Tool, string(part.Metadata))
+					var meta map[string]interface{}
+					if err := json.Unmarshal(part.Metadata, &meta); err == nil {
+						if argsVal, ok := meta["args"]; ok {
+							if argsJSON, err := json.Marshal(argsVal); err == nil {
+								inputRaw = argsJSON
+								log.Printf("[OpenCode] Tool %s input from metadata.args: %s", part.Tool, string(inputRaw))
+							}
+						} else if inputVal, ok := meta["input"]; ok {
+							if inputJSON, err := json.Marshal(inputVal); err == nil {
+								inputRaw = inputJSON
+								log.Printf("[OpenCode] Tool %s input from metadata.input: %s", part.Tool, string(inputRaw))
+							}
+						}
+					}
+				}
+
+				// Try 4: If we have callID, fetch tool details from serve API
+				if len(inputRaw) == 0 && part.CallID != "" {
+					log.Printf("[OpenCode] Tool %s has callID=%s, attempting to fetch tool details", part.Tool, part.CallID)
+					if fetched, err := s.fetchToolCallInput(ocSessionID, part.CallID); err == nil && len(fetched) > 0 {
+						inputRaw = fetched
+						log.Printf("[OpenCode] Tool %s input from callID fetch: %s", part.Tool, string(inputRaw))
+					}
+				}
+
+				if len(inputRaw) == 0 {
+					inputRaw = json.RawMessage("{}")
+					log.Printf("[OpenCode] Tool %s all input sources exhausted, using empty", part.Tool)
+				}
+
 				s.processToolCall(session, part.Tool, inputRaw, "")
 			}
 		}
 	}
+}
+
+// fetchToolCallInput attempts to fetch tool call input from the serve API using callID
+func (s *Scheduler) fetchToolCallInput(ocSessionID string, callID string) (json.RawMessage, error) {
+	// Try the tool endpoint: GET /session/{sessionID}/tool/{callID}
+	url := fmt.Sprintf("%s/session/%s/tool/%s", s.pureServeURL, ocSessionID, callID)
+	resp, err := s.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tool call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("tool call API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tool call response: %w", err)
+	}
+
+	log.Printf("[OpenCode] fetchToolCallInput raw response: %s", string(body))
+
+	// Parse the response - it should contain the tool part with state.input
+	var toolPart servePart
+	if err := json.Unmarshal(body, &toolPart); err != nil {
+		// Try as a wrapper object
+		var wrapper struct {
+			Part servePart `json:"part"`
+		}
+		if err2 := json.Unmarshal(body, &wrapper); err2 != nil {
+			return nil, fmt.Errorf("failed to parse tool call response: %w (raw: %s)", err, truncate(string(body), 200))
+		}
+		toolPart = wrapper.Part
+	}
+
+	if toolPart.State != nil && len(toolPart.State.Input) > 0 {
+		return toolPart.State.Input, nil
+	}
+
+	return nil, fmt.Errorf("tool part has no state.input")
 }
 
 // runAgentLegacy is the old opencode run --pure approach, kept as fallback
