@@ -29,6 +29,9 @@ func CreateExperienceFromAudit(projectID, sessionID, agentRole, taskID, patternO
 		TaskID:          taskID,
 		PatternObserved: patternObserved,
 		DoDifferently:   suggestionForSubmitter,
+		QualityPatterns: "null",
+		Tags:            "null",
+		FilesInvolved:   "null",
 		Status:          "raw",
 	}
 	if err := model.DB.Create(&exp).Error; err != nil {
@@ -43,16 +46,19 @@ func CreateExperienceFromFix(projectID, sessionID, taskID, fixStrategy string, f
 		outcome = "partial"
 	}
 	exp := model.Experience{
-		ID:            model.GenerateID("exp"),
-		ProjectID:     projectID,
-		SourceType:    "fix_strategy",
-		SourceID:      sessionID,
-		AgentRole:     "fix",
-		TaskID:        taskID,
-		FixStrategy:   fixStrategy,
-		FalsePositive: falsePositive,
-		Outcome:       outcome,
-		Status:        "raw",
+		ID:              model.GenerateID("exp"),
+		ProjectID:       projectID,
+		SourceType:      "fix_strategy",
+		SourceID:        sessionID,
+		AgentRole:       "fix",
+		TaskID:          taskID,
+		FixStrategy:     fixStrategy,
+		FalsePositive:   falsePositive,
+		Outcome:         outcome,
+		QualityPatterns: "null",
+		Tags:            "null",
+		FilesInvolved:   "null",
+		Status:          "raw",
 	}
 	if err := model.DB.Create(&exp).Error; err != nil {
 		log.Printf("[Experience] Failed to create fix strategy: %v", err)
@@ -81,6 +87,8 @@ func CreateExperienceFromEvaluate(projectID, sessionID, prID, qualityPatterns, c
 		TaskID:          prID,
 		QualityPatterns: qpJSON,
 		Pitfalls:        commonMistakes,
+		Tags:            "null",
+		FilesInvolved:   "null",
 		Status:          "raw",
 	}
 	if err := model.DB.Create(&exp).Error; err != nil {
@@ -91,14 +99,17 @@ func CreateExperienceFromEvaluate(projectID, sessionID, prID, qualityPatterns, c
 // CreateExperienceFromBizReview creates an Experience from business review rationale.
 func CreateExperienceFromBizReview(projectID, sessionID, prID, alignmentRationale string) {
 	exp := model.Experience{
-		ID:          model.GenerateID("exp"),
-		ProjectID:   projectID,
-		SourceType:  "maintain_rationale",
-		SourceID:    sessionID,
-		AgentRole:   "maintain",
-		TaskID:      prID,
-		KeyInsight:  alignmentRationale,
-		Status:      "raw",
+		ID:              model.GenerateID("exp"),
+		ProjectID:       projectID,
+		SourceType:      "maintain_rationale",
+		SourceID:        sessionID,
+		AgentRole:       "maintain",
+		TaskID:          prID,
+		KeyInsight:      alignmentRationale,
+		QualityPatterns: "null",
+		Tags:            "null",
+		FilesInvolved:   "null",
+		Status:          "raw",
 	}
 	if err := model.DB.Create(&exp).Error; err != nil {
 		log.Printf("[Experience] Failed to create biz review rationale: %v", err)

@@ -191,6 +191,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 
 		// Start 10-minute timer for task reclamation (requires heartbeat or resubmit)
 		go func() {
+			if change.TaskID == nil {
+				return // no task to reclaim
+			}
 			taskID := *change.TaskID
 			agentID := change.AgentID
 			for i := 0; i < 10; i++ {

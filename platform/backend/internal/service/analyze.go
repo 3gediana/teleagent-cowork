@@ -40,7 +40,9 @@ func TriggerAnalyzeAgent(projectID string) {
 	model.DB.Model(&model.AgentSession{}).Where("project_id = ?", projectID).Count(&totalSessions)
 
 	var l0Count, l1Count, l2Count int64
-	model.DB.Model(&model.AgentSession{}).Where("project_id = ? AND trigger_reason = ?", projectID, "change_submitted").Count(&totalSessions)
+	model.DB.Model(&model.AgentSession{}).Where("project_id = ? AND trigger_reason = ?", projectID, "change_submitted").Count(&l0Count)
+	model.DB.Model(&model.AgentSession{}).Where("project_id = ? AND status = ?", projectID, "pending_fix").Count(&l1Count)
+	model.DB.Model(&model.AgentSession{}).Where("project_id = ? AND status = ?", projectID, "rejected").Count(&l2Count)
 
 	// Build experience summary for prompt
 	expSummary := ""

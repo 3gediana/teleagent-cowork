@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"sync"
 	"text/template"
 	"time"
 
@@ -67,6 +68,7 @@ type ChangeContext struct {
 }
 
 type AgentManager struct {
+	mu       sync.RWMutex
 	sessions map[string]*Session
 }
 
@@ -104,7 +106,9 @@ func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionCo
 		TriggerReason: trigger,
 		Status:        "pending",
 	}
+	m.mu.Lock()
 	m.sessions[sessionID] = session
+	m.mu.Unlock()
 
 	// Persist to DB
 	dbSession := &model.AgentSession{
@@ -126,7 +130,9 @@ func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionCo
 }
 
 func (m *AgentManager) RegisterSession(session *Session) {
+	m.mu.Lock()
 	m.sessions[session.ID] = session
+	m.mu.Unlock()
 
 	// Persist to DB (upsert)
 	dbSession := &model.AgentSession{
@@ -150,9 +156,12 @@ func (m *AgentManager) RegisterSession(session *Session) {
 }
 
 func (m *AgentManager) GetSession(id string) *Session {
+	m.mu.RLock()
 	if s, ok := m.sessions[id]; ok {
+		m.mu.RUnlock()
 		return s
 	}
+	m.mu.RUnlock()
 	// Fallback: load from DB
 	var dbSession model.AgentSession
 	if err := model.DB.Where("id = ?", id).First(&dbSession).Error; err != nil {
@@ -169,12 +178,17 @@ func (m *AgentManager) GetSession(id string) *Session {
 		Output:            dbSession.Output,
 		OpenCodeSessionID: dbSession.OpenCodeSessionID,
 	}
+	m.mu.Lock()
 	m.sessions[id] = s
+	m.mu.Unlock()
 	return s
 }
 
 func (m *AgentManager) UpdateSessionOutput(id string, output string) {
-	if session, ok := m.sessions[id]; ok {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if ok {
 		session.Output = output
 		session.Status = "completed"
 
@@ -182,13 +196,24 @@ func (m *AgentManager) UpdateSessionOutput(id string, output string) {
 		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
 			"status":       "completed",
 			"output":       output,
-			"completed_at":  now,
+			"completed_at": now,
+		})
+	} else {
+		// Session not in memory, update DB directly
+		now := time.Now()
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"status":       "completed",
+			"output":       output,
+			"completed_at": now,
 		})
 	}
 }
 
 func (m *AgentManager) MarkSessionFailed(id string) {
-	if session, ok := m.sessions[id]; ok {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if ok {
 		session.Status = "failed"
 
 		now := time.Now()
@@ -200,11 +225,19 @@ func (m *AgentManager) MarkSessionFailed(id string) {
 }
 
 func (m *AgentManager) Sessions() map[string]*Session {
-	return m.sessions
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cp := make(map[string]*Session, len(m.sessions))
+	for k, v := range m.sessions {
+		cp[k] = v
+	}
+	return cp
 }
 
 func (m *AgentManager) ClearSession(id string) {
+	m.mu.Lock()
 	delete(m.sessions, id)
+	m.mu.Unlock()
 }
 
 func BuildPrompt(role Role, ctx *SessionContext) (string, error) {

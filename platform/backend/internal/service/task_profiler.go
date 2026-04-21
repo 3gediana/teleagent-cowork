@@ -2,10 +2,13 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
+
+	"gorm.io/gorm"
 )
 
 // TaskProfile describes a task's characteristics for experience-based routing.
@@ -75,8 +78,8 @@ func ProfileTask(taskID string) *TaskProfile {
 			riskLevel = rl
 		}
 
-		// Increment hit count
-		model.DB.Model(&model.Policy{}).Where("id = ?", p.ID).Update("hit_count", p.HitCount+1)
+		// Increment hit count atomically
+		model.DB.Model(&model.Policy{}).Where("id = ?", p.ID).Update("hit_count", gorm.Expr("hit_count + 1"))
 	}
 
 	// 4. Find relevant skills
@@ -145,13 +148,15 @@ func matchesCondition(mc map[string]interface{}, tags []string, role string) boo
 
 	// Check scope match
 	if scope, ok := mc["scope"].(string); ok && scope != "" {
-		// Scope is a higher-level category; for now simple string match
-		_ = scope // accepted
+		// Scope matching not yet implemented — skip policies that require it
+		return false
 	}
 
 	// Check file_count_gt
 	if fcgt, ok := mc["file_count_gt"].(float64); ok {
-		_ = fcgt // would need file count from context
+		// File count matching not yet implemented — skip policies that require it
+		_ = fcgt
+		return false
 	}
 
 	return true
@@ -199,7 +204,7 @@ func ApplyPolicy(session *agent.Session, policy *model.Policy) {
 	}
 
 	if maxFiles, ok := actions["max_file_changes"].(float64); ok {
-		session.Context.InputContent += "\n\n[Policy Constraint]: Maximum file changes allowed: " + string(rune(int(maxFiles)+'0'))
+		session.Context.InputContent += fmt.Sprintf("\n\n[Policy Constraint]: Maximum file changes allowed: %d", int(maxFiles))
 	}
 
 	if m, ok := actions["model"].(string); ok && m != "" {

@@ -19,6 +19,8 @@ import (
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/model"
+
+	"gorm.io/gorm"
 )
 
 type Scheduler struct {
@@ -363,15 +365,11 @@ func (s *Scheduler) runAgentViaServe(session *agent.Session, message string, age
 		return
 	}
 
-	// 4. Process the response parts
+	// 4. Process the response parts — only extract text; tool calls are handled by processServeToolCalls
 	var textParts []string
 	for _, part := range msgResp.Parts {
-		switch part.Type {
-		case "text":
+		if part.Type == "text" {
 			textParts = append(textParts, part.Text)
-		case "tool-invocation":
-			// Tool was already executed by serve; log it
-			log.Printf("[OpenCode] Serve session %s: tool invoked: %s", ocSessionID, part.Tool)
 		}
 	}
 
@@ -534,6 +532,9 @@ func (s *Scheduler) sendServeMessageAsync(ocSessionID string, message string, ag
 // pollServeResponse polls the serve session's messages endpoint until an assistant response appears.
 func (s *Scheduler) pollServeResponse(ocSessionID string, maxWaitSec int) (*serveMessageResponse, error) {
 	url := fmt.Sprintf("%s/session/%s/message?limit=20", s.pureServeURL, ocSessionID)
+
+	// Initial wait before first poll — give serve time to process the message
+	time.Sleep(3 * time.Second)
 
 	deadline := time.Now().Add(time.Duration(maxWaitSec) * time.Second)
 	for time.Now().Before(deadline) {
@@ -1050,8 +1051,8 @@ func (s *Scheduler) applyPoliciesToSession(session *agent.Session) {
 			session.Context.InputContent += fmt.Sprintf("\n\n[Policy Constraint]: Maximum file changes allowed: %d", int(maxFiles))
 		}
 
-		// Increment hit count
-		model.DB.Model(&model.Policy{}).Where("id = ?", p.ID).Update("hit_count", p.HitCount+1)
+		// Increment hit count atomically
+		model.DB.Model(&model.Policy{}).Where("id = ?", p.ID).Update("hit_count", gorm.Expr("hit_count + 1"))
 
 		log.Printf("[PolicyEngine] Applied policy %s to session %s", p.Name, session.ID)
 	}
