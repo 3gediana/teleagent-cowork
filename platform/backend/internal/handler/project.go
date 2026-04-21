@@ -71,12 +71,17 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 	}
 	model.DB.Create(&milestone)
 
-	repoPath := filepath.Join("data", "projects", project.ID, "repo")
+	repoPath := filepath.Join(service.DataPath, project.ID, "repo")
 	os.MkdirAll(repoPath, 0755)
+
+	// Initialize git repo so branches work
+	if err := service.GitInit(project.ID); err != nil {
+		log.Printf("[Project] Git init failed for %s: %v", project.ID, err)
+	}
 
 	if req.ImportExisting && req.GithubRepo != "" {
 		go func() {
-			projectPath := filepath.Join("data", "projects", project.ID, "repo")
+			projectPath := filepath.Join(service.DataPath, project.ID, "repo")
 			log.Printf("[Project] Starting assessment for imported project %s", project.ID)
 			_, err := service.TriggerAssessAgent(project.ID, projectPath)
 			if err != nil {

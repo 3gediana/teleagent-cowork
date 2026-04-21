@@ -45,6 +45,19 @@ func GitInit(projectID string) error {
 		cmd = exec.Command("git", "config", "user.name", "A3C Platform")
 		cmd.Dir = repoPath
 		cmd.Run()
+
+		// Create initial commit so HEAD exists (required for worktree/branch creation)
+		readmePath := filepath.Join(repoPath, "README.md")
+		os.WriteFile(readmePath, []byte("# Project\n"), 0644)
+		cmd = exec.Command("git", "add", "README.md")
+		cmd.Dir = repoPath
+		cmd.Run()
+		cmd = exec.Command("git", "commit", "-m", "Initial commit")
+		cmd.Dir = repoPath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[Git] Initial commit failed for %s: %s", projectID, string(out))
+		}
+
 		log.Printf("[Git] Initialized repo for project %s", projectID)
 	}
 	return nil
