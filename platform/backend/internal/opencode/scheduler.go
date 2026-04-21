@@ -728,6 +728,11 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 		"evaluate_output":  true,
 		"merge_output":     true,
 		"biz_review_output": true,
+		"approve_pr":       true,
+		"reject_pr":        true,
+		"switch_milestone": true,
+		"create_policy":    true,
+		"chief_output":     true,
 	}
 
 	if !platformTools[toolName] {

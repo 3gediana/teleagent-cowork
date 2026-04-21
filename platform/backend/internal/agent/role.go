@@ -13,6 +13,7 @@ const (
 	RoleAssess   Role = "assess"
 	RoleEvaluate Role = "evaluate" // PR tech evaluation (diff + dry-run merge + code review)
 	RoleMerge    Role = "merge"    // PR merge execution (git merge + conflict resolution)
+	RoleChief    Role = "chief"    // Platform voice interface: reports status, executes human instructions, makes approval decisions in AutoMode
 )
 
 type RoleConfig struct {
@@ -90,6 +91,14 @@ var RoleConfigs = map[Role]*RoleConfig{
 		PromptTemplate: "merge.md",
 		PlatformTools:  []string{"merge_output"},
 		OpenCodeTools:  []string{"read", "edit", "glob"},
+	},
+	RoleChief: {
+		Role:           RoleChief,
+		Name:           "Chief Agent",
+		Description:    "Platform voice interface: reports global status, executes human instructions, makes approval decisions in AutoMode",
+		PromptTemplate: "chief.md",
+		PlatformTools:  []string{"create_task", "delete_task", "update_milestone", "propose_direction", "write_milestone", "approve_pr", "reject_pr", "switch_milestone", "create_policy", "chief_output"},
+		OpenCodeTools:  []string{"read", "glob"},
 	},
 }
 

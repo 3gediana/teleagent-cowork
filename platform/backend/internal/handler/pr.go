@@ -83,6 +83,38 @@ func (h *PRHandler) Submit(c *gin.Context) {
 		return
 	}
 
+	// Check AutoMode: if true, trigger Chief Agent for risk assessment instead of waiting for human
+	var project model.Project
+	autoMode := false
+	if model.DB.Where("id = ?", *agent.CurrentProjectID).First(&project).Error == nil {
+		autoMode = project.AutoMode
+	}
+
+	if autoMode {
+		// Chief Agent will evaluate risk and decide whether to approve_review
+		go service.TriggerChiefDecision(*agent.CurrentProjectID, "pr_review", pr.ID)
+
+		service.BroadcastEvent(*agent.CurrentProjectID, "PR_SUBMITTED", map[string]interface{}{
+			"pr_id":        prID,
+			"title":        req.Title,
+			"branch_id":    branchID,
+			"submitter_id": agentID.(string),
+			"status":       "pending_human_review",
+			"auto_mode":    true,
+		})
+
+		c.JSON(200, gin.H{
+			"success": true,
+			"data": gin.H{
+				"id":     prID,
+				"status": "pending_human_review",
+				"title":  req.Title,
+				"message": "PR submitted (AutoMode), Chief Agent will assess risk",
+			},
+		})
+		return
+	}
+
 	// Broadcast PR submitted event
 	service.BroadcastEvent(*agent.CurrentProjectID, "PR_SUBMITTED", map[string]interface{}{
 		"pr_id":        prID,

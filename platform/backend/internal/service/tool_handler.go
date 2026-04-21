@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
 )
 
@@ -265,6 +266,32 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] %s error: %v", toolName, err)
 		}
 
+	case "approve_pr":
+		if err := handleApprovePR(projectID, args); err != nil {
+			log.Printf("[ToolHandler] approve_pr error: %v", err)
+		}
+
+	case "reject_pr":
+		if err := handleRejectPR(projectID, args); err != nil {
+			log.Printf("[ToolHandler] reject_pr error: %v", err)
+		}
+
+	case "switch_milestone":
+		if err := handleSwitchMilestone(projectID, args); err != nil {
+			log.Printf("[ToolHandler] switch_milestone error: %v", err)
+		}
+
+	case "create_policy":
+		if err := handleCreatePolicy(args); err != nil {
+			log.Printf("[ToolHandler] create_policy error: %v", err)
+		}
+
+	case "chief_output":
+		result, _ := args["result"].(string)
+		summary, _ := args["summary"].(string)
+		log.Printf("[Chief] Session %s output: result=%s, summary=%s", sessionID, result, summary)
+		agent.DefaultManager.UpdateSessionOutput(sessionID, summary)
+
 	case "evaluate_output":
 		if err := HandleEvaluateOutput(sessionID, projectID, args); err != nil {
 			log.Printf("[ToolHandler] evaluate_output error: %v", err)
@@ -283,4 +310,158 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 	default:
 		log.Printf("[ToolHandler] Unknown tool: %s", toolName)
 	}
+}
+
+// handleApprovePR processes Chief Agent's approve_pr tool call.
+func handleApprovePR(projectID string, args map[string]interface{}) error {
+	prID, _ := args["pr_id"].(string)
+	action, _ := args["action"].(string)
+	reason, _ := args["reason"].(string)
+	if prID == "" {
+		return fmt.Errorf("pr_id required")
+	}
+
+	var pr model.PullRequest
+	if model.DB.Where("id = ?", prID).First(&pr).Error != nil {
+		return fmt.Errorf("PR not found: %s", prID)
+	}
+
+	switch action {
+	case "approve_review":
+		if pr.Status != "pending_human_review" {
+			return fmt.Errorf("PR %s is not pending_human_review (status=%s)", prID, pr.Status)
+		}
+		pr.Status = "evaluating"
+		model.DB.Save(&pr)
+		log.Printf("[Chief] Approved review for PR %s: %s", prID, reason)
+
+		go func() {
+			if err := TriggerEvaluateAgent(&pr); err != nil {
+				log.Printf("[Chief] Failed to trigger evaluate agent for PR %s: %v", prID, err)
+			}
+		}()
+
+	case "approve_merge":
+		if pr.Status != "pending_human_merge" {
+			return fmt.Errorf("PR %s is not pending_human_merge (status=%s)", prID, pr.Status)
+		}
+		pr.Status = "merging"
+		model.DB.Save(&pr)
+		log.Printf("[Chief] Approved merge for PR %s: %s", prID, reason)
+
+		if err := ExecuteMerge(pr.BranchID); err != nil {
+			pr.Status = "merge_failed"
+			model.DB.Save(&pr)
+			return fmt.Errorf("merge failed: %w", err)
+		}
+
+		now := time.Now()
+		pr.Status = "merged"
+		pr.MergedAt = &now
+		model.DB.Save(&pr)
+
+		newVersion, _ := IncrementVersion(pr.ProjectID)
+		log.Printf("[Chief] PR %s merged, new version: %s", prID, newVersion)
+
+	default:
+		return fmt.Errorf("unknown action: %s (expected approve_review or approve_merge)", action)
+	}
+
+	return nil
+}
+
+// handleRejectPR processes Chief Agent's reject_pr tool call.
+func handleRejectPR(projectID string, args map[string]interface{}) error {
+	prID, _ := args["pr_id"].(string)
+	reason, _ := args["reason"].(string)
+	if prID == "" {
+		return fmt.Errorf("pr_id required")
+	}
+
+	var pr model.PullRequest
+	if model.DB.Where("id = ?", prID).First(&pr).Error != nil {
+		return fmt.Errorf("PR not found: %s", prID)
+	}
+
+	pr.Status = "rejected"
+	model.DB.Save(&pr)
+	log.Printf("[Chief] Rejected PR %s: %s", prID, reason)
+
+	BroadcastEvent(projectID, "PR_REJECTED", map[string]interface{}{
+		"pr_id":  prID,
+		"reason": reason,
+	})
+
+	return nil
+}
+
+// handleSwitchMilestone processes Chief Agent's switch_milestone tool call.
+func handleSwitchMilestone(projectID string, args map[string]interface{}) error {
+	milestoneID, _ := args["milestone_id"].(string)
+	reason, _ := args["reason"].(string)
+	if milestoneID == "" {
+		return fmt.Errorf("milestone_id required")
+	}
+
+	// Complete current milestone
+	var current model.Milestone
+	if model.DB.Where("project_id = ? AND status = 'in_progress'", projectID).First(&current).Error == nil {
+		now := time.Now()
+		current.Status = "completed"
+		current.CompletedAt = &now
+		model.DB.Save(&current)
+		log.Printf("[Chief] Completed milestone %s", current.ID)
+	}
+
+	// Activate target milestone
+	var target model.Milestone
+	if model.DB.Where("id = ? AND project_id = ?", milestoneID, projectID).First(&target).Error != nil {
+		return fmt.Errorf("milestone not found: %s", milestoneID)
+	}
+	target.Status = "in_progress"
+	model.DB.Save(&target)
+	log.Printf("[Chief] Switched to milestone %s: %s", milestoneID, reason)
+
+	return nil
+}
+
+// handleCreatePolicy processes Chief Agent's create_policy tool call.
+func handleCreatePolicy(args map[string]interface{}) error {
+	name, _ := args["name"].(string)
+	matchCondition, _ := args["match_condition"].(string)
+	actions, _ := args["actions"].(string)
+	if name == "" || matchCondition == "" || actions == "" {
+		return fmt.Errorf("name, match_condition, and actions are required")
+	}
+
+	priority := 0
+	if p, ok := args["priority"].(float64); ok {
+		priority = int(p)
+	}
+
+	// Validate JSON
+	if !json.Valid([]byte(matchCondition)) {
+		return fmt.Errorf("match_condition must be valid JSON")
+	}
+	if !json.Valid([]byte(actions)) {
+		return fmt.Errorf("actions must be valid JSON")
+	}
+
+	policy := model.Policy{
+		ID:             model.GenerateID("pol"),
+		Name:           name,
+		MatchCondition: matchCondition,
+		Actions:        actions,
+		Priority:       priority,
+		Status:         "active",
+		Source:         "human",
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := model.DB.Create(&policy).Error; err != nil {
+		return fmt.Errorf("failed to create policy: %w", err)
+	}
+
+	log.Printf("[Chief] Created policy %s: %s (priority=%d)", policy.ID, name, priority)
+	return nil
 }

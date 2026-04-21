@@ -48,6 +48,10 @@ type SessionContext struct {
 	MergeCostRating   string
 	ConflictFiles     string
 	TechReviewSummary string
+
+	// Chief Agent fields
+	GlobalState string // 平台全局状态快照
+	AutoMode    bool   // 项目 AutoMode 开关
 }
 
 type ChangeContext struct {
@@ -255,6 +259,10 @@ func BuildPrompt(role Role, ctx *SessionContext) (string, error) {
 	data["ConflictFiles"] = ctx.ConflictFiles
 	data["TechReviewSummary"] = ctx.TechReviewSummary
 
+	// Chief Agent fields
+	data["GlobalState"] = ctx.GlobalState
+	data["AutoMode"] = ctx.AutoMode
+
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to execute prompt template: %w", err)
@@ -283,6 +291,10 @@ func GetRoleForTrigger(trigger string) Role {
 		return RoleMerge
 	case "pr_biz_review":
 		return RoleMaintain
+	case "chief_request", "chief_chat":
+		return RoleChief
+	case "chief_decision_pr_review", "chief_decision_pr_merge", "chief_decision_milestone_switch":
+		return RoleChief
 	default:
 		return RoleMaintain
 	}
