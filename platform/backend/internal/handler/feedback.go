@@ -50,7 +50,7 @@ func (h *FeedbackHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	filesJSON := "[]"
+	filesJSON := "null"
 	if len(req.FilesRead) > 0 {
 		service.MarshalToJSON(req.FilesRead, &filesJSON)
 	}

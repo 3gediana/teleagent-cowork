@@ -12,7 +12,7 @@ func MarshalToJSON(v interface{}, dest *string) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("[Experience] Failed to marshal: %v", err)
-		*dest = "{}"
+		*dest = "null"
 		return
 	}
 	*dest = string(b)
@@ -61,6 +61,17 @@ func CreateExperienceFromFix(projectID, sessionID, taskID, fixStrategy string, f
 
 // CreateExperienceFromEvaluate creates an Experience from evaluate patterns.
 func CreateExperienceFromEvaluate(projectID, sessionID, prID, qualityPatterns, commonMistakes string) {
+	// Ensure QualityPatterns is valid JSON for MySQL json column
+	qpJSON := "null"
+	if qualityPatterns != "" {
+		if json.Valid([]byte(qualityPatterns)) {
+			qpJSON = qualityPatterns
+		} else {
+			// Wrap as JSON array
+			MarshalToJSON([]string{qualityPatterns}, &qpJSON)
+		}
+	}
+
 	exp := model.Experience{
 		ID:              model.GenerateID("exp"),
 		ProjectID:       projectID,
@@ -68,7 +79,7 @@ func CreateExperienceFromEvaluate(projectID, sessionID, prID, qualityPatterns, c
 		SourceID:        sessionID,
 		AgentRole:       "evaluate",
 		TaskID:          prID,
-		QualityPatterns: qualityPatterns,
+		QualityPatterns: qpJSON,
 		Pitfalls:        commonMistakes,
 		Status:          "raw",
 	}

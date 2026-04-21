@@ -23,12 +23,12 @@ type Experience struct {
 	// Structured supplements
 	PatternObserved string `gorm:"type:text" json:"pattern_observed"`
 	FixStrategy     string `gorm:"type:text" json:"fix_strategy"`
-	QualityPatterns string `gorm:"type:json" json:"quality_patterns"`
+	QualityPatterns string `gorm:"type:json;default:null" json:"quality_patterns"`
 	FalsePositive   bool   `gorm:"default:false" json:"false_positive"`
 
 	// Context
-	Tags          string `gorm:"type:json" json:"tags"`
-	FilesInvolved string `gorm:"type:json" json:"files_involved"`
+	Tags          string `gorm:"type:json;default:null" json:"tags"`
+	FilesInvolved string `gorm:"type:json;default:null" json:"files_involved"`
 
 	Status    string    `gorm:"size:20;default:'raw';index:idx_exp_status" json:"status"` // raw / distilled / skill / deprecated
 	CreatedAt time.Time `gorm:"index:idx_exp_created" json:"created_at"`
