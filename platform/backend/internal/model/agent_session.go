@@ -13,7 +13,7 @@ type AgentSession struct {
 	Status            string     `gorm:"size:20;index" json:"status"` // pending/running/completed/failed
 	ModelProvider     string     `gorm:"size:64" json:"model_provider"`
 	ModelID           string     `gorm:"size:128" json:"model_id"`
-	OpenCodeSessionID string     `gorm:"size:128" json:"opencode_session_id"`
+	OpenCodeSessionID string     `gorm:"size:128;column:opencode_session_id" json:"opencode_session_id"`
 	Output            string     `gorm:"type:text" json:"output"`
 	PromptHash        string     `gorm:"size:64" json:"prompt_hash"`
 	DurationMs        int        `json:"duration_ms"`

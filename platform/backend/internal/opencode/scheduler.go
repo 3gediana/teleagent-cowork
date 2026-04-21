@@ -347,15 +347,23 @@ func (s *Scheduler) runAgentViaServe(session *agent.Session, message string, age
 
 	log.Printf("[OpenCode] Created serve session %s for agent session %s (agent=%s)", ocSessionID, session.ID, agentName)
 
-	// 2. Send message to the serve session
-	msgResp, err := s.sendServeMessage(ocSessionID, message, agentName, modelStr, "")
+	// 2. Send message to the serve session (async — serve returns empty body)
+	err = s.sendServeMessageAsync(ocSessionID, message, agentName, modelStr, "")
 	if err != nil {
 		log.Printf("[OpenCode] Failed to send message to serve session %s: %v", ocSessionID, err)
 		session.Status = "failed"
 		return
 	}
 
-	// 3. Process the response parts
+	// 3. Poll for assistant response (serve API is async)
+	msgResp, err := s.pollServeResponse(ocSessionID, 120) // max 120s wait
+	if err != nil {
+		log.Printf("[OpenCode] Failed to poll response from serve session %s: %v", ocSessionID, err)
+		session.Status = "failed"
+		return
+	}
+
+	// 4. Process the response parts
 	var textParts []string
 	for _, part := range msgResp.Parts {
 		switch part.Type {
@@ -393,7 +401,20 @@ func (s *Scheduler) SendToExistingSession(ocSessionID string, message string, ag
 	if len(noReply) > 0 && noReply[0] {
 		nr = "true"
 	}
-	return s.sendServeMessage(ocSessionID, message, agentName, model, nr)
+
+	// Send message (async API returns empty body)
+	err := s.sendServeMessageAsync(ocSessionID, message, agentName, model, nr)
+	if err != nil {
+		return nil, err
+	}
+
+	// If noReply, don't wait for response
+	if nr == "true" {
+		return &serveMessageResponse{}, nil
+	}
+
+	// Poll for assistant response
+	return s.pollServeResponse(ocSessionID, 120)
 }
 
 // DeleteServeSession destroys a serve session (for clearing context)
@@ -457,6 +478,104 @@ func (s *Scheduler) createServeSession() (string, error) {
 	}
 
 	return result.ID, nil
+}
+
+// sendServeMessageAsync sends a message to the serve session without expecting a synchronous response.
+// OpenCode serve's message API is async — it returns 200 with empty body.
+func (s *Scheduler) sendServeMessageAsync(ocSessionID string, message string, agentName string, model string, noReplyFlag string) error {
+	url := fmt.Sprintf("%s/session/%s/message", s.pureServeURL, ocSessionID)
+
+	parts := []map[string]interface{}{
+		{"type": "text", "text": message},
+	}
+
+	body := map[string]interface{}{
+		"parts": parts,
+	}
+	if agentName != "" {
+		body["agent"] = agentName
+	}
+	if model != "" {
+		parts := strings.SplitN(model, "/", 2)
+		if len(parts) == 2 {
+			body["model"] = map[string]string{
+				"providerID": parts[0],
+				"modelID":    parts[1],
+			}
+		} else {
+			body["model"] = model
+		}
+	}
+	if noReplyFlag == "true" {
+		body["noReply"] = true
+	}
+
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message body: %w", err)
+	}
+
+	resp, err := s.httpClient.Post(url, "application/json", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("serve returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Drain body (serve returns empty, but we must read it)
+	io.ReadAll(resp.Body)
+	return nil
+}
+
+// pollServeResponse polls the serve session's messages endpoint until an assistant response appears.
+func (s *Scheduler) pollServeResponse(ocSessionID string, maxWaitSec int) (*serveMessageResponse, error) {
+	url := fmt.Sprintf("%s/session/%s/message?limit=20", s.pureServeURL, ocSessionID)
+
+	deadline := time.Now().Add(time.Duration(maxWaitSec) * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := s.httpClient.Get(url)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		var messages []struct {
+			Info struct {
+				Role string `json:"role"`
+			} `json:"info"`
+			Parts []servePart `json:"parts"`
+		}
+		if err := json.Unmarshal(body, &messages); err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Look for assistant message with parts
+		for i := len(messages) - 1; i >= 0; i-- {
+			msg := messages[i]
+			if msg.Info.Role == "assistant" && len(msg.Parts) > 0 {
+				result := &serveMessageResponse{Parts: msg.Parts}
+				log.Printf("[OpenCode] pollServeResponse: found assistant response with %d parts", len(msg.Parts))
+				return result, nil
+			}
+		}
+
+		// No assistant response yet, wait and retry
+		time.Sleep(3 * time.Second)
+	}
+
+	return nil, fmt.Errorf("timed out waiting for assistant response after %ds", maxWaitSec)
 }
 
 func (s *Scheduler) sendServeMessage(ocSessionID string, message string, agentName string, model string, noReplyFlag string) (*serveMessageResponse, error) {

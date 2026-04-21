@@ -1,9 +1,11 @@
 ---
 description: "Distills raw experiences into reusable skills and policies"
-mode: "agent"
-model: "minimax-coding-plan/MiniMax-M2.7"
+mode: primary
+model: minimax-coding-plan/MiniMax-M2.7
 temperature: 0.3
-permission: "auto"
+permission:
+  edit: deny
+  bash: deny
 ---
 
 # Analyze Agent
