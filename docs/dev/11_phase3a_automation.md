@@ -597,3 +597,29 @@ Phase 3A 完成后，以下场景应可端到端运行：
 ---
 
 > Phase 3A 完成后，A3C 将成为"人类在一个对话口完成一切"的平台。Phase 3B 再在此基础上加入自演进能力。
+
+---
+
+## 12. 实现状态（已完成 ✅）
+
+| 模块 | 文件 | 状态 |
+|------|------|------|
+| M12 AgentSession | `model/agent_session.go` | ✅ 持久化到 DB，重启安全 |
+| M12 ToolCallTrace | `model/tool_call_trace.go` | ✅ 每次工具调用可追溯 |
+| M12 Session 持久化 | `agent/manager.go` | ✅ Create/Register/Update/Mark 同步 DB；GetSession DB fallback |
+| M12 Trace 记录 | `opencode/scheduler.go` | ✅ DurationMs + 异步 ToolCallTrace |
+| M13 FailureMode | `model/models.go` | ✅ Change 新增 FailureMode + RetryCount |
+| M13 TaskTag | `model/task_tag.go` | ✅ 任务分类标签 |
+| M13 自动标注 | `service/audit.go` | ✅ classifyFailureMode 基于 issue type |
+| M13 RetryCount | `handler/change.go` | ✅ 同 task 历史 rejected change 计数 |
+| M14 心跳释放 | `service/scheduler.go` | ✅ 心跳超时释放 branch occupant |
+| M15 AutoMode 决策 | `handler/pr.go` | ✅ AutoMode 触发 Chief 风险评估 |
+| M15 Policy | `model/policy.go` | ✅ 策略表，RAG-ready |
+| M16 重试 | `opencode/scheduler.go` | ✅ maybeRetry + per-role retry policy |
+| M17 Chief 角色 | `agent/role.go` | ✅ RoleChief + 10 个平台工具 |
+| M17 Chief Prompt | `agent/prompts/chief.md` | ✅ 决策流程含策略匹配 |
+| M17 Chief Service | `service/chief.go` | ✅ TriggerChiefDecision/Chat + 全局状态快照 |
+| M17 Chief Handlers | `service/tool_handler.go` | ✅ approve_pr/reject_pr/switch_milestone/create_policy/chief_output |
+| M17 Chief OpenCode | `.opencode/agents/chief.md` + 5 tools | ✅ |
+| Chief Chat API | `handler/chief.go` | ✅ Chat/Sessions/ToolTraces/Policies |
+| Chief Routes | `cmd/server/main.go` | ✅ /chief/chat, /chief/sessions, /chief/traces, /chief/policies |
