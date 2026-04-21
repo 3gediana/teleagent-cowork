@@ -39,3 +39,8 @@ backend/*.out
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Temp/runtime files
+dump.rdb
+biz_review.txt
+tech_review.txt
