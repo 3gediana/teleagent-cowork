@@ -1,0 +1,1 @@
+{"title":"Add auth module","description":"Implements the authentication module for the project","self_review":"{\"changed_functions\":[{\"file\":\"test.txt\",\"function\":\"new\",\"change_type\":\"add\",\"impact\":\"low\"}],\"overall_impact\":\"low\",\"merge_confidence\":\"high\"}"}

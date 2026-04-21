@@ -1,0 +1,1 @@
+{"task_id":"task_fd1af57e","version":"v1.3","writes":[{"path":"utils.py","content":"def add(a, b):\n    return a + b\n\ndef divide(a, b):\n    return a / b\n"}],"description":"Add utils.py with divide function missing error handling"}

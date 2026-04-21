@@ -98,7 +98,17 @@ func InitScheduler(cfg config.OpenCodeConfig) {
 		pureCmd:      cmd,
 		httpClient:   &http.Client{Timeout: 180 * time.Second},
 	}
+	initSchedulerClient(fmt.Sprintf("http://127.0.0.1:%d", port))
 	log.Printf("[OpenCode] Pure serve started on port %d", port)
+}
+
+// DefaultClient returns an OpenCode API client using the scheduler's serve URL
+var DefaultClient *Client
+
+func initSchedulerClient(serveURL string) {
+	if serveURL != "" {
+		DefaultClient = NewClient(serveURL)
+	}
 }
 
 func findFreePort(start int) int {
@@ -122,7 +132,7 @@ func (s *Scheduler) GetModelString() string {
 }
 
 func (s *Scheduler) Dispatch(session *agent.Session) error {
-	roleConfig := agent.GetRoleConfig(session.Role)
+	roleConfig := agent.GetRoleConfigWithOverride(session.Role)
 	if roleConfig == nil {
 		return fmt.Errorf("unknown role: %s", session.Role)
 	}
@@ -135,8 +145,18 @@ func (s *Scheduler) Dispatch(session *agent.Session) error {
 	fullMessage := s.buildFullMessage(session, prompt)
 
 	agentName := string(session.Role)
-	modelStr := fmt.Sprintf("%s/%s", s.cfg.DefaultModelProvider, s.cfg.DefaultModelID)
-	if s.cfg.DefaultModelProvider == "" {
+
+	// Use role-level model override, fall back to global default
+	modelProvider := roleConfig.ModelProvider
+	modelID := roleConfig.ModelID
+	if modelProvider == "" {
+		modelProvider = s.cfg.DefaultModelProvider
+	}
+	if modelID == "" {
+		modelID = s.cfg.DefaultModelID
+	}
+	modelStr := fmt.Sprintf("%s/%s", modelProvider, modelID)
+	if modelProvider == "" {
 		modelStr = "minimax-coding-plan/MiniMax-M2.7"
 	}
 
@@ -429,7 +449,16 @@ func (s *Scheduler) sendServeMessage(ocSessionID string, message string, agentNa
 		body["agent"] = agentName
 	}
 	if model != "" {
-		body["model"] = model
+		// Parse "providerID/modelID" format into object that OpenCode serve expects
+		parts := strings.SplitN(model, "/", 2)
+		if len(parts) == 2 {
+			body["model"] = map[string]string{
+				"providerID": parts[0],
+				"modelID":    parts[1],
+			}
+		} else {
+			body["model"] = model
+		}
 	}
 	if noReplyFlag == "true" {
 		body["noReply"] = true
@@ -488,18 +517,23 @@ func (s *Scheduler) processServeToolCalls(session *agent.Session, ocSessionID st
 		return
 	}
 
+	log.Printf("[OpenCode] processServeToolCalls: fetched %d messages for session %s", len(messages), ocSessionID)
+
 	// Look for tool-invocation parts in assistant messages
 	for _, msg := range messages {
 		if msg.Info.Role != "assistant" {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type == "tool-invocation" && part.Tool != "" {
+			log.Printf("[OpenCode] Found part type=%s tool=%s in session %s", part.Type, part.Tool, ocSessionID)
+			if (part.Type == "tool-invocation" || part.Type == "tool") && part.Tool != "" {
 				var inputRaw json.RawMessage
 				if part.State != nil && len(part.State.Input) > 0 {
 					inputRaw = part.State.Input
+					log.Printf("[OpenCode] Tool %s has state input: %s", part.Tool, string(inputRaw))
 				} else {
 					inputRaw = json.RawMessage("{}")
+					log.Printf("[OpenCode] Tool %s has no state input, using empty", part.Tool)
 				}
 				s.processToolCall(session, part.Tool, inputRaw, "")
 			}
@@ -594,6 +628,8 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 		"fix_output":       true,
 		"audit2_output":    true,
 		"assess_output":    true,
+		"evaluate_output":  true,
+		"merge_output":     true,
 	}
 
 	if !platformTools[toolName] {

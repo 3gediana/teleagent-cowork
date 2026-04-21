@@ -6,6 +6,7 @@ import TaskPage from './pages/TaskPage'
 import SubmissionPage from './pages/SubmissionPage'
 import ActivityPage from './pages/ActivityPage'
 import SettingsPage from './pages/SettingsPage'
+import PRPage from './pages/PRPage'
 import { Layout } from './components/Layout'
 import LoginPanel from './components/LoginPanel'
 
@@ -28,6 +29,7 @@ function AuthenticatedApp() {
         <Route path="/tasks" element={<TaskPage />} />
         <Route path="/submissions" element={<SubmissionPage />} />
         <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/prs" element={<PRPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

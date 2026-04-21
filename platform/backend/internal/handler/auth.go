@@ -262,11 +262,15 @@ func (h *AuthHandler) SelectProject(c *gin.Context) {
 		}
 	}
 
+	// Get active branches for this project
+	branches, _ := service.ListBranchesWithOccupants(req.Project)
+
 	c.JSON(200, gin.H{"success": true, "data": gin.H{
 		"agent_id":        agent.ID,
 		"agent_name":      agent.Name,
 		"project_context": projectCtx,
 		"online_agents":   agentList,
+		"branches":        branches,
 	}})
 }
 

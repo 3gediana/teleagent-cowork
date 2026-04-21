@@ -1,0 +1,1 @@
+{"task_id":"auto_route_test","version":"v1.3","writes":[{"path":"auto_test.txt","content":"auto-routed change.submit on branch"}],"description":"Testing auto-routing"}

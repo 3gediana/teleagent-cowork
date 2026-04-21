@@ -83,3 +83,44 @@ export const versionApi = {
   list: (projectId: string) =>
     api.get('/version/list', { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
 }
+
+export const branchApi = {
+  list: () =>
+    api.get('/branch/list') as Promise<{ success: boolean; data: { branches: any[] } }>,
+
+  create: (name: string) =>
+    api.post('/branch/create', { name }) as Promise<{ success: boolean; data: any }>,
+
+  close: (branchId: string) =>
+    api.post('/branch/close', { branch_id: branchId }) as Promise<{ success: boolean; data: any }>,
+}
+
+export const prApi = {
+  list: () =>
+    api.get('/pr/list') as Promise<{ success: boolean; data: { pull_requests: any[] } }>,
+
+  get: (prId: string) =>
+    api.get(`/pr/${prId}`) as Promise<{ success: boolean; data: any }>,
+
+  approveReview: (prId: string) =>
+    api.post('/pr/approve_review', { pr_id: prId }) as Promise<{ success: boolean; data: any }>,
+
+  approveMerge: (prId: string, version?: string) =>
+    api.post('/pr/approve_merge', { pr_id: prId, version }) as Promise<{ success: boolean; data: any }>,
+
+  reject: (prId: string, reason?: string) =>
+    api.post('/pr/reject', { pr_id: prId, reason }) as Promise<{ success: boolean; data: any }>,
+}
+
+export const roleApi = {
+  list: () =>
+    api.get('/role/list') as Promise<{ success: boolean; data: any[] }>,
+
+  updateModel: (role: string, modelProvider: string, modelId: string) =>
+    api.post('/role/update_model', { role, model_provider: modelProvider, model_id: modelId }) as Promise<{ success: boolean; data: any }>,
+}
+
+export const providerApi = {
+  list: () =>
+    api.get('/opencode/providers') as Promise<{ success: boolean; data: { providers: any[]; models: any[]; default: Record<string, string> } }>,
+}

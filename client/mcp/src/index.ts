@@ -208,6 +208,88 @@ async function main() {
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })
 
+  // ===== Branch Tools =====
+
+  server.tool('select_branch', 'Enter a feature branch to work on (required before using branch tools)', {
+    branch_id: z.string().describe('Branch ID to enter (from select_project response)'),
+  }, async ({ branch_id }) => {
+    try {
+      const data = await api.enterBranch(branch_id)
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    } catch (e: any) {
+      const errMsg = e?.response?.data?.error?.message || e.message
+      const errCode = e?.response?.data?.error?.code || ''
+      return { content: [{ type: 'text', text: `Failed to enter branch [${errCode}]: ${errMsg}` }] }
+    }
+  })
+
+  server.tool('branch', 'Branch operations: create, leave, list, close, sync_main', {
+    action: z.enum(['create', 'leave', 'list', 'close', 'sync_main']).describe('Action to perform'),
+    name: z.string().optional().describe('Branch name for create (e.g. "login-module")'),
+    branch_id: z.string().optional().describe('Branch ID for close'),
+  }, async ({ action, name, branch_id }) => {
+    switch (action) {
+      case 'create': {
+        if (!name) return { content: [{ type: 'text', text: 'Error: name required for create' }] }
+        try {
+          const data = await api.createBranch(name)
+          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+        } catch (e: any) {
+          return { content: [{ type: 'text', text: `Create branch failed: ${e?.response?.data?.error?.message || e.message}` }] }
+        }
+      }
+      case 'leave': {
+        const data = await api.leaveBranch()
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+      }
+      case 'list': {
+        const data = await api.listBranches()
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+      }
+      case 'close': {
+        if (!branch_id) return { content: [{ type: 'text', text: 'Error: branch_id required for close' }] }
+        const data = await api.closeBranch(branch_id)
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+      }
+      case 'sync_main': {
+        try {
+          const data = await api.syncMain()
+          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+        } catch (e: any) {
+          const conflictFiles = e?.response?.data?.conflict_files
+          if (conflictFiles) {
+            return { content: [{ type: 'text', text: `Sync conflicts detected in files: ${JSON.stringify(conflictFiles)}. Resolve conflicts manually, then retry.` }] }
+          }
+          return { content: [{ type: 'text', text: `Sync failed: ${e?.response?.data?.error?.message || e.message}` }] }
+        }
+      }
+    }
+  })
+
+  // ===== PR Tools =====
+
+  server.tool('pr_submit', 'Submit a Pull Request from current branch to main (requires self-review)', {
+    title: z.string().describe('PR title'),
+    description: z.string().optional().describe('PR description'),
+    self_review: z.string().describe('Self-review JSON: { changed_functions: [{file, function, change_type, impact}], overall_impact, merge_confidence }'),
+  }, async ({ title, description, self_review }) => {
+    try {
+      const data = await api.submitPR({
+        title,
+        description: description || '',
+        self_review,
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    } catch (e: any) {
+      return { content: [{ type: 'text', text: `PR submit failed: ${e?.response?.data?.error?.message || e.message}` }] }
+    }
+  })
+
+  server.tool('pr_list', 'List all Pull Requests for current project', {}, async () => {
+    const data = await api.listPRs()
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+
   poller.setBroadcastHandler(async (messages) => {
     console.error('[Broadcast] Received %d messages', messages.length)
     let sessionId = await oc.getLatestSession()

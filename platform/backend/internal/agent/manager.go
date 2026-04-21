@@ -14,6 +14,7 @@ type Session struct {
 	Role              Role
 	ProjectID         string
 	ChangeID          string
+	PRID              string // PullRequest ID for evaluate/merge agents
 	TriggerReason     string
 	Context           *SessionContext
 	Status            string // pending, running, completed, failed
@@ -32,6 +33,20 @@ type SessionContext struct {
 	ProjectPath    string
 	TriggerReason  string
 	LockList       string
+
+	// PR evaluation fields
+	PRTitle           string
+	PRDescription     string
+	SubmitterName     string
+	BranchName        string
+	BaseVersion       string
+	SelfReview        string
+	DiffStat          string
+	DiffFull          string
+	MergeCheckResult  string
+	MergeCostRating   string
+	ConflictFiles     string
+	TechReviewSummary string
 }
 
 type ChangeContext struct {
@@ -151,6 +166,20 @@ func BuildPrompt(role Role, ctx *SessionContext) (string, error) {
 		data["AuditIssues"] = ctx.ChangeInfo.AuditIssues
 	}
 
+	// PR evaluation fields
+	data["PRTitle"] = ctx.PRTitle
+	data["PRDescription"] = ctx.PRDescription
+	data["SubmitterName"] = ctx.SubmitterName
+	data["BranchName"] = ctx.BranchName
+	data["BaseVersion"] = ctx.BaseVersion
+	data["SelfReview"] = ctx.SelfReview
+	data["DiffStat"] = ctx.DiffStat
+	data["DiffFull"] = ctx.DiffFull
+	data["MergeCheckResult"] = ctx.MergeCheckResult
+	data["MergeCostRating"] = ctx.MergeCostRating
+	data["ConflictFiles"] = ctx.ConflictFiles
+	data["TechReviewSummary"] = ctx.TechReviewSummary
+
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to execute prompt template: %w", err)
@@ -173,6 +202,12 @@ func GetRoleForTrigger(trigger string) Role {
 		return RoleConsult
 	case "project_import":
 		return RoleAssess
+	case "pr_evaluate":
+		return RoleEvaluate
+	case "pr_merge":
+		return RoleMerge
+	case "pr_biz_review":
+		return RoleMaintain
 	default:
 		return RoleMaintain
 	}

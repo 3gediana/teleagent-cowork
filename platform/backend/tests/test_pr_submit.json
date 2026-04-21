@@ -1,0 +1,1 @@
+{"title":"Test PR from branch","description":"Integration test PR","self_review":"{\"changed_functions\":[{\"file\":\"test.txt\",\"function\":\"new\",\"change_type\":\"add\",\"impact\":\"low\"}],\"overall_impact\":\"low\",\"merge_confidence\":\"high\"}"}

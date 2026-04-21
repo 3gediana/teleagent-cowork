@@ -31,6 +31,13 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	agentID, _ := c.Get("agent_id")
 	projectID := c.Query("project_id")
 
+	// Branch auto-routing: if agent is on a branch, use branch logic transparently
+	var agent model.Agent
+	if model.DB.Where("id = ?", agentID).First(&agent).Error == nil && agent.CurrentBranchID != nil {
+		h.submitOnBranch(c, agentID.(string), *agent.CurrentBranchID)
+		return
+	}
+
 	var req SubmitChangeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
@@ -329,6 +336,51 @@ func (h *ChangeHandler) Review(c *gin.Context) {
 		"data": gin.H{
 			"change_id": change.ID,
 			"status":    change.Status,
+		},
+	})
+}
+
+// submitOnBranch handles change.submit when the agent is on a branch.
+// It writes files directly to the branch worktree without audit/version checks.
+func (h *ChangeHandler) submitOnBranch(c *gin.Context, agentID string, branchID string) {
+	var req struct {
+		Description string                   `json:"description"`
+		Writes      []model.ChangeFileEntry  `json:"writes"`
+		Deletes     []string                 `json:"deletes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	if len(req.Writes) == 0 && len(req.Deletes) == 0 {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "NO_FILES", "message": "No files to submit"}})
+		return
+	}
+
+	// Write files to branch worktree
+	if err := service.WriteBranchFiles(branchID, req.Writes, req.Deletes); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "WRITE_FAILED", "message": err.Error()}})
+		return
+	}
+
+	// Commit in branch
+	desc := req.Description
+	if desc == "" {
+		desc = "branch changes"
+	}
+	if err := service.BranchCommit(branchID, desc); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "COMMIT_FAILED", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"branch_id":     branchID,
+			"writes_count":  len(req.Writes),
+			"deletes_count": len(req.Deletes),
+			"message":       "Changes written to branch",
 		},
 	})
 }

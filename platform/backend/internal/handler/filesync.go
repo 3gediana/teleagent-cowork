@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
+	"github.com/a3c/platform/internal/service"
 )
 
 type FileSyncHandler struct{}
@@ -89,6 +90,12 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		return
 	}
 
+	// Branch auto-routing: if agent is on a branch, return branch files transparently
+	if agent.CurrentBranchID != nil {
+		h.syncBranch(c, *agent.CurrentBranchID)
+		return
+	}
+
 	projectID := *agent.CurrentProjectID
 	project, _ := repo.GetProjectByID(projectID)
 	if project == nil {
@@ -155,6 +162,26 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 			"file_count":   len(allFiles),
 			"files":        allFiles,
 			"message":      "All project files synced. Write to .a3c_staging/{project_id}/full/ in your working directory.",
+		},
+	})
+}
+
+// syncBranch handles file_sync when the agent is on a branch.
+// It returns branch worktree files transparently, no locks needed (single-occupant).
+func (h *FileSyncHandler) syncBranch(c *gin.Context, branchID string) {
+	files, err := service.GetBranchFiles(branchID)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"branch_id":  branchID,
+			"file_count": len(files),
+			"files":      files,
+			"message":    "Branch files synced. Write to .a3c_staging/{project_id}/branch/{branch_id}/ in your working directory.",
 		},
 	})
 }

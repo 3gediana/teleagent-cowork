@@ -265,6 +265,16 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] %s error: %v", toolName, err)
 		}
 
+	case "evaluate_output":
+		if err := HandleEvaluateOutput(sessionID, projectID, args); err != nil {
+			log.Printf("[ToolHandler] evaluate_output error: %v", err)
+		}
+
+	case "merge_output":
+		if err := HandleMergeOutput(sessionID, projectID, args); err != nil {
+			log.Printf("[ToolHandler] merge_output error: %v", err)
+		}
+
 	default:
 		log.Printf("[ToolHandler] Unknown tool: %s", toolName)
 	}

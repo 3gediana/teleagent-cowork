@@ -1,0 +1,1 @@
+{"task_id":"task_2e8e522c","version":"v1.3","writes":[{"path":"utils.py","content":"def add(a, b):\n    return a + b\n\ndef divide(a, b):\n    return a / b  # no error handling!\n"}],"description":"Add utils.py with add and divide functions"}

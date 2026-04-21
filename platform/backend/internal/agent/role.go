@@ -1,5 +1,7 @@
 package agent
 
+import "github.com/a3c/platform/internal/model"
+
 type Role string
 
 const (
@@ -9,6 +11,8 @@ const (
 	RoleMaintain Role = "maintain"
 	RoleConsult  Role = "consult"
 	RoleAssess   Role = "assess"
+	RoleEvaluate Role = "evaluate" // PR tech evaluation (diff + dry-run merge + code review)
+	RoleMerge    Role = "merge"    // PR merge execution (git merge + conflict resolution)
 )
 
 type RoleConfig struct {
@@ -18,6 +22,8 @@ type RoleConfig struct {
 	PromptTemplate string   `json:"prompt_template"`
 	PlatformTools  []string `json:"platform_tools"`
 	OpenCodeTools  []string `json:"opencode_tools"`
+	ModelProvider  string   `json:"model_provider"` // override: e.g. "openai", "anthropic", "minimax-coding-plan"
+	ModelID        string   `json:"model_id"`       // override: e.g. "gpt-4o", "claude-sonnet-4-20250514", "MiniMax-M2.7"
 }
 
 var RoleConfigs = map[Role]*RoleConfig{
@@ -69,6 +75,22 @@ var RoleConfigs = map[Role]*RoleConfig{
 		PlatformTools:  []string{"assess_output"},
 		OpenCodeTools:  []string{"read", "glob"},
 	},
+	RoleEvaluate: {
+		Role:           RoleEvaluate,
+		Name:           "Evaluate Agent",
+		Description:    "Evaluates PRs: diff analysis, dry-run merge conflict detection, code quality review",
+		PromptTemplate: "evaluate.md",
+		PlatformTools:  []string{"evaluate_output"},
+		OpenCodeTools:  []string{"read", "glob"},
+	},
+	RoleMerge: {
+		Role:           RoleMerge,
+		Name:           "Merge Agent",
+		Description:    "Executes PR merges: git merge, simple conflict resolution, complex conflicts abort",
+		PromptTemplate: "merge.md",
+		PlatformTools:  []string{"merge_output"},
+		OpenCodeTools:  []string{"read", "edit", "glob"},
+	},
 }
 
 func GetRoleConfig(role Role) *RoleConfig {
@@ -84,4 +106,55 @@ func GetAvailableRoles() []Role {
 		roles = append(roles, r)
 	}
 	return roles
+}
+
+// GetRoleConfigWithOverride returns RoleConfig with DB overrides applied.
+// If no override exists, returns the default config (copy).
+func GetRoleConfigWithOverride(role Role) *RoleConfig {
+	base := GetRoleConfig(role)
+	if base == nil {
+		return nil
+	}
+	// Copy to avoid mutating the global
+	cfg := *base
+
+	var override model.RoleOverride
+	if model.DB.Where("role = ?", string(role)).First(&override).Error == nil {
+		if override.ModelProvider != "" {
+			cfg.ModelProvider = override.ModelProvider
+		}
+		if override.ModelID != "" {
+			cfg.ModelID = override.ModelID
+		}
+	}
+	return &cfg
+}
+
+// SetRoleOverride persists a model override for a role
+func SetRoleOverride(role Role, modelProvider, modelID string) error {
+	var override model.RoleOverride
+	result := model.DB.Where("role = ?", string(role)).First(&override)
+	if result.Error != nil {
+		// Create new
+		override = model.RoleOverride{
+			ID:            model.GenerateID("rover"),
+			Role:          string(role),
+			ModelProvider: modelProvider,
+			ModelID:       modelID,
+		}
+		return model.DB.Create(&override).Error
+	}
+	return model.DB.Model(&override).Updates(map[string]interface{}{
+		"model_provider": modelProvider,
+		"model_id":       modelID,
+	}).Error
+}
+
+// GetAllRoleConfigs returns all role configs with overrides applied
+func GetAllRoleConfigs() []*RoleConfig {
+	configs := make([]*RoleConfig, 0, len(RoleConfigs))
+	for r := range RoleConfigs {
+		configs = append(configs, GetRoleConfigWithOverride(r))
+	}
+	return configs
 }

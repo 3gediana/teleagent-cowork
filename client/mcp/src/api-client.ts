@@ -110,4 +110,57 @@ export class ApiClient {
     const { data } = await this.client.post('/api/v1/poll', { key: this.accessKey })
     return data
   }
+
+  // Branch APIs
+  async createBranch(name: string) {
+    const { data } = await this.client.post('/api/v1/branch/create', { name })
+    return data
+  }
+
+  async enterBranch(branchId: string) {
+    const { data } = await this.client.post('/api/v1/branch/enter', { branch_id: branchId })
+    return data
+  }
+
+  async leaveBranch() {
+    const { data } = await this.client.post('/api/v1/branch/leave', {})
+    return data
+  }
+
+  async listBranches() {
+    const { data } = await this.client.get('/api/v1/branch/list')
+    return data
+  }
+
+  async closeBranch(branchId: string) {
+    const { data } = await this.client.post('/api/v1/branch/close', { branch_id: branchId })
+    return data
+  }
+
+  async syncMain() {
+    const { data } = await this.client.post('/api/v1/branch/sync_main', {})
+    return data
+  }
+
+  // PR APIs
+  async submitPR(prData: {
+    title: string
+    description?: string
+    self_review: string
+  }) {
+    const { data } = await this.client.post('/api/v1/pr/submit', prData, {
+      timeout: 60000,
+    })
+    return data
+  }
+
+  async listPRs() {
+    const { data } = await this.client.get('/api/v1/pr/list')
+    return data
+  }
+
+  async getPR(prId: string) {
+    const { data } = await this.client.get(`/api/v1/pr/${prId}`)
+    return data
+  }
 }

@@ -73,6 +73,9 @@ func main() {
 	milestoneHandler := handler.NewMilestoneHandler()
 	rollbackHandler := handler.NewRollbackHandler()
 	gitHandler := handler.NewGitHandler()
+	branchHandler := handler.NewBranchHandler()
+	prHandler := handler.NewPRHandler()
+	roleHandler := handler.NewRoleHandler()
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -123,6 +126,27 @@ func main() {
 
 		auth.POST("/version/rollback", rollbackHandler.Rollback)
 		auth.GET("/version/list", rollbackHandler.ListVersions)
+
+		// Branch APIs
+		auth.POST("/branch/create", branchHandler.Create)
+		auth.POST("/branch/enter", branchHandler.Enter)
+		auth.POST("/branch/leave", branchHandler.Leave)
+		auth.GET("/branch/list", branchHandler.List)
+		auth.POST("/branch/close", branchHandler.Close)
+		auth.POST("/branch/sync_main", branchHandler.SyncMain)
+
+		// Role & Model APIs
+		auth.GET("/role/list", roleHandler.ListRoles)
+		auth.POST("/role/update_model", roleHandler.UpdateRoleModel)
+		auth.GET("/opencode/providers", roleHandler.GetProviders)
+
+		// PR APIs
+		auth.POST("/pr/submit", prHandler.Submit)
+		auth.GET("/pr/list", prHandler.List)
+		auth.GET("/pr/:pr_id", prHandler.GetPR)
+		auth.POST("/pr/approve_review", prHandler.ApproveReview)
+		auth.POST("/pr/approve_merge", prHandler.ApproveMerge)
+		auth.POST("/pr/reject", prHandler.Reject)
 	}
 
 	internal := v1.Group("/internal")

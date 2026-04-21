@@ -166,3 +166,76 @@ func (c *Client) Health() bool {
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
 }
+
+// ProviderInfo represents a model provider from OpenCode
+type ProviderInfo struct {
+	ID          string                            `json:"id"`
+	Name        string                            `json:"name"`
+	Models      map[string]ProviderModelConfig    `json:"models,omitempty"`
+}
+
+// ProviderModelConfig represents a model within a provider (from OpenCode config format)
+type ProviderModelConfig struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Reasoning    bool    `json:"reasoning,omitempty"`
+	ToolCall     bool    `json:"tool_call,omitempty"`
+	Temperature  bool    `json:"temperature,omitempty"`
+	Attachment   bool    `json:"attachment,omitempty"`
+}
+
+// ProviderModel is a flattened model entry for API responses
+type ProviderModel struct {
+	ProviderID   string `json:"provider_id"`
+	ProviderName string `json:"provider_name"`
+	ModelID      string `json:"model_id"`
+	ModelName    string `json:"model_name"`
+	Reasoning    bool   `json:"reasoning"`
+	ToolCall     bool   `json:"tool_call"`
+}
+
+// GetProviders fetches available providers and models from OpenCode serve
+func (c *Client) GetProviders() ([]ProviderInfo, map[string]string, error) {
+	resp, err := c.httpClient.Get(c.baseURL + "/provider")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get providers: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("get providers failed (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		All       []ProviderInfo    `json:"all"`
+		Default   map[string]string `json:"default"`
+		Connected []string          `json:"connected"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode providers: %w", err)
+	}
+	return result.All, result.Default, nil
+}
+
+// FlattenProviders converts ProviderInfo list to flat ProviderModel list for UI
+func FlattenProviders(providers []ProviderInfo) []ProviderModel {
+	var models []ProviderModel
+	for _, p := range providers {
+		for mid, m := range p.Models {
+			name := m.Name
+			if name == "" {
+				name = mid
+			}
+			models = append(models, ProviderModel{
+				ProviderID:   p.ID,
+				ProviderName: p.Name,
+				ModelID:      mid,
+				ModelName:    name,
+				Reasoning:    m.Reasoning,
+				ToolCall:     m.ToolCall,
+			})
+		}
+	}
+	return models
+}

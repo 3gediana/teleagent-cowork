@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { projectApi, authApi } from '../api/endpoints'
+import { projectApi, authApi, roleApi, providerApi } from '../api/endpoints'
 import { Modal, Input, Select, Button, SuccessResult, useModal, Textarea } from '../components/Modal'
 import { useAppStore } from '../stores/appStore'
 
@@ -106,16 +106,142 @@ export default function SettingsPage() {
   const registerModal = useModal()
   const createProjectModal = useModal()
   const [projects, setProjects] = useState<any[]>([])
+  const [roles, setRoles] = useState<any[]>([])
+  const [modelOptions, setModelOptions] = useState<any[]>([])
+  const [saving, setSaving] = useState<string | null>(null)
+  const [searchOpen, setSearchOpen] = useState<string | null>(null) // role being searched
+  const [searchQuery, setSearchQuery] = useState('')
 
   useEffect(() => {
     projectApi.list().then((res) => {
       if (res.success) setProjects(res.data || [])
     })
+    roleApi.list().then((res) => {
+      if (res.success) setRoles(res.data || [])
+    })
+    providerApi.list().then((res) => {
+      if (res.success && res.data) {
+        setModelOptions(res.data.models || [])
+      }
+    })
   }, [])
+
+  const handleModelChange = async (role: string, modelProvider: string, modelId: string) => {
+    setSaving(role)
+    try {
+      await roleApi.updateModel(role, modelProvider, modelId)
+      setRoles(prev => prev.map(r => r.role === role ? { ...r, model_provider: modelProvider, model_id: modelId } : r))
+    } finally {
+      setSaving(null)
+    }
+  }
 
   return (
     <div className="max-w-4xl space-y-10">
       <h1 className="text-2xl font-extrabold text-slate-800">Workspace Settings</h1>
+
+      <section>
+        <h2 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+           <span className="p-1.5 bg-purple-100 text-purple-600 rounded-lg">🧠</span> Agent Model Configuration
+        </h2>
+        <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-100">
+            <p className="text-slate-500 text-sm">Choose which LLM model each platform agent uses. Overrides are persisted across restarts.</p>
+          </div>
+          <div className="divide-y divide-slate-50">
+            {roles.map(r => {
+              const currentModel = r.model_provider && r.model_id
+                ? `${r.model_provider}/${r.model_id}`
+                : ''
+              const isOpen = searchOpen === r.role
+              const q = searchQuery.toLowerCase()
+              const filtered = q
+                ? modelOptions.filter((m: any) =>
+                    m.model_name.toLowerCase().includes(q) ||
+                    m.model_id.toLowerCase().includes(q) ||
+                    m.provider_name.toLowerCase().includes(q) ||
+                    m.provider_id.toLowerCase().includes(q)
+                  ).slice(0, 50)
+                : modelOptions.slice(0, 30)
+              return (
+                <div key={r.role} className="p-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-slate-800">{r.name}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{r.description}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {currentModel ? (
+                        <span className="text-xs font-mono bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">{currentModel}</span>
+                      ) : (
+                        <span className="text-xs text-slate-400 italic">Default</span>
+                      )}
+                      <button
+                        className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 font-medium transition-colors"
+                        onClick={() => { setSearchOpen(isOpen ? null : r.role); setSearchQuery('') }}
+                      >
+                        {isOpen ? 'Close' : 'Change'}
+                      </button>
+                      {currentModel && (
+                        <button
+                          className="text-xs px-2 py-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-500 font-medium transition-colors"
+                          disabled={saving === r.role}
+                          onClick={() => handleModelChange(r.role, '', '')}
+                        >
+                          Reset
+                        </button>
+                      )}
+                      {saving === r.role && <span className="text-xs text-blue-500 animate-pulse">Saving...</span>}
+                    </div>
+                  </div>
+                  {isOpen && (
+                    <div className="mt-3 border border-slate-200 rounded-xl overflow-hidden">
+                      <input
+                        className="w-full px-3 py-2 text-sm border-b border-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        placeholder="Search models (e.g. claude, gpt-4, MiniMax)..."
+                        value={searchQuery}
+                        onChange={(e: any) => setSearchQuery(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="max-h-60 overflow-y-auto">
+                        {filtered.length === 0 ? (
+                          <div className="px-3 py-4 text-center text-slate-400 text-sm">No models found</div>
+                        ) : (
+                          filtered.map((m: any) => {
+                            const val = `${m.provider_id}/${m.model_id}`
+                            const isActive = val === currentModel
+                            return (
+                              <button
+                                key={val}
+                                className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 transition-colors flex items-center justify-between gap-2 ${isActive ? 'bg-blue-50 text-blue-700' : 'text-slate-700'}`}
+                                onClick={() => {
+                                  handleModelChange(r.role, m.provider_id, m.model_id)
+                                  setSearchOpen(null)
+                                  setSearchQuery('')
+                                }}
+                              >
+                                <span className="truncate">
+                                  <span className="font-medium">{m.provider_name}</span>
+                                  <span className="text-slate-400 mx-1">/</span>
+                                  <span>{m.model_name}</span>
+                                </span>
+                                {isActive && <span className="text-blue-500 text-xs">✓ Active</span>}
+                              </button>
+                            )
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {roles.length === 0 && (
+              <div className="p-6 text-center text-slate-400 text-sm">Loading agent roles...</div>
+            )}
+          </div>
+        </div>
+      </section>
 
       <section>
         <h2 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">

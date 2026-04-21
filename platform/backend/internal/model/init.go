@@ -29,18 +29,27 @@ func InitDB(cfg *config.DatabaseConfig) error {
 	// Ensure connection uses utf8mb4
 	DB.Exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
 
-	// Drop old index if table exists (ignore error if index doesn't exist)
+	// Drop old indexes if they exist (MySQL doesn't support IF EXISTS for DROP INDEX, so we ignore errors)
 	if DB.Migrator().HasTable(&Agent{}) {
-		DB.Exec("ALTER TABLE agent DROP INDEX uni_agent_name")
-		DB.Exec("ALTER TABLE agent DROP INDEX idx_agent_name")
+		DB.Exec("ALTER TABLE agent DROP INDEX uni_agent_name") // may fail, that's OK
+		DB.Exec("ALTER TABLE agent DROP INDEX idx_agent_name") // may fail, that's OK
+	}
+	// Drop old unique index on role_override if it exists from previous schema
+	if DB.Migrator().HasTable(&RoleOverride{}) {
+		DB.Exec("ALTER TABLE role_override DROP INDEX uni_role_override_role") // may fail, that's OK
 	}
 
 	if err = DB.AutoMigrate(
 		&Project{}, &Agent{}, &ContentBlock{},
 		&Milestone{}, &MilestoneArchive{},
 		&Task{}, &FileLock{}, &Change{},
+		&Branch{}, &PullRequest{}, &RoleOverride{},
 	); err != nil {
-		return fmt.Errorf("failed to auto migrate: %w", err)
+		log.Printf("[DB] AutoMigrate warning: %v (attempting retry)", err)
+		// Retry once - GORM sometimes fails on first pass with index issues
+		if err2 := DB.AutoMigrate(&RoleOverride{}); err2 != nil {
+			return fmt.Errorf("failed to auto migrate: %w", err)
+		}
 	}
 
 	// Ensure text columns use utf8mb4 for Chinese characters
