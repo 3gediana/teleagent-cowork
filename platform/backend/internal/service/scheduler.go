@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/a3c/platform/internal/model"
+	"gorm.io/gorm"
 )
 
 var maintainTimerRunning = false
@@ -54,22 +55,25 @@ func StartHeartbeatChecker() {
 				if elapsed > 5*time.Minute {
 					log.Printf("[Heartbeat] Agent %s (%s) timed out, releasing resources", a.ID, a.Name)
 
-					a.Status = "offline"
-					model.DB.Save(&a)
+					err := model.DB.Transaction(func(tx *gorm.DB) error {
+						if err := tx.Model(&model.Agent{}).Where("id = ?", a.ID).Update("status", "offline").Error; err != nil {
+							return err
+						}
+						if err := tx.Model(&model.FileLock{}).
+							Where("agent_id = ? AND released_at IS NULL", a.ID).
+							Update("released_at", now).Error; err != nil {
+							return err
+						}
+						if err := tx.Model(&model.Task{}).
+							Where("assignee_id = ? AND status = 'claimed'", a.ID).
+							Updates(map[string]interface{}{"status": "pending", "assignee_id": nil}).Error; err != nil {
+							return err
+						}
+						return nil
+					})
 
-					var locks []model.FileLock
-					model.DB.Where("agent_id = ? AND released_at IS NULL", a.ID).Find(&locks)
-					for i := range locks {
-						locks[i].ReleasedAt = &now
-						model.DB.Save(&locks[i])
-					}
-
-					var tasks []model.Task
-					model.DB.Where("assignee_id = ? AND status = 'claimed'", a.ID).Find(&tasks)
-					for i := range tasks {
-						tasks[i].Status = "pending"
-						tasks[i].AssigneeID = nil
-						model.DB.Save(&tasks[i])
+					if err != nil {
+						log.Printf("[Heartbeat] Failed to release resources for agent %s: %v", a.ID, err)
 					}
 
 					model.RDB.Del(model.DB.Statement.Context, "a3c:agent:"+a.ID+":heartbeat")

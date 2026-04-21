@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
 )
@@ -53,6 +54,8 @@ func (h *TaskHandler) List(c *gin.Context) {
 
 func (h *TaskHandler) Claim(c *gin.Context) {
 	agentID, _ := c.Get("agent_id")
+	aid := agentID.(string)
+
 	var req struct {
 		TaskID string `json:"task_id" binding:"required"`
 	}
@@ -61,9 +64,8 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 		return
 	}
 
-	// Check if agent already has a claimed task
-	var existingTask model.Task
-	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID.(string)).First(&existingTask).Error; err == nil {
+	var claimedTask model.Task
+	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", aid).First(&claimedTask).Error; err == nil {
 		c.JSON(409, gin.H{
 			"success": false,
 			"error": gin.H{
@@ -71,32 +73,45 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 				"message": "You already have a claimed task",
 			},
 			"data": gin.H{
-				"claimed_task_id":   existingTask.ID,
-				"claimed_task_name": existingTask.Name,
+				"claimed_task_id":   claimedTask.ID,
+				"claimed_task_name": claimedTask.Name,
 			},
 		})
 		return
 	}
 
+	result := model.DB.Model(&model.Task{}).
+		Where("id = ? AND status = 'pending'", req.TaskID).
+		Updates(map[string]interface{}{
+			"status":      "claimed",
+			"assignee_id": aid,
+		})
+
+	if result.Error != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to claim task"}})
+		return
+	}
+
+	if result.RowsAffected == 0 {
+		var task model.Task
+		if err := model.DB.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
+			c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
+			return
+		}
+		if task.Status == "claimed" {
+			c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_CLAIMED", "message": "Task already claimed"}})
+			return
+		}
+		if task.Status == "completed" {
+			c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_COMPLETED", "message": "Task already completed"}})
+			return
+		}
+		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_UNCLAIMABLE", "message": "Task cannot be claimed"}})
+		return
+	}
+
 	var task model.Task
-	if err := model.DB.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
-		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
-		return
-	}
-
-	if task.Status == "claimed" {
-		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_CLAIMED", "message": "Task already claimed"}})
-		return
-	}
-	if task.Status == "completed" {
-		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_COMPLETED", "message": "Task already completed"}})
-		return
-	}
-
-	task.Status = "claimed"
-	aid := agentID.(string)
-	task.AssigneeID = &aid
-	model.DB.Save(&task)
+	model.DB.Where("id = ?", req.TaskID).First(&task)
 
 	c.JSON(200, gin.H{
 		"success": true,
@@ -132,15 +147,25 @@ func (h *TaskHandler) Complete(c *gin.Context) {
 	}
 
 	now := time.Now()
-	task.Status = "completed"
-	task.CompletedAt = &now
-	model.DB.Save(&task)
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+			"status":       "completed",
+			"completed_at": now,
+		}).Error; err != nil {
+			return err
+		}
 
-	var locks []model.FileLock
-	model.DB.Where("task_id = ? AND released_at IS NULL", task.ID).Find(&locks)
-	for i := range locks {
-		locks[i].ReleasedAt = &now
-		model.DB.Save(&locks[i])
+		if err := tx.Model(&model.FileLock{}).
+			Where("task_id = ? AND released_at IS NULL", task.ID).
+			Update("released_at", now).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to complete task"}})
+		return
 	}
 
 	c.JSON(200, gin.H{
