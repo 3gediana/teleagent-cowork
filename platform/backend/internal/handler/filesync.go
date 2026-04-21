@@ -25,21 +25,22 @@ type FileSyncRequest struct {
 
 func loadGitignore(repoPath string) map[string]bool {
 	ignorePatterns := map[string]bool{
-		".git":        true,
-		".a3c":        true,
+		".git":         true,
+		".a3c":         true,
+		".a3c_staging": true,
 		"node_modules": true,
-		".env":        true,
-		".DS_Store":   true,
-		"Thumbs.db":   true,
+		".env":         true,
+		".DS_Store":    true,
+		"Thumbs.db":    true,
 	}
-	
+
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 	file, err := os.Open(gitignorePath)
 	if err != nil {
 		return ignorePatterns
 	}
 	defer file.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -49,7 +50,7 @@ func loadGitignore(repoPath string) map[string]bool {
 		line = strings.TrimSuffix(line, "/")
 		ignorePatterns[line] = true
 	}
-	
+
 	return ignorePatterns
 }
 
@@ -101,19 +102,6 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		currentVersion = versionBlock.Content
 	}
 
-	stagingBase := filepath.Join("data", "projects", projectID, "staging")
-	fullStaging := filepath.Join(stagingBase, "full")
-	os.MkdirAll(fullStaging, 0755)
-
-	type FileInfo struct {
-		Path    string `json:"path"`
-		Content string `json:"content,omitempty"`
-	}
-
-	noChange := []string{}
-	unlockedModify := []FileInfo{}
-	lockedModify := []FileInfo{}
-
 	var allLocks []model.FileLock
 	model.DB.Where("project_id = ? AND released_at IS NULL AND expires_at > ?", projectID, time.Now()).Find(&allLocks)
 	lockedFiles := map[string]bool{}
@@ -125,9 +113,17 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		}
 	}
 
+	type FileInfo struct {
+		Path    string `json:"path"`
+		Content string `json:"content,omitempty"`
+		Locked  bool   `json:"locked"`
+	}
+
+	var allFiles []FileInfo
+
 	repoPath := filepath.Join("data", "projects", projectID, "repo")
 	ignorePatterns := loadGitignore(repoPath)
-	
+
 	if _, err := os.Stat(repoPath); err == nil {
 		filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
@@ -135,27 +131,17 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 			}
 			relPath, _ := filepath.Rel(repoPath, path)
 			relPath = strings.ReplaceAll(relPath, "\\", "/")
-			
+
 			if shouldIgnore(relPath, ignorePatterns) {
 				return nil
 			}
 
-			stagingPath := filepath.Join(fullStaging, relPath)
-			os.MkdirAll(filepath.Dir(stagingPath), 0755)
 			srcData, _ := os.ReadFile(path)
-			stagingData, stagingErr := os.ReadFile(stagingPath)
-
-			if stagingErr != nil || string(srcData) != string(stagingData) {
-				fileInfo := FileInfo{Path: relPath, Content: string(srcData)}
-				if lockedFiles[relPath] {
-					lockedModify = append(lockedModify, fileInfo)
-				} else {
-					unlockedModify = append(unlockedModify, fileInfo)
-				}
-				os.WriteFile(stagingPath, srcData, 0644)
-			} else {
-				noChange = append(noChange, relPath)
-			}
+			allFiles = append(allFiles, FileInfo{
+				Path:    relPath,
+				Content: string(srcData),
+				Locked:  lockedFiles[relPath],
+			})
 			return nil
 		})
 	}
@@ -164,13 +150,11 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		"success": true,
 		"data": gin.H{
 			"version":      currentVersion,
-			"staging_path": ".a3c_staging/full/",
-			"files": gin.H{
-				"no_change":        noChange,
-				"unlocked_modify":  unlockedModify,
-				"locked_modify":    lockedModify,
-			},
-			"message": "Files downloaded to staging area. AI decides whether to apply.",
+			"project_id":   projectID,
+			"project_name": project.Name,
+			"file_count":   len(allFiles),
+			"files":        allFiles,
+			"message":      "All project files synced. Write to .a3c_staging/{project_id}/full/ in your working directory.",
 		},
 	})
 }

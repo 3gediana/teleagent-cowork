@@ -7,7 +7,10 @@ import { OpenCodeClient } from './opencode-client.js'
 import { loadConfig, saveConfig } from './config.js'
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 const PLATFORM_URL = process.env.A3C_PLATFORM_URL || 'http://localhost:3003'
 const ACCESS_KEY = process.env.A3C_ACCESS_KEY || ''
@@ -143,31 +146,33 @@ async function main() {
       return { content: [{ type: 'text', text: 'Error: No project selected' }] }
     }
 
-    const cwd = process.cwd()
-    const stagingDir = path.join(cwd, '.a3c_staging', projectId, 'full')
+    const clientRoot = path.join(__dirname, '..', '..')
+    const stagingDir = path.join(clientRoot, '.a3c_staging', projectId, 'full')
     
     fs.mkdirSync(stagingDir, { recursive: true })
 
-    const files = data.data?.files || {}
-    const unlockedModify: Array<{ path: string; content: string }> = files.unlocked_modify || []
-    const lockedModify: Array<{ path: string; content: string }> = files.locked_modify || []
+    const files: Array<{ path: string; content: string; locked: boolean }> = data.data?.files
+    if (!Array.isArray(files)) {
+      return { content: [{ type: 'text', text: 'Error: Invalid response format from server' }] }
+    }
     
-    const allFiles = [...unlockedModify, ...lockedModify]
     let writtenCount = 0
     const writtenPaths: string[] = []
+    const lockedPaths: string[] = []
 
-    for (const file of allFiles) {
-      if (file.content) {
-        const filePath = path.join(stagingDir, file.path)
-        const dir = path.dirname(filePath)
-        fs.mkdirSync(dir, { recursive: true })
-        fs.writeFileSync(filePath, file.content, 'utf-8')
-        writtenPaths.push(file.path)
-        writtenCount++
+    for (const file of files) {
+      const filePath = path.join(stagingDir, file.path)
+      const dir = path.dirname(filePath)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(filePath, file.content, 'utf-8')
+      writtenPaths.push(file.path)
+      writtenCount++
+      if (file.locked) {
+        lockedPaths.push(file.path)
       }
     }
 
-    const versionFile = path.join(cwd, '.a3c_version')
+    const versionFile = path.join(clientRoot, '.a3c_version')
     fs.writeFileSync(versionFile, data.data?.version || 'v1.0', 'utf-8')
 
     const result = {
@@ -175,11 +180,9 @@ async function main() {
       data: {
         version: data.data?.version,
         staging_dir: stagingDir,
-        relative_dir: `.a3c_staging/${projectId}/full/`,
         files_written: writtenCount,
         written_files: writtenPaths,
-        no_change: files.no_change || [],
-        locked_files: lockedModify.map((f: { path: string }) => f.path),
+        locked_files: lockedPaths,
         message: `Files synced to ${stagingDir}. ${writtenCount} files written. Version saved to .a3c_version`,
       }
     }
