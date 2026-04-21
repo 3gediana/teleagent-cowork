@@ -103,6 +103,10 @@ func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionCo
 	return session
 }
 
+func (m *AgentManager) RegisterSession(session *Session) {
+	m.sessions[session.ID] = session
+}
+
 func (m *AgentManager) GetSession(id string) *Session {
 	return m.sessions[id]
 }

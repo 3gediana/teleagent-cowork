@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/a3c/platform/internal/agent"
@@ -87,6 +88,8 @@ func TriggerEvaluateAgent(pr *model.PullRequest) error {
 		PRID:    pr.ID,
 	}
 
+	agent.DefaultManager.RegisterSession(session)
+
 	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
 		return fmt.Errorf("failed to dispatch evaluate agent: %w", err)
 	}
@@ -140,6 +143,8 @@ func TriggerMergeAgent(pr *model.PullRequest) error {
 		Context: ctx,
 		PRID:    pr.ID,
 	}
+
+	agent.DefaultManager.RegisterSession(session)
 
 	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
 		return fmt.Errorf("failed to dispatch merge agent: %w", err)
@@ -220,6 +225,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 
 	// Determine outcome
 	result, _ := args["result"].(string) // approved / needs_work / conflicts / high_risk
+	result = strings.ToLower(result)
 	mergeCostRating, _ := args["merge_cost_rating"].(string)
 
 	switch result {
@@ -286,6 +292,7 @@ func HandleMergeOutput(sessionID, projectID string, args map[string]interface{})
 	}
 
 	result, _ := args["result"].(string) // success / failed
+	result = strings.ToLower(result)
 
 	switch result {
 	case "success":
