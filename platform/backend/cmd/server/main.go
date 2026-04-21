@@ -134,6 +134,8 @@ func main() {
 		auth.GET("/branch/list", branchHandler.List)
 		auth.POST("/branch/close", branchHandler.Close)
 		auth.POST("/branch/sync_main", branchHandler.SyncMain)
+		auth.POST("/branch/change_submit", branchHandler.BranchChangeSubmit)
+		auth.GET("/branch/file_sync", branchHandler.BranchFileSync)
 
 		// Role & Model APIs
 		auth.GET("/role/list", roleHandler.ListRoles)

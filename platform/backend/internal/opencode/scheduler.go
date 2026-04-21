@@ -714,6 +714,7 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 		"assess_output":    true,
 		"evaluate_output":  true,
 		"merge_output":     true,
+		"biz_review_output": true,
 	}
 
 	if !platformTools[toolName] {

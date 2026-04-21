@@ -135,6 +135,76 @@ func (h *BranchHandler) Close(c *gin.Context) {
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"message": "Branch closed"}})
 }
 
+// BranchChangeSubmit writes files to the current branch worktree (no audit, no version check)
+func (h *BranchHandler) BranchChangeSubmit(c *gin.Context) {
+	agentID, _ := c.Get("agent_id")
+	var agent model.Agent
+	if model.DB.Where("id = ?", agentID).First(&agent).Error != nil || agent.CurrentBranchID == nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "NOT_ON_BRANCH", "message": "Not on a branch. Use branch/enter first."}})
+		return
+	}
+
+	var req struct {
+		Writes      []model.ChangeFileEntry `json:"writes"`
+		Deletes     []string                 `json:"deletes"`
+		Description string                   `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	branchID := *agent.CurrentBranchID
+
+	// Write files to branch worktree
+	if err := service.WriteBranchFiles(branchID, req.Writes, req.Deletes); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "WRITE_FAILED", "message": err.Error()}})
+		return
+	}
+
+	// Auto-commit in the branch
+	description := req.Description
+	if description == "" {
+		description = "branch change"
+	}
+	if err := service.BranchCommit(branchID, description); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "COMMIT_FAILED", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"branch_id": branchID,
+			"message":   "Changes written to branch",
+		},
+	})
+}
+
+// BranchFileSync returns all files in the current branch worktree
+func (h *BranchHandler) BranchFileSync(c *gin.Context) {
+	agentID, _ := c.Get("agent_id")
+	var agent model.Agent
+	if model.DB.Where("id = ?", agentID).First(&agent).Error != nil || agent.CurrentBranchID == nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "NOT_ON_BRANCH", "message": "Not on a branch"}})
+		return
+	}
+
+	files, err := service.GetBranchFiles(*agent.CurrentBranchID)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"success":   true,
+		"data": gin.H{
+			"branch_id": *agent.CurrentBranchID,
+			"files":     files,
+		},
+	})
+}
+
 // SyncMain merges main into the current branch
 func (h *BranchHandler) SyncMain(c *gin.Context) {
 	agentID, _ := c.Get("agent_id")

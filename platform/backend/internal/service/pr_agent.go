@@ -198,6 +198,8 @@ func TriggerMaintainBizReview(pr *model.PullRequest) error {
 		PRID:    pr.ID,
 	}
 
+	agent.DefaultManager.RegisterSession(session)
+
 	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
 		return fmt.Errorf("failed to dispatch maintain agent for biz review: %w", err)
 	}
@@ -226,6 +228,21 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 	// Determine outcome
 	result, _ := args["result"].(string) // approved / needs_work / conflicts / high_risk
 	result = strings.ToLower(result)
+
+	// Fallback: normalize non-standard result values from LLM
+	switch {
+	case strings.Contains(result, "conflict") && !strings.Contains(result, "no conflict"):
+		result = "conflicts"
+	case strings.Contains(result, "high risk") || strings.Contains(result, "risky") || strings.Contains(result, "dangerous"):
+		result = "high_risk"
+	case strings.Contains(result, "need") && strings.Contains(result, "work"):
+		result = "needs_work"
+	case strings.Contains(result, "approve") || strings.Contains(result, "feasible") ||
+		strings.Contains(result, "safe") || strings.Contains(result, "ok") ||
+		strings.Contains(result, "good") || strings.Contains(result, "acceptable"):
+		result = "approved"
+	}
+
 	mergeCostRating, _ := args["merge_cost_rating"].(string)
 
 	switch result {
@@ -291,11 +308,23 @@ func HandleMergeOutput(sessionID, projectID string, args map[string]interface{})
 		return fmt.Errorf("PR %s not found", session.PRID)
 	}
 
-	result, _ := args["result"].(string) // success / failed
+	result, _ := args["result"].(string) // success / conflict_resolved / failed
 	result = strings.ToLower(result)
 
+	// Fallback: normalize non-standard result values from LLM
+	switch {
+	case strings.Contains(result, "fail") || strings.Contains(result, "abort") || strings.Contains(result, "error"):
+		result = "failed"
+	case strings.Contains(result, "conflict") && strings.Contains(result, "resolv"):
+		result = "conflict_resolved"
+	case strings.Contains(result, "success") || strings.Contains(result, "merged") ||
+		strings.Contains(result, "complete") || strings.Contains(result, "done") ||
+		strings.Contains(result, "ok"):
+		result = "success"
+	}
+
 	switch result {
-	case "success":
+	case "success", "conflict_resolved":
 		// Merge succeeded - this should already be handled by ExecuteMerge
 		// but we update PR status here as well
 		now := time.Now()
@@ -320,5 +349,75 @@ func HandleMergeOutput(sessionID, projectID string, args map[string]interface{})
 	}
 
 	log.Printf("[PR] Merge output for PR %s: result=%s", pr.ID, result)
+	return nil
+}
+
+// HandleBizReviewOutput processes the maintain agent's PR business review output
+func HandleBizReviewOutput(sessionID, projectID string, args map[string]interface{}) error {
+	session := agent.DefaultManager.GetSession(sessionID)
+	if session == nil || session.PRID == "" {
+		return fmt.Errorf("no PR associated with session %s", sessionID)
+	}
+
+	var pr model.PullRequest
+	if model.DB.Where("id = ?", session.PRID).First(&pr).Error != nil {
+		return fmt.Errorf("PR %s not found", session.PRID)
+	}
+
+	// Store biz review
+	resultJSON, _ := json.Marshal(args)
+	pr.BizReview = string(resultJSON)
+
+	// Store version suggestion
+	if vs, ok := args["version_suggestion"].(string); ok && vs != "" {
+		pr.VersionSuggestion = vs
+	}
+
+	// Determine outcome
+	result, _ := args["result"].(string)
+	result = strings.ToLower(result)
+
+	// Fallback: normalize non-standard result values from LLM
+	switch {
+	case strings.Contains(result, "reject") || strings.Contains(result, "deny"):
+		result = "rejected"
+	case strings.Contains(result, "need") && strings.Contains(result, "change"):
+		result = "needs_changes"
+	case strings.Contains(result, "approve") || strings.Contains(result, "accept") ||
+		strings.Contains(result, "ok") || strings.Contains(result, "good") ||
+		strings.Contains(result, "align"):
+		result = "approved"
+	}
+
+	switch result {
+	case "approved":
+		pr.Status = "pending_human_merge"
+		model.DB.Save(&pr)
+		BroadcastEvent(projectID, "PR_BIZ_APPROVED", map[string]interface{}{
+			"pr_id":             pr.ID,
+			"title":             pr.Title,
+			"version_suggestion": pr.VersionSuggestion,
+		})
+
+	case "rejected":
+		pr.Status = "evaluated"
+		model.DB.Save(&pr)
+		BroadcastEvent(projectID, "PR_BIZ_REJECTED", map[string]interface{}{
+			"pr_id":  pr.ID,
+			"title":  pr.Title,
+			"reason": args["biz_review"],
+		})
+
+	case "needs_changes":
+		pr.Status = "evaluated"
+		model.DB.Save(&pr)
+		BroadcastEvent(projectID, "PR_NEEDS_CHANGES", map[string]interface{}{
+			"pr_id":  pr.ID,
+			"title":  pr.Title,
+			"reason": args["biz_review"],
+		})
+	}
+
+	log.Printf("[PR] Biz review output for PR %s: result=%s, version_suggestion=%s", pr.ID, result, pr.VersionSuggestion)
 	return nil
 }

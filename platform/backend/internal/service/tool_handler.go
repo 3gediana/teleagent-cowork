@@ -275,6 +275,11 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] merge_output error: %v", err)
 		}
 
+	case "biz_review_output":
+		if err := HandleBizReviewOutput(sessionID, projectID, args); err != nil {
+			log.Printf("[ToolHandler] biz_review_output error: %v", err)
+		}
+
 	default:
 		log.Printf("[ToolHandler] Unknown tool: %s", toolName)
 	}

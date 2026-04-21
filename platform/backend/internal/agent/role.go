@@ -54,9 +54,9 @@ var RoleConfigs = map[Role]*RoleConfig{
 	RoleMaintain: {
 		Role:           RoleMaintain,
 		Name:           "Maintain Agent",
-		Description:    "Manages project execution path, creates tasks, updates milestones",
+		Description:    "Manages project execution path, creates tasks, updates milestones, PR business review",
 		PromptTemplate: "maintain.md",
-		PlatformTools:  []string{"create_task", "delete_task", "update_milestone", "propose_direction", "write_milestone"},
+		PlatformTools:  []string{"create_task", "delete_task", "update_milestone", "propose_direction", "write_milestone", "biz_review_output"},
 		OpenCodeTools:  []string{"read", "edit", "glob"},
 	},
 	RoleConsult: {
