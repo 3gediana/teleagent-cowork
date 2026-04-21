@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -20,6 +21,63 @@ func NewFileSyncHandler() *FileSyncHandler {
 
 type FileSyncRequest struct {
 	Version string `json:"version"`
+}
+
+func loadGitignore(repoPath string) map[string]bool {
+	ignorePatterns := map[string]bool{
+		".git":        true,
+		".a3c":        true,
+		"node_modules": true,
+		".env":        true,
+		".DS_Store":   true,
+		"Thumbs.db":   true,
+	}
+	
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
+	file, err := os.Open(gitignorePath)
+	if err != nil {
+		return ignorePatterns
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSuffix(line, "/")
+		ignorePatterns[line] = true
+	}
+	
+	return ignorePatterns
+}
+
+func shouldIgnore(relPath string, ignorePatterns map[string]bool) bool {
+	parts := strings.Split(relPath, "/")
+	for _, part := range parts {
+		if ignorePatterns[part] {
+			return true
+		}
+	}
+	if ignorePatterns[relPath] {
+		return true
+	}
+	for pattern := range ignorePatterns {
+		if strings.HasSuffix(pattern, "/*") {
+			prefix := strings.TrimSuffix(pattern, "/*")
+			if strings.HasPrefix(relPath, prefix+"/") {
+				return true
+			}
+		}
+		if strings.Contains(pattern, "*") {
+			matched, _ := filepath.Match(pattern, filepath.Base(relPath))
+			if matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *FileSyncHandler) Sync(c *gin.Context) {
@@ -68,6 +126,8 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 	}
 
 	repoPath := filepath.Join("data", "projects", projectID, "repo")
+	ignorePatterns := loadGitignore(repoPath)
+	
 	if _, err := os.Stat(repoPath); err == nil {
 		filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
@@ -75,7 +135,8 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 			}
 			relPath, _ := filepath.Rel(repoPath, path)
 			relPath = strings.ReplaceAll(relPath, "\\", "/")
-			if strings.HasPrefix(relPath, ".git") || strings.HasPrefix(relPath, ".a3c") {
+			
+			if shouldIgnore(relPath, ignorePatterns) {
 				return nil
 			}
 

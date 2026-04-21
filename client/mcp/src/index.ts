@@ -5,6 +5,9 @@ import { ApiClient } from './api-client.js'
 import { Poller } from './poller.js'
 import { OpenCodeClient } from './opencode-client.js'
 import { loadConfig, saveConfig } from './config.js'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
 
 const PLATFORM_URL = process.env.A3C_PLATFORM_URL || 'http://localhost:3003'
 const ACCESS_KEY = process.env.A3C_ACCESS_KEY || ''
@@ -130,7 +133,58 @@ async function main() {
     version: z.string().describe('Current local version'),
   }, async ({ version }) => {
     const data = await api.syncFiles(version)
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    
+    if (!data.success) {
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    const projectId = api.projectId
+    if (!projectId) {
+      return { content: [{ type: 'text', text: 'Error: No project selected' }] }
+    }
+
+    const cwd = process.cwd()
+    const stagingDir = path.join(cwd, '.a3c_staging', projectId, 'full')
+    
+    fs.mkdirSync(stagingDir, { recursive: true })
+
+    const files = data.data?.files || {}
+    const unlockedModify: Array<{ path: string; content: string }> = files.unlocked_modify || []
+    const lockedModify: Array<{ path: string; content: string }> = files.locked_modify || []
+    
+    const allFiles = [...unlockedModify, ...lockedModify]
+    let writtenCount = 0
+    const writtenPaths: string[] = []
+
+    for (const file of allFiles) {
+      if (file.content) {
+        const filePath = path.join(stagingDir, file.path)
+        const dir = path.dirname(filePath)
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(filePath, file.content, 'utf-8')
+        writtenPaths.push(file.path)
+        writtenCount++
+      }
+    }
+
+    const versionFile = path.join(cwd, '.a3c_version')
+    fs.writeFileSync(versionFile, data.data?.version || 'v1.0', 'utf-8')
+
+    const result = {
+      success: true,
+      data: {
+        version: data.data?.version,
+        staging_dir: stagingDir,
+        relative_dir: `.a3c_staging/${projectId}/full/`,
+        files_written: writtenCount,
+        written_files: writtenPaths,
+        no_change: files.no_change || [],
+        locked_files: lockedModify.map((f: { path: string }) => f.path),
+        message: `Files synced to ${stagingDir}. ${writtenCount} files written. Version saved to .a3c_version`,
+      }
+    }
+
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
   })
 
   server.tool('status_sync', 'Get current project status (tasks, locks, directions)', {}, async () => {

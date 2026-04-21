@@ -214,3 +214,74 @@ func SwitchMilestoneVersion(projectID string) (string, error) {
 	GitTagVersion(projectID, newVersion)
 	return newVersion, nil
 }
+
+func GitPush(projectID string, remote string, branch string) error {
+	if remote == "" {
+		remote = "origin"
+	}
+	if branch == "" {
+		branch = "main"
+	}
+
+	repoPath := getRepoPath(projectID)
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return fmt.Errorf("repo directory not found")
+	}
+
+	out, err := runGit(projectID, "remote", "-v")
+	if err != nil {
+		return fmt.Errorf("failed to check remotes: %w", err)
+	}
+	if !strings.Contains(out, remote) {
+		var project model.Project
+		if model.DB.Where("id = ?", projectID).First(&project).Error == nil && project.GithubRepo != "" {
+			if err := GitAddRemote(projectID, remote, project.GithubRepo); err != nil {
+				return fmt.Errorf("failed to add remote from project config: %w", err)
+			}
+		} else {
+			return fmt.Errorf("remote '%s' not configured and no github_repo in project. Current remotes:\n%s", remote, out)
+		}
+	}
+
+	_, err = runGit(projectID, "push", remote, branch)
+	if err != nil {
+		return fmt.Errorf("git push failed: %w", err)
+	}
+
+	_, err = runGit(projectID, "push", remote, "--tags")
+	if err != nil {
+		log.Printf("[Git] Warning: failed to push tags: %v", err)
+	}
+
+	log.Printf("[Git] Pushed project %s to %s/%s", projectID, remote, branch)
+	return nil
+}
+
+func GitAddRemote(projectID string, remoteName string, remoteURL string) error {
+	repoPath := getRepoPath(projectID)
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return fmt.Errorf("repo directory not found")
+	}
+
+	out, err := runGit(projectID, "remote", "-v")
+	if err != nil {
+		return err
+	}
+
+	if strings.Contains(out, remoteName+"\t") {
+		_, err = runGit(projectID, "remote", "set-url", remoteName, remoteURL)
+		if err != nil {
+			return fmt.Errorf("failed to update remote: %w", err)
+		}
+		log.Printf("[Git] Updated remote %s to %s", remoteName, remoteURL)
+		return nil
+	}
+
+	_, err = runGit(projectID, "remote", "add", remoteName, remoteURL)
+	if err != nil {
+		return fmt.Errorf("failed to add remote: %w", err)
+	}
+
+	log.Printf("[Git] Added remote %s: %s", remoteName, remoteURL)
+	return nil
+}

@@ -90,5 +90,40 @@ func (h *GitHandler) Push(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, gin.H{"success": true, "data": gin.H{"pushed": false, "message": "Git push not yet implemented for remote repos"}})
+	var req struct {
+		Remote string `json:"remote"`
+		Branch string `json:"branch"`
+	}
+	c.ShouldBindJSON(&req)
+
+	if err := service.GitPush(projectID, req.Remote, req.Branch); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "GIT_PUSH_FAILED", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"pushed": true}})
+}
+
+func (h *GitHandler) AddRemote(c *gin.Context) {
+	projectID := c.Query("project_id")
+	if projectID == "" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required"`
+		URL  string `json:"url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	if err := service.GitAddRemote(projectID, req.Name, req.URL); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "GIT_ADD_REMOTE_FAILED", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"remote": req.Name, "url": req.URL}})
 }

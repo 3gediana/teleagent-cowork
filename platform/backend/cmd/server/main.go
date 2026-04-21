@@ -125,6 +125,7 @@ func main() {
 		internal.POST("/git/commit", gitHandler.Commit)
 		internal.POST("/git/revert", gitHandler.Revert)
 		internal.POST("/git/push", gitHandler.Push)
+		internal.POST("/git/add-remote", gitHandler.AddRemote)
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
