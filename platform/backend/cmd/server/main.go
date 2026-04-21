@@ -76,6 +76,7 @@ func main() {
 	branchHandler := handler.NewBranchHandler()
 	prHandler := handler.NewPRHandler()
 	roleHandler := handler.NewRoleHandler()
+	chiefHandler := handler.NewChiefHandler()
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -149,6 +150,12 @@ func main() {
 		auth.POST("/pr/approve_review", prHandler.ApproveReview)
 		auth.POST("/pr/approve_merge", prHandler.ApproveMerge)
 		auth.POST("/pr/reject", prHandler.Reject)
+
+		// Chief Agent APIs
+		auth.POST("/chief/chat", chiefHandler.Chat)
+		auth.GET("/chief/sessions", chiefHandler.Sessions)
+		auth.GET("/chief/traces", chiefHandler.ToolTraces)
+		auth.GET("/chief/policies", chiefHandler.Policies)
 	}
 
 	internal := v1.Group("/internal")

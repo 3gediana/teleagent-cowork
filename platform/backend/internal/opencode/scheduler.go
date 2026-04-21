@@ -309,7 +309,11 @@ func (s *Scheduler) runAgentViaServe(session *agent.Session, message string, age
 			"completed_at": now,
 			"model_id":     modelStr,
 		})
-		// Note: audit/fix sessions are not in agentServeSessionMap, no cleanup needed
+
+		// Retry logic: if session failed and role supports retry, re-dispatch
+		if session.Status == "failed" {
+			s.maybeRetry(session, message, agentName, modelStr)
+		}
 	}()
 
 	session.Status = "running"
@@ -779,6 +783,75 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 			"args":       args,
 		})
 	}
+}
+
+// retryPolicy defines max retries and backoff per role
+type retryPolicy struct {
+	MaxRetries int
+	BackoffSec int
+}
+
+var retryPolicies = map[agent.Role]retryPolicy{
+	agent.RoleEvaluate: {MaxRetries: 2, BackoffSec: 30},
+	agent.RoleMerge:   {MaxRetries: 1, BackoffSec: 15},
+	agent.RoleAudit1:  {MaxRetries: 1, BackoffSec: 20},
+	agent.RoleFix:     {MaxRetries: 1, BackoffSec: 20},
+	agent.RoleChief:   {MaxRetries: 1, BackoffSec: 10},
+	// Maintain: no retry, next periodic trigger will re-run
+	// Consult/Assess/Audit2: no retry
+}
+
+// maybeRetry checks if a failed session should be retried and re-dispatches if eligible.
+func (s *Scheduler) maybeRetry(session *agent.Session, message string, agentName string, modelStr string) {
+	policy, ok := retryPolicies[session.Role]
+	if !ok {
+		return
+	}
+
+	// Read current retry count from DB
+	var dbSession model.AgentSession
+	if model.DB.Where("id = ?", session.ID).First(&dbSession).Error != nil {
+		return
+	}
+
+	if dbSession.RetryCount >= policy.MaxRetries {
+		log.Printf("[Retry] Session %s (role=%s) max retries reached (%d/%d)", session.ID, session.Role, dbSession.RetryCount, policy.MaxRetries)
+		return
+	}
+
+	newRetryCount := dbSession.RetryCount + 1
+	log.Printf("[Retry] Session %s (role=%s) failed, retrying %d/%d in %ds", session.ID, session.Role, newRetryCount, policy.MaxRetries, policy.BackoffSec)
+
+	// Update retry count and last error in DB
+	model.DB.Model(&model.AgentSession{}).Where("id = ?", session.ID).Updates(map[string]interface{}{
+		"retry_count": newRetryCount,
+		"last_error":  "session failed, retry " + fmt.Sprintf("%d/%d", newRetryCount, policy.MaxRetries),
+	})
+
+	go func() {
+		time.Sleep(time.Duration(policy.BackoffSec) * time.Second)
+
+		// Create a new session for the retry (fresh state)
+		retrySession := &agent.Session{
+			ID:            session.ID, // reuse same ID to keep DB record linked
+			Role:          session.Role,
+			ProjectID:     session.ProjectID,
+			ChangeID:      session.ChangeID,
+			PRID:          session.PRID,
+			TriggerReason: session.TriggerReason,
+			Context:       session.Context,
+			Status:        "pending",
+		}
+		agent.DefaultManager.RegisterSession(retrySession)
+
+		// Update DB status back to pending
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", session.ID).Updates(map[string]interface{}{
+			"status":       "pending",
+			"completed_at": nil,
+		})
+
+		s.runAgentViaServe(retrySession, message, agentName, modelStr)
+	}()
 }
 
 func (s *Scheduler) PollSession(session *agent.Session) error {

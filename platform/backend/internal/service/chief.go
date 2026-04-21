@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
 )
 
@@ -21,6 +23,9 @@ func TriggerChiefDecision(projectID string, decisionType string, targetID string
 	log.Printf("[Chief] Created decision session %s for project %s, type=%s, target=%s", session.ID, projectID, decisionType, targetID)
 
 	agent.DispatchSession(session)
+
+	// Register serve session for multi-round dialogue when available
+	go registerChiefServeSession(session.ID, projectID)
 }
 
 // TriggerChiefChat triggers the Chief Agent for a human conversation.
@@ -32,6 +37,35 @@ func TriggerChiefChat(projectID string, inputContent string) {
 	log.Printf("[Chief] Created chat session %s for project %s", session.ID, projectID)
 
 	agent.DispatchSession(session)
+
+	// Register serve session for multi-round dialogue when available
+	go registerChiefServeSession(session.ID, projectID)
+}
+
+// ChiefSessionReady is called when a Chief agent session's OpenCode serve session is available
+var ChiefSessionReady func(projectID, ocSessionID, agentSessionID, model string)
+
+func registerChiefServeSession(sessionID, projectID string) {
+	scheduler := opencode.DefaultScheduler
+	for i := 0; i < 30; i++ {
+		updated := agent.DefaultManager.GetSession(sessionID)
+		if updated != nil && updated.OpenCodeSessionID != "" {
+			modelStr := "minimax-coding-plan/MiniMax-M2.7"
+			if scheduler != nil {
+				modelStr = scheduler.GetModelString()
+			}
+			if ChiefSessionReady != nil {
+				ChiefSessionReady(projectID, updated.OpenCodeSessionID, sessionID, modelStr)
+			}
+			log.Printf("[Chief] Registered serve session for project %s: ocSession=%s", projectID, updated.OpenCodeSessionID)
+			return
+		}
+		if updated != nil && (updated.Status == "completed" || updated.Status == "failed") {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	log.Printf("[Chief] Timeout waiting for OpenCodeSessionID for project %s", projectID)
 }
 
 // buildChiefContext assembles the full platform state snapshot for the Chief Agent.
