@@ -6,6 +6,7 @@ const navItems = [
   { path: '/tasks', label: 'Tasks', icon: '📋' },
   { path: '/submissions', label: 'Submissions', icon: '🚀' },
   { path: '/prs', label: 'PRs', icon: '🔀' },
+  { path: '/chief', label: 'Chief', icon: '🤖' },
   { path: '/activity', label: 'Activity', icon: '📊' },
   { path: '/settings', label: 'Settings', icon: '⚙️' },
 ]

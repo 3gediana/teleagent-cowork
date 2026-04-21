@@ -124,3 +124,17 @@ export const providerApi = {
   list: () =>
     api.get('/opencode/providers') as Promise<{ success: boolean; data: { providers: any[]; models: any[]; default: Record<string, string> } }>,
 }
+
+export const chiefApi = {
+  chat: (projectId: string, message: string) =>
+    api.post('/chief/chat', { message }, { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
+
+  sessions: (projectId: string, role?: string) =>
+    api.get('/chief/sessions', { params: { project_id: projectId, role } }) as Promise<{ success: boolean; data: { sessions: any[] } }>,
+
+  traces: (sessionId: string) =>
+    api.get('/chief/traces', { params: { session_id: sessionId } }) as Promise<{ success: boolean; data: { traces: any[] } }>,
+
+  policies: (status?: string) =>
+    api.get('/chief/policies', { params: { status } }) as Promise<{ success: boolean; data: { policies: any[] } }>,
+}

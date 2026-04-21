@@ -7,6 +7,7 @@ import SubmissionPage from './pages/SubmissionPage'
 import ActivityPage from './pages/ActivityPage'
 import SettingsPage from './pages/SettingsPage'
 import PRPage from './pages/PRPage'
+import ChiefPage from './pages/ChiefPage'
 import { Layout } from './components/Layout'
 import LoginPanel from './components/LoginPanel'
 
@@ -30,6 +31,7 @@ function AuthenticatedApp() {
         <Route path="/submissions" element={<SubmissionPage />} />
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/prs" element={<PRPage />} />
+        <Route path="/chief" element={<ChiefPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
