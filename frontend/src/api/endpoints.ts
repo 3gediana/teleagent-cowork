@@ -11,8 +11,11 @@ export const dashboardApi = {
   confirm: (projectId: string, inputId: string, confirmed: boolean) =>
     api.post('/dashboard/confirm', { input_id: inputId, confirmed }, { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
 
-  clearContext: (sessionId: string) =>
-    api.post('/dashboard/clear_context', { session_id: sessionId }) as Promise<{ success: boolean; data: any }>,
+  clearContext: (projectId: string) =>
+    api.post('/dashboard/clear_context', {}, { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
+
+  getMessages: (projectId: string) =>
+    api.get('/dashboard/messages', { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
 }
 
 export const authApi = {
@@ -35,6 +38,9 @@ export const projectApi = {
 
   get: (id: string) =>
     api.get(`/project/${id}`) as Promise<{ success: boolean; data: any }>,
+
+  setAutoMode: (projectId: string, autoMode: boolean) =>
+    api.post('/project/auto_mode', { auto_mode: autoMode }, { params: { project_id: projectId } }) as Promise<{ success: boolean; data: any }>,
 }
 
 export const taskApi = {
@@ -57,6 +63,9 @@ export const changeApi = {
 
   review: (changeId: string, level: string, approved: boolean, reason: string) =>
     api.post('/change/review', { change_id: changeId, level, approved, reason }) as Promise<{ success: boolean; data: any }>,
+
+  approveForReview: (changeId: string) =>
+    api.post('/change/approve_for_review', { change_id: changeId }) as Promise<{ success: boolean; data: any }>,
 }
 
 export const milestoneApi = {

@@ -95,51 +95,7 @@ func StartAuditWorkflow(changeID string) error {
 		return fmt.Errorf("change not found: %w", err)
 	}
 
-	var task model.Task
-	if change.TaskID != nil {
-		model.DB.Where("id = ?", *change.TaskID).First(&task)
-	}
-
-	agentName := "unknown"
-	var a model.Agent
-	if model.DB.Where("id = ?", change.AgentID).First(&a).Error == nil {
-		agentName = a.Name
-	}
-
-	var modifiedFiles []string
-	json.Unmarshal([]byte(change.ModifiedFiles), &modifiedFiles)
-	var newFiles []string
-	json.Unmarshal([]byte(change.NewFiles), &newFiles)
-	var deletedFiles []string
-	json.Unmarshal([]byte(change.DeletedFiles), &deletedFiles)
-
-	direction, _ := repo.GetContentBlock(change.ProjectID, "direction")
-	milestone, _ := repo.GetCurrentMilestone(change.ProjectID)
-
-	directionContent := ""
-	if direction != nil {
-		directionContent = direction.Content
-	}
-	milestoneContent := ""
-	if milestone != nil {
-		milestoneContent = milestone.Name + "\n" + milestone.Description
-	}
-
-	ctx := &agent.SessionContext{
-		DirectionBlock:  directionContent,
-		MilestoneBlock:  milestoneContent,
-		AgentName:       agentName,
-		ChangeInfo: &agent.ChangeContext{
-			ChangeID:      change.ID,
-			TaskName:      task.Name,
-			TaskDesc:      task.Description,
-			AgentName:     agentName,
-			ModifiedFiles: modifiedFiles,
-			NewFiles:      newFiles,
-			DeletedFiles:  deletedFiles,
-			Diff:          change.Diff,
-		},
-	}
+	ctx := BuildChangeContext(&change)
 
 	session := agent.DefaultManager.CreateSession(agent.RoleAudit1, change.ProjectID, ctx, "change_submitted")
 	session.ChangeID = changeID
@@ -213,49 +169,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 
 		issuesJSON, _ := json.Marshal(result.Issues)
 
-		// Fetch full context for fix agent
-		direction, _ := repo.GetContentBlock(change.ProjectID, "direction")
-		milestone, _ := repo.GetCurrentMilestone(change.ProjectID)
+		ctx := BuildChangeContext(&change)
+		ctx.ChangeInfo.AuditIssues = string(issuesJSON)
 
-		directionContent := ""
-		if direction != nil {
-			directionContent = direction.Content
-		}
-		milestoneContent := ""
-		if milestone != nil {
-			milestoneContent = milestone.Name + "\n" + milestone.Description
-		}
-
-		var task model.Task
-		taskName := ""
-		taskDesc := ""
-		if change.TaskID != nil {
-			model.DB.Where("id = ?", *change.TaskID).First(&task)
-			taskName = task.Name
-			taskDesc = task.Description
-		}
-
-		agentName := "unknown"
-		var a model.Agent
-		if model.DB.Where("id = ?", change.AgentID).First(&a).Error == nil {
-			agentName = a.Name
-		}
-
-		ctx := &agent.SessionContext{
-			DirectionBlock: directionContent,
-			MilestoneBlock: milestoneContent,
-			ChangeInfo: &agent.ChangeContext{
-				ChangeID:      change.ID,
-				TaskName:      taskName,
-				TaskDesc:      taskDesc,
-				AgentName:     agentName,
-				AuditIssues:   string(issuesJSON),
-				ModifiedFiles: mustUnjson(change.ModifiedFiles),
-				NewFiles:      mustUnjson(change.NewFiles),
-				DeletedFiles:  mustUnjson(change.DeletedFiles),
-				Diff:          change.Diff,
-			},
-		}
 		session := agent.DefaultManager.CreateSession(agent.RoleFix, change.ProjectID, ctx, "fix_needed")
 		session.ChangeID = changeID
 
@@ -323,48 +239,7 @@ func ProcessFixOutput(changeID string, result *FixResult) error {
 		log.Printf("[Audit] Change %s fixed and approved", changeID)
 
 	case "delegate":
-		direction, _ := repo.GetContentBlock(change.ProjectID, "direction")
-		milestone, _ := repo.GetCurrentMilestone(change.ProjectID)
-
-		directionContent := ""
-		if direction != nil {
-			directionContent = direction.Content
-		}
-		milestoneContent := ""
-		if milestone != nil {
-			milestoneContent = milestone.Name + "\n" + milestone.Description
-		}
-
-		// Fetch task and agent info
-		var task model.Task
-		taskName := ""
-		taskDesc := ""
-		if change.TaskID != nil {
-			model.DB.Where("id = ?", *change.TaskID).First(&task)
-			taskName = task.Name
-			taskDesc = task.Description
-		}
-
-		agentName := "unknown"
-		var a model.Agent
-		if model.DB.Where("id = ?", change.AgentID).First(&a).Error == nil {
-			agentName = a.Name
-		}
-
-		ctx := &agent.SessionContext{
-			DirectionBlock: directionContent,
-			MilestoneBlock: milestoneContent,
-			ChangeInfo: &agent.ChangeContext{
-				ChangeID:      change.ID,
-				TaskName:      taskName,
-				TaskDesc:      taskDesc,
-				AgentName:     agentName,
-				ModifiedFiles: mustUnjson(change.ModifiedFiles),
-				NewFiles:      mustUnjson(change.NewFiles),
-				DeletedFiles:  mustUnjson(change.DeletedFiles),
-				Diff:          change.Diff,
-			},
-		}
+		ctx := BuildChangeContext(&change)
 		session := agent.DefaultManager.CreateSession(agent.RoleAudit2, change.ProjectID, ctx, "re_audit")
 		session.ChangeID = changeID
 		log.Printf("[Audit] Change %s delegated to audit_2, session %s", changeID, session.ID)
@@ -411,4 +286,50 @@ func mustUnjson(s string) []string {
 	var result []string
 	json.Unmarshal([]byte(s), &result)
 	return result
+}
+
+// BuildChangeContext constructs a SessionContext for a change, including direction/milestone/task/agent info
+func BuildChangeContext(change *model.Change) *agent.SessionContext {
+	direction, _ := repo.GetContentBlock(change.ProjectID, "direction")
+	milestone, _ := repo.GetCurrentMilestone(change.ProjectID)
+
+	directionContent := ""
+	if direction != nil {
+		directionContent = direction.Content
+	}
+	milestoneContent := ""
+	if milestone != nil {
+		milestoneContent = milestone.Name + "\n" + milestone.Description
+	}
+
+	var task model.Task
+	taskName := ""
+	taskDesc := ""
+	if change.TaskID != nil {
+		model.DB.Where("id = ?", *change.TaskID).First(&task)
+		taskName = task.Name
+		taskDesc = task.Description
+	}
+
+	agentName := "unknown"
+	var a model.Agent
+	if model.DB.Where("id = ?", change.AgentID).First(&a).Error == nil {
+		agentName = a.Name
+	}
+
+	return &agent.SessionContext{
+		DirectionBlock: directionContent,
+		MilestoneBlock: milestoneContent,
+		AgentName:      agentName,
+		ChangeInfo: &agent.ChangeContext{
+			ChangeID:      change.ID,
+			TaskName:      taskName,
+			TaskDesc:      taskDesc,
+			AgentName:     agentName,
+			ModifiedFiles: mustUnjson(change.ModifiedFiles),
+			NewFiles:      mustUnjson(change.NewFiles),
+			DeletedFiles:  mustUnjson(change.DeletedFiles),
+			Diff:          change.Diff,
+		},
+	}
 }

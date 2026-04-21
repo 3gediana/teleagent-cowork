@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -122,6 +123,18 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	newFilesJSON, _ := json.Marshal(newFiles)
 	deletedFilesJSON, _ := json.Marshal(req.Deletes)
 
+	// Check project auto_mode
+	var project model.Project
+	autoMode := true // default on
+	if err := model.DB.Where("id = ?", projectID).First(&project).Error; err == nil {
+		autoMode = project.AutoMode
+	}
+
+	changeStatus := "pending"
+	if !autoMode {
+		changeStatus = "pending_human_confirm"
+	}
+
 	change := model.Change{
 		ID:            changeID,
 		ProjectID:     projectID,
@@ -133,7 +146,7 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		DeletedFiles:  string(deletedFilesJSON),
 		Diff:          string(diffJSON),
 		Description:   req.Description,
-		Status:        "pending",
+		Status:        changeStatus,
 	}
 
 	if err := model.DB.Create(&change).Error; err != nil {
@@ -141,7 +154,27 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	// Trigger audit workflow and wait for result
+	// Broadcast CHANGE_PENDING_CONFIRM event for manual mode
+	if !autoMode {
+		service.BroadcastEvent(projectID, "CHANGE_PENDING_CONFIRM", gin.H{
+			"change_id":   changeID,
+			"agent_id":    agentID.(string),
+			"task_id":     req.TaskID,
+			"description": req.Description,
+		})
+
+		c.JSON(200, gin.H{
+			"success": true,
+			"data": gin.H{
+				"change_id": changeID,
+				"status":    "pending_human_confirm",
+				"message":   "Waiting for human confirmation before audit",
+			},
+		})
+		return
+	}
+
+	// Auto mode: trigger audit workflow and wait for result (blocking)
 	result, err := service.StartAuditWorkflowAndWait(changeID, 120*time.Second)
 	if err != nil {
 		c.JSON(200, gin.H{
@@ -204,6 +237,56 @@ func (h *ChangeHandler) List(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"changes": result}})
+}
+
+// ApproveForReview handles human confirmation to send a change to audit (manual mode only)
+func (h *ChangeHandler) ApproveForReview(c *gin.Context) {
+	var req struct {
+		ChangeID string `json:"change_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	var change model.Change
+	if err := model.DB.Where("id = ?", req.ChangeID).First(&change).Error; err != nil {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "CHANGE_NOT_FOUND", "message": "Change not found"}})
+		return
+	}
+
+	if change.Status != "pending_human_confirm" {
+		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "INVALID_STATUS", "message": "Change is not pending human confirmation"}})
+		return
+	}
+
+	// Update status to pending and start audit
+	change.Status = "pending"
+	model.DB.Save(&change)
+
+	go func() {
+		result, err := service.StartAuditWorkflowAndWait(change.ID, 120*time.Second)
+		if err != nil {
+			log.Printf("[Change] Audit failed for %s: %v", change.ID, err)
+			return
+		}
+		// Directed broadcast of audit result to the submitting agent
+		service.BroadcastDirected(change.AgentID, "AUDIT_RESULT", gin.H{
+			"change_id":    change.ID,
+			"status":       result.Status,
+			"audit_level":  result.AuditLevel,
+			"audit_reason": result.AuditReason,
+		})
+	}()
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"change_id": change.ID,
+			"status":    "pending",
+			"message":   "Approved for review, audit started",
+		},
+	})
 }
 
 func (h *ChangeHandler) Review(c *gin.Context) {

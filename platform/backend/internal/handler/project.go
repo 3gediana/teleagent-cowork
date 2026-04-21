@@ -120,6 +120,39 @@ func (h *ProjectHandler) List(c *gin.Context) {
 	c.JSON(200, gin.H{"success": true, "data": projects})
 }
 
+func (h *ProjectHandler) SetAutoMode(c *gin.Context) {
+	projectID := c.Query("project_id")
+	if projectID == "" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})
+		return
+	}
+
+	var req struct {
+		AutoMode bool `json:"auto_mode"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	var project model.Project
+	if err := model.DB.Where("id = ?", projectID).First(&project).Error; err != nil {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "PROJECT_NOT_FOUND", "message": "Project not found"}})
+		return
+	}
+
+	project.AutoMode = req.AutoMode
+	model.DB.Save(&project)
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"project_id": projectID,
+			"auto_mode":  project.AutoMode,
+		},
+	})
+}
+
 func (h *ProjectHandler) ImportAssess(c *gin.Context) {
 	projectID := c.Param("id")
 	project, err := repo.GetProjectByID(projectID)

@@ -74,6 +74,12 @@ async function main() {
     api.setProject(project_id)
     saveConfig({ project_id })
     const data = await api.selectProject(project_id)
+    // Lock the opencode session ID for this platform connection
+    // This ensures broadcasts inject into the correct session, not some random other session
+    const sessionId = await oc.lockSession()
+    if (!sessionId) {
+      console.error('[A3C] Warning: Could not lock opencode session, broadcasts may not inject correctly')
+    }
     // Start poller after selecting project
     await poller.start()
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
@@ -204,7 +210,7 @@ async function main() {
 
   poller.setBroadcastHandler(async (messages) => {
     console.error('[Broadcast] Received %d messages', messages.length)
-    const sessionId = await oc.getLatestSession()
+    let sessionId = await oc.getLatestSession()
     if (!sessionId) {
       console.error('[Broadcast] No active OpenCode session found')
       return

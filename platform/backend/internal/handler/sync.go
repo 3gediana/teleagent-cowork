@@ -2,10 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/service"
 )
 
@@ -130,6 +133,36 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 		}
 	}
 
+	// Also fetch directed messages (e.g. audit results) for this agent
+	directedMessages := service.GetDirectedMessages(agentID)
+	for _, dm := range directedMessages {
+		messages = append(messages, dm)
+	}
+
+	// Inject important broadcast messages into agent's serve session for real-time awareness
+	// This lets the agent "see" project changes without needing a separate tool call
+	if len(messages) > 0 && agent != nil {
+		ocSessionID := opencode.GetAgentServeSession(agent.ID)
+		if ocSessionID != "" {
+			scheduler := opencode.DefaultScheduler
+			if scheduler != nil {
+				for _, msg := range messages {
+					header, _ := msg["header"].(gin.H)
+					eventType, _ := header["type"].(string)
+					// Only inject state-change events, not chat/tool noise
+					if isImportantForAgent(eventType) {
+						payload, _ := msg["payload"].(gin.H)
+						injectText := fmt.Sprintf("[Project Update] %s: %v", eventType, payload)
+						_, err := scheduler.SendToExistingSession(ocSessionID, injectText, "maintain", "", true)
+						if err != nil {
+							log.Printf("[Poll] Failed to inject %s into session %s: %v", eventType, ocSessionID, err)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
@@ -137,6 +170,19 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 			"heartbeat_ok": heartbeatOk,
 		},
 	})
+}
+
+// isImportantForAgent filters which broadcast events should be injected into the agent's serve session
+func isImportantForAgent(eventType string) bool {
+	switch eventType {
+	case "DIRECTION_CHANGE", "MILESTONE_UPDATE", "MILESTONE_SWITCH",
+		"VERSION_UPDATE", "VERSION_ROLLBACK",
+		"TASK_CLAIMED", "TASK_COMPLETED",
+		"FILE_LOCKED", "FILE_UNLOCKED",
+		"AUDIT_RESULT", "CHANGE_PENDING_CONFIRM":
+		return true
+	}
+	return false
 }
 
 func syncGetAgentName(agentID string) string {

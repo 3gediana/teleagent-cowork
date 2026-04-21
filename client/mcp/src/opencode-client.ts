@@ -9,13 +9,37 @@ interface Session {
 export class OpenCodeClient {
   private serveURL: string
   private startupTime: number
+  private cachedSessionId: string | null = null
 
   constructor(serveURL: string, startupTime?: number) {
     this.serveURL = serveURL
     this.startupTime = startupTime || Date.now()
   }
 
+  // Lock the session ID for this platform connection. Called once at select_project.
+  // After locking, all broadcasts inject into this specific session.
+  async lockSession(): Promise<string | null> {
+    const sessionId = await this.findLatestSession()
+    if (sessionId) {
+      this.cachedSessionId = sessionId
+      console.error('[OpenCode] Locked session ID:', sessionId)
+    }
+    return sessionId
+  }
+
+  get lockedSessionId(): string | null {
+    return this.cachedSessionId
+  }
+
   async getLatestSession(): Promise<string | null> {
+    // If we have a locked session, use it directly
+    if (this.cachedSessionId) {
+      return this.cachedSessionId
+    }
+    return this.findLatestSession()
+  }
+
+  async findLatestSession(): Promise<string | null> {
     return new Promise((resolve) => {
       const url = new URL('/session', this.serveURL)
       const req = http.get(url, { timeout: 5000 }, (res) => {

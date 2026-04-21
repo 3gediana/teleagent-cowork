@@ -1,10 +1,11 @@
 import { useAppStore } from '../stores/appStore'
-import { dashboardApi } from '../api/endpoints'
+import { dashboardApi, changeApi, projectApi } from '../api/endpoints'
 
 export function ChatPanel() {
   const {
     chatMessages, inputText, targetBlock, setInputText, addChatMessage, setTargetBlock,
-    pendingInput, setPendingInput, selectedProjectId, sessionId
+    pendingInput, setPendingInput, selectedProjectId,
+    autoMode, setAutoMode, pendingChanges, removePendingChange
   } = useAppStore()
 
   const handleSend = async () => {
@@ -29,6 +30,14 @@ export function ChatPanel() {
             target_block: targetBlock,
             content: msg,
             requires_confirm: data.requires_confirm || false,
+          })
+        } else if (data.agent_response) {
+          // Multi-round dialogue: agent responded directly
+          addChatMessage({
+            id: (Date.now() + 1).toString(),
+            role: 'agent',
+            content: data.agent_response,
+            timestamp: Date.now(),
           })
         } else if (data.session_active) {
           addChatMessage({
@@ -67,6 +76,15 @@ export function ChatPanel() {
           content: `${pendingInput.target_block} block updated and confirmed.`,
           timestamp: Date.now(),
         })
+        // Backend auto-clears context after confirm; reflect in UI
+        if (res.data?.context_cleared) {
+          addChatMessage({
+            id: (Date.now() + 1).toString(),
+            role: 'system',
+            content: 'Session context cleared.',
+            timestamp: Date.now(),
+          })
+        }
       }
     } catch {
       addChatMessage({
@@ -94,13 +112,46 @@ export function ChatPanel() {
   }
 
   const handleClearChat = async () => {
-    if (sessionId) {
+    if (selectedProjectId) {
       try {
-        await dashboardApi.clearContext(sessionId)
+        await dashboardApi.clearContext(selectedProjectId)
       } catch {}
     }
     useAppStore.getState().clearChat()
     setPendingInput(null)
+  }
+
+  const handleApproveChange = async (changeId: string) => {
+    try {
+      const res = await changeApi.approveForReview(changeId)
+      if (res.success) {
+        removePendingChange(changeId)
+        addChatMessage({
+          id: Date.now().toString(),
+          role: 'system',
+          content: `Change ${changeId} approved for review. Audit started.`,
+          timestamp: Date.now(),
+        })
+      }
+    } catch {
+      addChatMessage({
+        id: Date.now().toString(),
+        role: 'system',
+        content: 'Failed to approve change for review.',
+        timestamp: Date.now(),
+      })
+    }
+  }
+
+  const handleToggleAutoMode = async () => {
+    if (!selectedProjectId) return
+    const newMode = !autoMode
+    try {
+      const res = await projectApi.setAutoMode(selectedProjectId, newMode)
+      if (res.success) {
+        setAutoMode(newMode)
+      }
+    } catch {}
   }
 
   return (
@@ -115,6 +166,17 @@ export function ChatPanel() {
           <option value="milestone">Milestone</option>
           <option value="task">Task</option>
         </select>
+        <button
+          onClick={handleToggleAutoMode}
+          className={`text-xs font-marker px-3 py-1.5 rounded-lg transition-colors border ${
+            autoMode
+              ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
+              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+          }`}
+          title={autoMode ? 'Auto mode: changes auto-sent to audit' : 'Manual mode: changes require your approval before audit'}
+        >
+          {autoMode ? 'Auto' : 'Manual'}
+        </button>
         <button
           onClick={handleClearChat}
           className="text-xs font-marker text-[#8b4513]/60 hover:text-rose-700 transition-colors bg-[#f4ece1]/50 border border-[#8b4513]/10 px-3 py-1.5 rounded-lg"
@@ -152,7 +214,7 @@ export function ChatPanel() {
       </div>
 
       {pendingInput && (
-        <div className="bg-[#8b4513]/10 border border-[#8b4513]/20 rounded-2xl p-5 mb-6 shadow-inner shrink-0 animate-in fade-in slide-in-from-bottom-4">
+        <div className="bg-[#8b4513]/10 border border-[#8b4513]/20 rounded-2xl p-5 mb-4 shadow-inner shrink-0 animate-in fade-in slide-in-from-bottom-4">
           <p className="text-xs font-marker text-[#8b4513] mb-3 uppercase tracking-widest">
             Confirm update to <strong className="bg-[#8b4513] text-white px-2 py-0.5 rounded ml-1">{pendingInput.target_block}</strong>?
           </p>
@@ -173,6 +235,27 @@ export function ChatPanel() {
               Cancel
             </button>
           </div>
+        </div>
+      )}
+
+      {pendingChanges.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 shadow-inner shrink-0">
+          <p className="text-xs font-marker text-amber-700 mb-3 uppercase tracking-widest">
+            Pending Human Confirmation
+          </p>
+          {pendingChanges.map((c) => (
+            <div key={c.change_id} className="flex items-center gap-3 mb-2 last:mb-0">
+              <span className="font-hand text-sm text-[#5d4037] flex-1 truncate">
+                {c.description || c.change_id}
+              </span>
+              <button
+                onClick={() => handleApproveChange(c.change_id)}
+                className="btn-cabin px-3 py-1.5 rounded-lg text-xs font-marker whitespace-nowrap"
+              >
+                Approve
+              </button>
+            </div>
+          ))}
         </div>
       )}
 

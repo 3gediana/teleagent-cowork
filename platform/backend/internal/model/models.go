@@ -24,6 +24,7 @@ type Project struct {
 	Description string     `gorm:"type:text" json:"description"`
 	GithubRepo  string     `gorm:"size:512" json:"github_repo"`
 	Status      string     `gorm:"size:20;default:'initializing'" json:"status"` // initializing/ready/idle
+	AutoMode    bool       `gorm:"default:true" json:"auto_mode"`                // true=auto (blocks for audit), false=manual (requires human confirm before audit)
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
@@ -132,7 +133,7 @@ type Change struct {
 	DeletedFiles  string     `gorm:"type:json" json:"deleted_files"`
 	Diff          string     `gorm:"type:json" json:"diff"`
 	Description   string     `gorm:"type:text" json:"description"`
-	Status        string     `gorm:"size:20;default:'pending'" json:"status"` // pending/approved/rejected
+	Status        string     `gorm:"size:20;default:'pending'" json:"status"` // pending/pending_human_confirm/approved/rejected
 	AuditLevel    *string    `gorm:"size:2" json:"audit_level"`               // L0/L1/L2
 	AuditReason   string     `gorm:"type:text" json:"audit_reason"`
 	ReviewedAt    *time.Time `json:"reviewed_at"`

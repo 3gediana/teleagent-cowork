@@ -2,11 +2,16 @@ package service
 
 import (
 	"log"
+	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
 )
+
+// DashboardSessionCallback is called when a maintain agent session is ready for dashboard multi-round dialogue
+var DashboardSessionCallback func(projectID, ocSessionID, agentSessionID, model string)
 
 func TriggerMaintainAgent(projectID string, trigger string, inputContent string) error {
 	direction, _ := repo.GetContentBlock(projectID, "direction")
@@ -70,6 +75,40 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 	log.Printf("[Maintain] Created session %s for project %s, trigger=%s", session.ID, projectID, trigger)
 
 	agent.DispatchSession(session)
+
+	// Register the serve session for dashboard multi-round dialogue
+	// The OpenCodeSessionID will be set by the scheduler after the serve session is created
+	go func() {
+		scheduler := opencode.DefaultScheduler
+		for i := 0; i < 30; i++ {
+			updated := agent.DefaultManager.GetSession(session.ID)
+			if updated != nil && updated.OpenCodeSessionID != "" {
+				modelStr := "minimax-coding-plan/MiniMax-M2.7"
+				if scheduler != nil {
+					modelStr = scheduler.GetModelString()
+				}
+				if DashboardSessionCallback != nil {
+					DashboardSessionCallback(projectID, updated.OpenCodeSessionID, session.ID, modelStr)
+				}
+				// Also register in agentServeSessionMap for poll injection
+				// Find the maintain agent for this project by name pattern
+				var maintainAgent model.Agent
+				if model.DB.Where("current_project_id = ? AND status != 'offline' AND name LIKE ?", projectID, "maintain%").
+					Order("last_heartbeat DESC").First(&maintainAgent).Error == nil {
+					opencode.RegisterAgentServeSession(maintainAgent.ID, updated.OpenCodeSessionID)
+					log.Printf("[Maintain] Registered agent %s (%s) serve session %s for poll injection", maintainAgent.ID, maintainAgent.Name, updated.OpenCodeSessionID)
+				}
+				log.Printf("[Maintain] Registered dashboard session for project %s: ocSession=%s", projectID, updated.OpenCodeSessionID)
+				return
+			}
+			// If session completed without OpenCodeSessionID (legacy fallback), skip registration
+			if updated != nil && (updated.Status == "completed" || updated.Status == "failed") {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+		log.Printf("[Maintain] Timeout waiting for OpenCodeSessionID for project %s", projectID)
+	}()
 
 	return nil
 }

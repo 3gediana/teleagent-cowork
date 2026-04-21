@@ -195,6 +195,37 @@ func (h *AgentHandler) SubmitOutput(c *gin.Context) {
 		return
 	}
 
+	// Handle project_status tool: return project snapshot instead of just storing output
+	if toolName, _ := output["tool"].(string); toolName == "project_status" {
+		projectID := session.ProjectID
+		direction, _ := repoGetContentBlock(projectID, "direction")
+		milestone, _ := repoGetCurrentMilestone(projectID)
+		version, _ := repoGetContentBlock(projectID, "version")
+		tasks, _ := repoGetTasksByProject(projectID)
+		locks, _ := repoGetLocksByProject(projectID)
+
+		taskList := make([]gin.H, 0)
+		for _, t := range tasks {
+			taskList = append(taskList, gin.H{
+				"id": t.ID, "name": t.Name, "status": t.Status, "priority": t.Priority,
+			})
+		}
+		lockList := make([]gin.H, 0)
+		for _, l := range locks {
+			var files []string
+			json.Unmarshal([]byte(l.Files), &files)
+			lockList = append(lockList, gin.H{"agent_name": syncGetAgentName(l.AgentID), "files": files})
+		}
+
+		data := gin.H{"version": "unknown", "tasks": taskList, "locks": lockList}
+		if direction != nil { data["direction"] = direction.Content }
+		if milestone != nil { data["milestone"] = milestone.Name }
+		if version != nil { data["version"] = version.Content }
+
+		c.JSON(200, gin.H{"success": true, "data": data})
+		return
+	}
+
 	outputJSON, _ := json.Marshal(output)
 	agent.DefaultManager.UpdateSessionOutput(sessionID, string(outputJSON))
 

@@ -69,6 +69,13 @@ interface PendingInput {
   requires_confirm?: boolean
 }
 
+interface PendingChange {
+  change_id: string
+  agent_id: string
+  task_id: string
+  description: string
+}
+
 interface AppState {
   project: ProjectState | null
   selectedProjectId: string | null
@@ -79,6 +86,8 @@ interface AppState {
   accessKey: string | null
   pendingInput: PendingInput | null
   sessionId: string | null
+  autoMode: boolean
+  pendingChanges: PendingChange[]
   broadcastEvents: BroadcastEvent[]
   activities: ActivityItem[]
   sidebarCollapsed: boolean
@@ -93,6 +102,10 @@ interface AppState {
   setSelectedProjectId: (id: string | null) => void
   setPendingInput: (p: PendingInput | null) => void
   setSessionId: (id: string | null) => void
+  setAutoMode: (m: boolean) => void
+  addPendingChange: (c: PendingChange) => void
+  removePendingChange: (id: string) => void
+  clearPendingChanges: () => void
   addBroadcastEvent: (e: BroadcastEvent) => void
   clearBroadcastEvents: () => void
   addActivity: (a: ActivityItem) => void
@@ -109,6 +122,8 @@ export const useAppStore = create<AppState>((set) => ({
   accessKey: localStorage.getItem('a3c_access_key'),
   pendingInput: null,
   sessionId: null,
+  autoMode: true,
+  pendingChanges: [],
   broadcastEvents: [],
   activities: [],
   sidebarCollapsed: false,
@@ -116,7 +131,7 @@ export const useAppStore = create<AppState>((set) => ({
   setProject: (p) => set({ project: p }),
   setTargetBlock: (b) => set({ targetBlock: b }),
   addChatMessage: (m) => set((s) => ({ chatMessages: [...s.chatMessages, m] })),
-  clearChat: () => set({ chatMessages: [] }),
+  clearChat: () => set({ chatMessages: [], pendingChanges: [] }),
   setInputText: (t) => set({ inputText: t }),
   setLoading: (l) => set({ loading: l }),
   setAccessKey: (k) => {
@@ -127,6 +142,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedProjectId: (id) => set({ selectedProjectId: id }),
   setPendingInput: (p) => set({ pendingInput: p }),
   setSessionId: (id) => set({ sessionId: id }),
+  setAutoMode: (m) => set({ autoMode: m }),
+  addPendingChange: (c) => set((s) => ({ pendingChanges: [...s.pendingChanges, c] })),
+  removePendingChange: (id) => set((s) => ({ pendingChanges: s.pendingChanges.filter(c => c.change_id !== id) })),
+  clearPendingChanges: () => set({ pendingChanges: [] }),
   addBroadcastEvent: (e) => set((s) => ({ broadcastEvents: [e, ...s.broadcastEvents].slice(0, 50) })),
   clearBroadcastEvents: () => set({ broadcastEvents: [] }),
   addActivity: (a) => set((s) => ({ activities: [a, ...s.activities].slice(0, 100) })),

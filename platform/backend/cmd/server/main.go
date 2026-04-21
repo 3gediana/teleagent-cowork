@@ -34,6 +34,17 @@ func main() {
 		return opencode.DefaultScheduler.Dispatch(session)
 	})
 
+	// Wire dashboard session callback to bridge service → handler without import cycle
+	service.DashboardSessionCallback = handler.SetDashboardSessionForProject
+
+	// Wire tool call handler to bridge opencode → service without import cycle
+	opencode.ToolCallHandler = service.HandleToolCallResult
+
+	// Wire broadcast handler for real-time SSE push from scheduler to frontend
+	opencode.BroadcastHandler = func(projectID, eventType string, payload map[string]interface{}) {
+		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
+	}
+
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 
@@ -89,6 +100,7 @@ func main() {
 		auth.POST("/change/submit", changeHandler.Submit)
 		auth.GET("/change/list", changeHandler.List)
 		auth.POST("/change/review", changeHandler.Review)
+		auth.POST("/change/approve_for_review", changeHandler.ApproveForReview)
 
 		auth.POST("/file/sync", fileSyncHandler.Sync)
 
@@ -101,8 +113,10 @@ func main() {
 		auth.POST("/dashboard/input", dashboardHandler.Input)
 		auth.POST("/dashboard/confirm", dashboardHandler.Confirm)
 		auth.POST("/dashboard/clear_context", dashboardHandler.ClearContext)
+		auth.GET("/dashboard/messages", dashboardHandler.GetMessages)
 
 		auth.POST("/project/info", consultHandler.ProjectInfo)
+		auth.POST("/project/auto_mode", projectHandler.SetAutoMode)
 
 		auth.POST("/milestone/switch", milestoneHandler.Switch)
 		auth.GET("/milestone/archives", milestoneHandler.Archives)

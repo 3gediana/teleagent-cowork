@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -124,6 +125,16 @@ func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string
 		return nil
 	}
 
+	// State events: only keep latest per type (e.g. MILESTONE_UPDATE)
+	// Incremental events: keep all (e.g. CHAT_UPDATE, TOOL_CALL)
+	stateEventTypes := map[string]bool{
+		"MILESTONE_UPDATE":  true,
+		"DIRECTION_CHANGE":  true,
+		"VERSION_UPDATE":    true,
+		"VERSION_ROLLBACK":  true,
+		"MILESTONE_SWITCH":  true,
+	}
+
 	seen := map[string]bool{}
 	var result []SSEMessage
 	for _, d := range data {
@@ -131,10 +142,12 @@ func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string
 		if json.Unmarshal([]byte(d), &msg) != nil {
 			continue
 		}
-		if seen[msg.Header.Type] {
-			continue
+		if stateEventTypes[msg.Header.Type] {
+			if seen[msg.Header.Type] {
+				continue
+			}
+			seen[msg.Header.Type] = true
 		}
-		seen[msg.Header.Type] = true
 
 		ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
 		acked, _ := model.RDB.SIsMember(ctx, ackKey, agentID).Result()
@@ -159,6 +172,55 @@ func BroadcastEvent(projectID string, eventType string, payload gin.H, targetAge
 		target = targetAgentID[0]
 	}
 	SSEManager.BroadcastToProject(projectID, eventType, payload, target)
+}
+
+// BroadcastDirected sends a message directly to a specific agent's Redis queue
+// The MCP poller for that agent will pick it up and inject it into the OpenCode session
+func BroadcastDirected(agentID string, eventType string, payload gin.H) {
+	ctx := context.Background()
+	key := fmt.Sprintf("a3c:directed:%s", agentID)
+
+	msg := gin.H{
+		"header": gin.H{
+			"type":      eventType,
+			"messageID": model.GenerateID("dir"),
+			"timestamp": time.Now().UnixMilli(),
+			"target":    agentID,
+		},
+		"payload": payload,
+	}
+
+	data, _ := json.Marshal(msg)
+	model.RDB.RPush(ctx, key, string(data))
+	model.RDB.Expire(ctx, key, 10*time.Minute)
+
+	log.Printf("[Broadcast] Directed %s to agent %s", eventType, agentID)
+}
+
+// GetDirectedMessages retrieves and removes all directed messages for a specific agent
+func GetDirectedMessages(agentID interface{}) []gin.H {
+	ctx := context.Background()
+	idStr := fmt.Sprintf("%v", agentID)
+	key := fmt.Sprintf("a3c:directed:%s", idStr)
+
+	// Get all messages
+	data, err := model.RDB.LRange(ctx, key, 0, -1).Result()
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	// Delete the queue after reading (consume-once)
+	model.RDB.Del(ctx, key)
+
+	var messages []gin.H
+	for _, d := range data {
+		var msg gin.H
+		if json.Unmarshal([]byte(d), &msg) == nil {
+			messages = append(messages, msg)
+		}
+	}
+
+	return messages
 }
 
 func (m *SSEManagerStruct) AckAllBroadcasts(projectID string, agentID string) {
