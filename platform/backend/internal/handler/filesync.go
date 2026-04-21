@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -124,13 +125,60 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		Path    string `json:"path"`
 		Content string `json:"content,omitempty"`
 		Locked  bool   `json:"locked"`
+		Status  string `json:"status,omitempty"` // "added" / "modified" — only populated in incremental mode
 	}
 
-	var allFiles []FileInfo
+	var req FileSyncRequest
+	_ = c.ShouldBindJSON(&req) // body optional
 
 	repoPath := filepath.Join("data", "projects", projectID, "repo")
 	ignorePatterns := loadGitignore(repoPath)
 
+	// Incremental path: if client sent their last-synced version and it maps to
+	// a git tag, return only the delta via `git diff --name-status`.
+	if req.Version != "" && req.Version != currentVersion {
+		if changed, deleted, ok := diffFilesSinceVersion(repoPath, req.Version); ok {
+			var files []FileInfo
+			for _, ch := range changed {
+				if shouldIgnore(ch.path, ignorePatterns) {
+					continue
+				}
+				data, _ := os.ReadFile(filepath.Join(repoPath, ch.path))
+				files = append(files, FileInfo{
+					Path:    ch.path,
+					Content: string(data),
+					Locked:  lockedFiles[ch.path],
+					Status:  ch.status,
+				})
+			}
+			filteredDeleted := make([]string, 0, len(deleted))
+			for _, d := range deleted {
+				if shouldIgnore(d, ignorePatterns) {
+					continue
+				}
+				filteredDeleted = append(filteredDeleted, d)
+			}
+			c.JSON(200, gin.H{
+				"success": true,
+				"data": gin.H{
+					"version":      currentVersion,
+					"from_version": req.Version,
+					"incremental":  true,
+					"project_id":   projectID,
+					"project_name": project.Name,
+					"file_count":   len(files),
+					"files":        files,
+					"deleted":      filteredDeleted,
+					"message":      "Incremental sync: apply writes and delete listed files.",
+				},
+			})
+			return
+		}
+		// fall through to full sync if the tag doesn't exist or git diff fails
+	}
+
+	// Full sync (fallback / first sync)
+	var allFiles []FileInfo
 	if _, err := os.Stat(repoPath); err == nil {
 		filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
@@ -157,13 +205,65 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 		"success": true,
 		"data": gin.H{
 			"version":      currentVersion,
+			"incremental":  false,
 			"project_id":   projectID,
 			"project_name": project.Name,
 			"file_count":   len(allFiles),
 			"files":        allFiles,
-			"message":      "All project files synced. Write to .a3c_staging/{project_id}/full/ in your working directory.",
+			"deleted":      []string{},
+			"message":      "Full project files synced. Write to .a3c_staging/{project_id}/full/ in your working directory.",
 		},
 	})
+}
+
+// changedFile represents one entry from `git diff --name-status`.
+type changedFile struct {
+	status string // "added" or "modified"
+	path   string
+}
+
+// diffFilesSinceVersion uses git to compute the set of files changed between
+// an older version tag and the current HEAD. Returns (changed, deleted, ok).
+// ok=false means caller should fall back to a full snapshot (e.g. unknown tag).
+func diffFilesSinceVersion(repoPath, fromVersion string) ([]changedFile, []string, bool) {
+	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
+		return nil, nil, false
+	}
+	// Verify the tag exists; otherwise fall back.
+	if err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/tags/"+fromVersion).Run(); err != nil {
+		return nil, nil, false
+	}
+	out, err := exec.Command("git", "-C", repoPath, "diff", "--name-status", fromVersion+"..HEAD").Output()
+	if err != nil {
+		return nil, nil, false
+	}
+	var changed []changedFile
+	var deleted []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Format: "<STATUS>\t<path>" or "R<score>\t<old>\t<new>"
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		code := parts[0]
+		switch {
+		case strings.HasPrefix(code, "A"):
+			changed = append(changed, changedFile{status: "added", path: strings.ReplaceAll(parts[1], "\\", "/")})
+		case strings.HasPrefix(code, "M"):
+			changed = append(changed, changedFile{status: "modified", path: strings.ReplaceAll(parts[1], "\\", "/")})
+		case strings.HasPrefix(code, "D"):
+			deleted = append(deleted, strings.ReplaceAll(parts[1], "\\", "/"))
+		case strings.HasPrefix(code, "R") && len(parts) >= 3:
+			// Rename: treat as delete(old) + add(new)
+			deleted = append(deleted, strings.ReplaceAll(parts[1], "\\", "/"))
+			changed = append(changed, changedFile{status: "added", path: strings.ReplaceAll(parts[2], "\\", "/")})
+		}
+	}
+	return changed, deleted, true
 }
 
 // syncBranch handles file_sync when the agent is on a branch.

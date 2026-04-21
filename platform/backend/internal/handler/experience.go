@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/model"
 )
@@ -23,6 +25,11 @@ func (h *ExperienceHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	sourceType := c.Query("source_type")
 	limit := 50
+	if l := c.Query("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
 
 	query := model.DB.Where("project_id = ?", projectID)
 	if status != "" {

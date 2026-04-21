@@ -85,17 +85,35 @@ async function main() {
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })
 
-  server.tool('task', 'Claim A3C tasks (completion is automatic when change is approved)', {
-    action: z.enum(['claim']).describe('Action to perform (tasks are auto-completed on approval)'),
-    task_id: z.string().describe('Task ID (required)'),
-  }, async ({ action, task_id }) => {
-    switch (action) {
-      case 'claim': {
-        const data = await api.claimTask(task_id)
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  server.tool(
+    'task',
+    'A3C task management: list pending tasks, claim one to work on, or release it if you realize you cannot finish it. Completion is automatic when your change is approved.',
+    {
+      action: z.enum(['list', 'claim', 'release']).describe('list=see available tasks, claim=take a task, release=abandon a claimed task'),
+      task_id: z.string().optional().describe('Task ID (required for claim and release)'),
+      reason: z.string().optional().describe('Why you are releasing (optional, for release)'),
+    },
+    async ({ action, task_id, reason }) => {
+      switch (action) {
+        case 'list': {
+          const projectId = api.projectId
+          if (!projectId) return { content: [{ type: 'text', text: 'Error: No project selected. Call select_project first.' }] }
+          const data = await api.listTasks(projectId)
+          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+        }
+        case 'claim': {
+          if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required for claim' }] }
+          const data = await api.claimTask(task_id)
+          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+        }
+        case 'release': {
+          if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required for release' }] }
+          const data = await api.releaseTask(task_id, reason)
+          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+        }
       }
-    }
-  })
+    },
+  )
 
   server.tool('filelock', 'Acquire or release file locks', {
     action: z.enum(['acquire', 'release', 'check']).describe('Action to perform'),
@@ -152,20 +170,30 @@ async function main() {
       return { content: [{ type: 'text', text: 'Error: No project selected' }] }
     }
 
-    const clientRoot = path.join(__dirname, '..', '..')
-    const stagingDir = path.join(clientRoot, '.a3c_staging', projectId, 'full')
-    
+    // Staging root selection order:
+    //   1. A3C_STAGING_DIR env var (absolute path)
+    //   2. Agent's current working directory (what the OpenCode agent sees)
+    //   3. Fallback to MCP install dir (legacy behavior)
+    const stagingRoot = process.env.A3C_STAGING_DIR
+      ? path.resolve(process.env.A3C_STAGING_DIR)
+      : process.cwd() || path.join(__dirname, '..', '..')
+    const clientRoot = stagingRoot
+    const stagingDir = path.resolve(path.join(clientRoot, '.a3c_staging', projectId, 'full'))
+
     fs.mkdirSync(stagingDir, { recursive: true })
 
-    const files: Array<{ path: string; content: string; locked: boolean }> = data.data?.files
+    const files: Array<{ path: string; content: string; locked: boolean; status?: string }> = data.data?.files
     if (!Array.isArray(files)) {
       return { content: [{ type: 'text', text: 'Error: Invalid response format from server' }] }
     }
-    
+    const deletedPaths: string[] = Array.isArray(data.data?.deleted) ? data.data.deleted : []
+    const incremental: boolean = !!data.data?.incremental
+
     let writtenCount = 0
     const writtenPaths: string[] = []
     const lockedPaths: string[] = []
 
+    // Apply writes (added + modified)
     for (const file of files) {
       const filePath = path.join(stagingDir, file.path)
       const dir = path.dirname(filePath)
@@ -178,6 +206,21 @@ async function main() {
       }
     }
 
+    // Apply deletions: remove stale files from the staging snapshot so the
+    // agent never reads content that no longer exists on the platform.
+    const deletedCount: string[] = []
+    for (const rel of deletedPaths) {
+      const filePath = path.join(stagingDir, rel)
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+          deletedCount.push(rel)
+        }
+      } catch (e) {
+        console.error('[file_sync] Failed to delete %s: %s', filePath, (e as any)?.message)
+      }
+    }
+
     const versionFile = path.join(clientRoot, '.a3c_version')
     fs.writeFileSync(versionFile, data.data?.version || 'v1.0', 'utf-8')
 
@@ -185,11 +228,17 @@ async function main() {
       success: true,
       data: {
         version: data.data?.version,
+        from_version: data.data?.from_version,
+        incremental,
         staging_dir: stagingDir,
         files_written: writtenCount,
+        files_deleted: deletedCount.length,
         written_files: writtenPaths,
+        deleted_files: deletedCount,
         locked_files: lockedPaths,
-        message: `Files synced to ${stagingDir}. ${writtenCount} files written. Version saved to .a3c_version`,
+        message: incremental
+          ? `Incremental sync: ${writtenCount} changed, ${deletedCount.length} removed from ${stagingDir}. Version ${data.data?.from_version} -> ${data.data?.version}.`
+          : `Full sync: ${writtenCount} files written to ${stagingDir}. Version saved to .a3c_version.`,
       }
     }
 
@@ -271,13 +320,23 @@ async function main() {
   server.tool('pr_submit', 'Submit a Pull Request from current branch to main (requires self-review)', {
     title: z.string().describe('PR title'),
     description: z.string().optional().describe('PR description'),
-    self_review: z.string().describe('Self-review JSON: { changed_functions: [{file, function, change_type, impact}], overall_impact, merge_confidence }'),
+    self_review: z.object({
+      changed_functions: z.array(z.object({
+        file: z.string(),
+        function: z.string(),
+        change_type: z.string().describe('added/modified/removed/refactored'),
+        impact: z.string().describe('What this change does and why it matters'),
+      })).describe('Per-function summary of what you changed'),
+      overall_impact: z.string().describe('High-level description of the PR impact'),
+      merge_confidence: z.enum(['high', 'medium', 'low']).describe('Your confidence that this is safe to merge'),
+    }).describe('Structured self-review object (the server accepts it as JSON)'),
   }, async ({ title, description, self_review }) => {
     try {
       const data = await api.submitPR({
         title,
         description: description || '',
-        self_review,
+        // Pass as object; server accepts either object or stringified JSON.
+        self_review: self_review as any,
       })
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
     } catch (e: any) {
@@ -303,7 +362,7 @@ async function main() {
     files_read: z.array(z.string()).optional().describe('Files that were actually useful'),
   }, async ({ task_id, outcome, approach, pitfalls, key_insight, missing_context, would_do_differently, files_read }) => {
     try {
-      const data = await api.post('/feedback/submit', {
+      const data = await api.submitFeedback({
         task_id, outcome, approach, pitfalls, key_insight, missing_context, would_do_differently, files_read,
       })
       return { content: [{ type: 'text', text: `Experience recorded: ${JSON.stringify(data)}` }] }

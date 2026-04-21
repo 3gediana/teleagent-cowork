@@ -88,12 +88,30 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 		versionContent = version.Content
 	}
 
-	// Task summary
+	// Task summary. Cap how many tasks actually land in the prompt to keep
+	// the Chief's context window under control on long-running projects.
+	const chiefMaxTasksInPrompt = 30
 	taskList := ""
 	pendingCount := 0
 	inProgressCount := 0
 	completedCount := 0
-	for i, t := range tasks {
+	shownTasks := 0
+	for _, t := range tasks {
+		switch t.Status {
+		case "pending":
+			pendingCount++
+		case "claimed":
+			inProgressCount++
+		case "completed":
+			completedCount++
+		}
+		// Prefer to show actionable tasks (pending/claimed) over completed ones.
+		if shownTasks >= chiefMaxTasksInPrompt {
+			continue
+		}
+		if t.Status == "completed" && shownTasks >= chiefMaxTasksInPrompt/3 {
+			continue
+		}
 		assignee := "unassigned"
 		if t.AssigneeID != nil {
 			var a model.Agent
@@ -105,22 +123,16 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 		if t.Description != "" {
 			taskList += " - " + t.Description
 		}
-		if i < len(tasks)-1 {
-			taskList += "\n"
-		}
-		switch t.Status {
-		case "pending":
-			pendingCount++
-		case "claimed":
-			inProgressCount++
-		case "completed":
-			completedCount++
-		}
+		taskList += "\n"
+		shownTasks++
+	}
+	if len(tasks) > shownTasks {
+		taskList += fmt.Sprintf("...(%d more tasks omitted for brevity)\n", len(tasks)-shownTasks)
 	}
 
-	// Agent status
+	// Agent status (cap to keep prompt bounded)
 	var agents []model.Agent
-	model.DB.Where("current_project_id = ?", projectID).Find(&agents)
+	model.DB.Where("current_project_id = ?", projectID).Limit(20).Find(&agents)
 	agentList := ""
 	for _, a := range agents {
 		currentTask := ""
@@ -133,9 +145,9 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 		agentList += "- " + a.Name + " [" + a.Status + "]" + currentTask + "\n"
 	}
 
-	// Active policies
+	// Active policies (cap)
 	var policies []model.Policy
-	model.DB.Where("status = 'active'").Order("priority DESC").Find(&policies)
+	model.DB.Where("status = 'active'").Order("priority DESC").Limit(30).Find(&policies)
 	policyList := ""
 	for _, p := range policies {
 		policyList += "- [" + p.Source + "] " + p.Name + ": match=" + p.MatchCondition + " actions=" + p.Actions + "\n"

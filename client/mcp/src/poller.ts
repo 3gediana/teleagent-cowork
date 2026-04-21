@@ -33,13 +33,21 @@ export class Poller {
       }
     }, 5000)
 
+    // Heartbeat slightly before the server's 5-minute timeout window to
+    // tolerate network jitter. Also renews active filelocks so long-running
+    // tasks don't lose their locks mid-work (server lock TTL = 5 min).
     this.heartbeatInterval = setInterval(async () => {
       try {
         await this.api.heartbeat()
       } catch (e) {
         console.error('[Poller] Heartbeat error:', e)
       }
-    }, 5 * 60 * 1000)
+      try {
+        await this.api.renewLocks()
+      } catch (e) {
+        // Most likely: no project selected yet, or no active locks. Benign.
+      }
+    }, 3 * 60 * 1000)
 
     this.aliveCheckInterval = setInterval(() => {
       try {

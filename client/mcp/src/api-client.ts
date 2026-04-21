@@ -57,6 +57,16 @@ export class ApiClient {
     return data
   }
 
+  async releaseTask(taskId: string, reason?: string) {
+    const { data } = await this.client.post('/api/v1/task/release', { task_id: taskId, reason: reason || '' })
+    return data
+  }
+
+  async listTasks(projectId: string) {
+    const { data } = await this.client.get('/api/v1/task/list', { params: { project_id: projectId } })
+    return data
+  }
+
   async acquireLock(taskId: string, files: string[], reason: string) {
     const { data } = await this.client.post('/api/v1/filelock/acquire', {
       task_id: taskId, files, reason,
@@ -72,6 +82,13 @@ export class ApiClient {
 
   async checkLocks(files: string[]) {
     const { data } = await this.client.post('/api/v1/filelock/check', { files },
+      { params: { project_id: this.project } })
+    return data
+  }
+
+  async renewLocks() {
+    if (!this.project) return { success: true, data: { renewed: [] } }
+    const { data } = await this.client.post('/api/v1/filelock/renew', {},
       { params: { project_id: this.project } })
     return data
   }
@@ -107,7 +124,8 @@ export class ApiClient {
   }
 
   async poll() {
-    const { data } = await this.client.post('/api/v1/poll', { key: this.accessKey })
+    // Auth is via Bearer header; body is empty by design (server does not read `key`).
+    const { data } = await this.client.post('/api/v1/poll', {})
     return data
   }
 
@@ -146,7 +164,7 @@ export class ApiClient {
   async submitPR(prData: {
     title: string
     description?: string
-    self_review: string
+    self_review: string | object
   }) {
     const { data } = await this.client.post('/api/v1/pr/submit', prData, {
       timeout: 60000,
@@ -161,6 +179,23 @@ export class ApiClient {
 
   async getPR(prId: string) {
     const { data } = await this.client.get(`/api/v1/pr/${prId}`)
+    return data
+  }
+
+  // Feedback (Phase 3B): submit task completion experience.
+  async submitFeedback(feedback: {
+    task_id: string
+    outcome: string
+    approach?: string
+    pitfalls?: string
+    key_insight?: string
+    missing_context?: string
+    would_do_differently?: string
+    files_read?: string[]
+  }) {
+    const { data } = await this.client.post('/api/v1/feedback/submit', feedback, {
+      params: { project_id: this.project },
+    })
     return data
   }
 }

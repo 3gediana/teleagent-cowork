@@ -37,6 +37,7 @@ type Agent struct {
 	AccessKey        string     `gorm:"size:256;not null" json:"-"`
 	SessionID        string     `gorm:"size:128" json:"session_id"`
 	Status           string     `gorm:"size:20;default:'offline'" json:"status"` // online/offline
+	IsHuman          bool       `gorm:"default:false" json:"is_human"`           // true = dashboard user; allowed to direct Maintain Agent
 	CurrentProjectID *string    `gorm:"size:64;index" json:"current_project_id"`
 	CurrentBranchID  *string    `gorm:"size:64;index" json:"current_branch_id"` // nil=on main
 	LastHeartbeat    *time.Time `json:"last_heartbeat"`

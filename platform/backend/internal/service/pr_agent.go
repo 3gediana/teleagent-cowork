@@ -288,8 +288,16 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 		})
 
 	default:
+		// Unknown result: treat as needs_work and flag for human review so PR
+		// doesn't silently get stuck at status=evaluated with no downstream action.
 		pr.Status = "evaluated"
 		model.DB.Save(&pr)
+		BroadcastEvent(projectID, "PR_NEEDS_WORK", map[string]interface{}{
+			"pr_id":  pr.ID,
+			"title":  pr.Title,
+			"reason": fmt.Sprintf("evaluate agent returned unrecognized result %q, human review required", result),
+		})
+		log.Printf("[PR] Evaluate agent returned unknown result %q for PR %s", result, pr.ID)
 	}
 
 	log.Printf("[PR] Evaluate output for PR %s: result=%s, merge_cost=%s", pr.ID, result, mergeCostRating)

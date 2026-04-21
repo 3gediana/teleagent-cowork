@@ -40,7 +40,10 @@ func StartHeartbeatChecker() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
-		log.Printf("[Heartbeat] Background checker started (5-minute timeout)")
+		// The MCP poller heartbeats every 3 minutes (and poll() also bumps the
+		// heartbeat on every 5s poll). We give a generous 7-minute grace window
+		// here so a brief network hiccup doesn't kick an active agent offline.
+		log.Printf("[Heartbeat] Background checker started (7-minute timeout)")
 
 		for range ticker.C {
 			var agents []model.Agent
@@ -53,7 +56,7 @@ func StartHeartbeatChecker() {
 				}
 
 				elapsed := now.Sub(*a.LastHeartbeat)
-				if elapsed > 5*time.Minute {
+				if elapsed > 7*time.Minute {
 					log.Printf("[Heartbeat] Agent %s (%s) timed out, releasing resources", a.ID, a.Name)
 
 					err := model.DB.Transaction(func(tx *gorm.DB) error {
@@ -142,26 +145,29 @@ func StartAnalyzeTimer() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 
-		log.Printf("[Analyze] Daily timer started")
+		log.Printf("[Analyze] Daily timer started (first run in 24h)")
 
-		// Run once immediately on startup
-		runAnalyzeForAllProjects()
-
+		// Do NOT run immediately on startup. Previously we re-analyzed the
+		// same raw experiences on every restart (common in dev) which
+		// flooded the agent with low-signal noise. Wait for the first tick.
 		for range ticker.C {
 			runAnalyzeForAllProjects()
 		}
 	}()
 }
 
+// analyzeMinRawExperiences is the minimum number of new raw experiences before
+// Analyze Agent is worth running. Kept conservative to favor signal quality.
+const analyzeMinRawExperiences = 10
+
 func runAnalyzeForAllProjects() {
 	var projects []model.Project
 	model.DB.Where("status = 'ready' OR status = 'idle'").Find(&projects)
 
 	for _, project := range projects {
-		// Check if there are raw experiences to distill
 		var rawCount int64
 		model.DB.Model(&model.Experience{}).Where("project_id = ? AND status = ?", project.ID, "raw").Count(&rawCount)
-		if rawCount >= 3 { // Only run if there's enough data
+		if rawCount >= analyzeMinRawExperiences {
 			TriggerAnalyzeAgent(project.ID)
 		}
 	}
