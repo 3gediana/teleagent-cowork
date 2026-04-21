@@ -13,6 +13,7 @@
 | 痛点 | 说明 |
 |------|------|
 | **每次都像第一次** | Agent 执行任务时没有历史经验参考，相同类型的错误反复出现 |
+| **Token 白白消耗** | Agent 消耗几万 token 执行任务，但只留下 diff，决策推理、踩坑过程全部丢弃 |
 | **错误无法沉淀** | L1/L2 审核结果、Fix 失败、PR 拒绝等信号未被结构化记录和学习 |
 | **策略全靠人定** | 模型选择、审核强度、流程路由全靠人类手动配置 |
 | **人工介入率高** | 大量审批节点需要人类操作，平台无法自主决策 |
@@ -35,13 +36,26 @@
 需求输入
   → 任务建模（标签 + 画像）
   → Agent 执行（策略路由 + 防错约束）
+  → 经验内化（feedback 工具 + 扩展 output）  ← 关键：让消耗的 token 不浪费
   → 过程记录（轨迹 + 工具调用）
   → 结果评估（审核信号 + 成功/失败标签）
-  → 失败/成功模式提炼（Analyze Agent）
+  → 失败/成功模式提炼（Analyze Agent 蒸馏 raw experience）
   → 生成技能/策略（SkillCandidate + Policy）
   → 下次自动匹配应用（TaskProfiler + PolicyEngine）
   → 错误率下降
 ```
+
+### 1.4 核心原则：Token 不浪费
+
+Agent 每次执行任务消耗几万 token，但当前只留下 diff 和审核结果。**决策推理、踩坑过程、方案选择理由全部丢弃**。
+
+自进化的第一步不是"采集原始日志再分析"，而是**让已经消耗了 token 的 Agent 在任务结束时自己做"经验压缩"**。一条 `key_insight` 比一万行原始日志更有价值。
+
+为什么这样做比事后分析更高效：
+1. **Agent 自己知道什么重要** — 它经历过整个过程
+2. **天然压缩** — 几万 token 的执行过程 → 几百 token 的结构化经验
+3. **即时性** — 不用等定时分析，经验在任务完成时就沉淀了
+4. **可操作性** — Agent 提炼的是"下次该怎么做"，不是原始数据
 
 ---
 
@@ -53,14 +67,17 @@
 ┌─────────────────────────────────────────────────────┐
 │                    A3C Platform                       │
 ├─────────────────────────────────────────────────────┤
-│  Observe 层 — 采集一切执行轨迹                        │
+│  Observe 层 — 采集一切执行轨迹 + 经验内化              │
 │  ├── AgentSession (持久化)                            │
 │  ├── ToolCallTrace (工具调用轨迹)                     │
 │  ├── Change.FailureMode (失败模式标签)                │
-│  └── TaskTag (任务场景标签)                           │
+│  ├── TaskTag (任务场景标签)                           │
+│  ├── Experience (经验记录，核心)                      │
+│  ├── feedback 工具 (客户端 Agent 经验压缩)             │
+│  └── 扩展 output 参数 (内部 Agent 推理捕获)            │
 ├─────────────────────────────────────────────────────┤
-│  Learn 层 — 定时分析、提炼技能、归纳场景                │
-│  ├── Analyze Agent (新角色)                           │
+│  Learn 层 — 蒸馏经验、提炼技能、归纳场景                │
+│  ├── Analyze Agent (蒸馏 raw experience → distilled)  │
 │  ├── SkillCandidate 库                               │
 │  ├── Policy 库                                       │
 │  └── Analyze Timer (每日定时触发)                     │
@@ -76,23 +93,31 @@
 ### 2.2 数据流
 
 ```
-Agent 执行任务
+客户端 Agent 完成任务
+  ↓ 调用 feedback 工具（经验压缩）
   ↓
-Session 持久化 + ToolCallTrace 记录          ← Observe
+Experience 记录 (source=agent_feedback, status=raw)    ← Observe
   ↓
-审核结果 → Change.FailureMode 自动标注       ← Observe
+内部 Agent 执行审核/修复/评审
+  ↓ 扩展的 output 参数（推理捕获）
   ↓
-Analyze Agent 定时分析历史轨迹               ← Learn
+Experience 记录 (source=audit_observation/fix_strategy/eval_pattern, status=raw)  ← Observe
   ↓
-输出 SkillCandidate + Policy 建议            ← Learn
+Session 持久化 + ToolCallTrace 记录                    ← Observe
   ↓
-人类审批 → Skill/Policy 变为 active           ← Learn
+审核结果 → Change.FailureMode 自动标注                 ← Observe
   ↓
-新任务进来 → TaskProfiler 画像                ← Act
+Analyze Agent 定时蒸馏 raw experience → distilled      ← Learn
   ↓
-PolicyEngine 匹配策略 → 注入执行配置          ← Act
+输出 SkillCandidate + Policy 建议                      ← Learn
   ↓
-Agent 带着经验执行 → 错误率下降               ← 效果
+人类审批 → Skill/Policy 变为 active                    ← Learn
+  ↓
+新任务进来 → TaskProfiler 画像                         ← Act
+  ↓
+PolicyEngine 匹配策略 → 注入执行配置                   ← Act
+  ↓
+Agent 带着经验执行 → 错误率下降                        ← 效果
 ```
 
 ---
@@ -205,6 +230,200 @@ type TaskTag struct {
 - `agent/tools.go`：`create_task` 工具加 `tags` 参数
 - `tool_handler.go`：`handleCreateTask` 处理 tags
 
+### 3.5 Experience — 经验记录（核心）
+
+**设计理念**：不是存原始日志再分析，而是让每个消耗了 token 的 Agent 在完成时主动做"经验压缩"。Experience 是 Observe 层最重要的模型。
+
+**新增模型**：
+
+```go
+type Experience struct {
+    ID           string    `gorm:"primaryKey;size:64" json:"id"`
+    ProjectID    string    `gorm:"size:64;index" json:"project_id"`
+    SourceType   string    `gorm:"size:32;index" json:"source_type"`   // agent_feedback / audit_observation / fix_strategy / eval_pattern / maintain_rationale
+    SourceID     string    `gorm:"size:64" json:"source_id"`           // session ID or task ID
+    AgentRole    string    `gorm:"size:32;index" json:"agent_role"`    // 哪个角色产出的
+    TaskID       string    `gorm:"size:64;index" json:"task_id"`      // 关联的任务
+    Outcome      string    `gorm:"size:20;index" json:"outcome"`      // success / partial / failed
+
+    // 核心经验内容（来自 feedback 工具或扩展 output）
+    Approach     string    `gorm:"type:text" json:"approach"`          // 采取了什么方法
+    Pitfalls     string    `gorm:"type:text" json:"pitfalls"`          // 踩了什么坑
+    KeyInsight   string    `gorm:"type:text" json:"key_insight"`       // 关键洞察（最核心，一条就够）
+    MissingCtx   string    `gorm:"type:text" json:"missing_context"`   // 缺少什么上下文
+    DoDifferently string   `gorm:"type:text" json:"do_differently"`   // 下次怎么做（反事实学习）
+
+    // 结构化补充（来自内部 Agent 扩展 output）
+    PatternObserved string  `gorm:"type:text" json:"pattern_observed"` // 审核发现的模式
+    FixStrategy     string  `gorm:"type:text" json:"fix_strategy"`     // 修复策略
+    QualityPatterns string  `gorm:"type:json" json:"quality_patterns"` // 代码质量模式
+    FalsePositive   bool   `gorm:"default:false" json:"false_positive"` // 是否误判
+
+    // 上下文标签
+    Tags         string    `gorm:"type:json" json:"tags"`             // 自动标注的标签
+    FilesInvolved string   `gorm:"type:json" json:"files_involved"`   // 涉及的文件路径
+
+    Status       string    `gorm:"size:20;default:'raw'" json:"status"` // raw / distilled / skill / deprecated
+    CreatedAt    time.Time `gorm:"index" json:"created_at"`
+}
+```
+
+**状态流转**：
+
+```
+raw → (Analyze Agent 蒸馏) → distilled → (人类审批) → skill
+                                                      ↓
+                                               (过时) → deprecated
+```
+
+**Experience 的来源**：
+
+| 来源 | 触发时机 | SourceType |
+|------|---------|------------|
+| 客户端 Agent feedback 工具 | 任务完成/失败后主动调用 | `agent_feedback` |
+| Audit Agent 扩展 output | 审核完成时 | `audit_observation` |
+| Fix Agent 扩展 output | 修复完成时 | `fix_strategy` |
+| Evaluate Agent 扩展 output | PR 评审完成时 | `eval_pattern` |
+| Maintain Agent 扩展 output | 创建任务/规划时 | `maintain_rationale` |
+
+### 3.6 信息浪费分析
+
+现有流程中每个环节消耗的 token 和丢失的信息：
+
+| 环节 | 消耗 token | 当前保留 | 丢失（有价值） |
+|------|-----------|---------|---------------|
+| 客户端 Agent 执行任务 | ~5-20K | diff, files 列表 | 决策理由、踩坑过程、哪些上下文有用 |
+| Audit1 审核 | ~2-5K | level, issues, reason | 边界判断推理、发现的模式、改进建议 |
+| Fix 修复 | ~3-8K | action, fixed(bool) | 修复策略、是否误判、其他问题 |
+| Evaluate 评审 PR | ~5-15K | result, rating, reason | 代码质量模式、常见错误模式 |
+| Maintain 管理项目 | ~3-10K | 创建的 task/milestone | 规划推理、风险判断、优先级理由 |
+
+**哪些数据不值得存**：
+
+| 数据 | 为什么不值得 | 替代方案 |
+|------|-------------|---------|
+| Agent 完整输出文本 | 太长、重复、不可操作 | 只存 key_insight |
+| 每个 tool call 的完整参数 | 大部分是样板 | 只存 tool name + success/fail |
+| Session 的完整 prompt | 变化不大 | 只存 prompt_hash 做版本追踪 |
+| 文件完整内容 | 已在 git 里 | 只存文件路径列表 |
+| LLM 中间推理过程 | 太长且不可靠 | 只存最终决策 + 理由 |
+
+**结论**：不是所有数据都需要存，只存"压缩后的经验"。ToolCallTrace 存轻量摘要（tool name + success），Experience 存 Agent 自己提炼的结构化洞察。
+
+### 3.7 客户端 Agent feedback 工具
+
+在 MCP 客户端新增 `feedback` 工具，让客户端 Agent 在完成任务后主动总结经验：
+
+```typescript
+// client/mcp/src/index.ts 新增
+{
+  name: "feedback",
+  description: "Submit task completion feedback with lessons learned. " +
+    "Call this after completing or failing a task to help the platform learn. " +
+    "Your insights will be distilled into reusable skills for future tasks.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id:           { type: "string",  description: "Task ID" },
+      outcome:           { type: "string",  enum: ["success", "partial", "failed"],
+                          description: "Task outcome" },
+      approach:          { type: "string",  description: "What approach did you take and why" },
+      pitfalls:          { type: "string",  description: "What went wrong or what was tricky" },
+      key_insight:       { type: "string",  description: "One key insight for future similar tasks" },
+      missing_context:   { type: "string",  description: "What info did you need but didn't have" },
+      would_do_differently: { type: "string", description: "What would you do differently next time" },
+      files_read:        { type: "array",   items: { type: "string" },
+                          description: "Files that were actually useful" }
+    },
+    required: ["task_id", "outcome"]
+  }
+}
+```
+
+**关键设计**：
+- `outcome` 必填，其他选填 — 降低调用门槛，不强制 Agent 写长总结
+- `key_insight` 只要求一条 — 强制做最关键压缩，避免泛泛而谈
+- `would_do_differently` — 这是"反事实学习"的核心，比记录"做了什么"更有价值
+- `files_read` — 标记哪些文件对这类任务有用，下次可自动注入上下文
+
+**后端处理**：
+
+```go
+// handler/feedback.go
+func (h *FeedbackHandler) Submit(c *gin.Context) {
+    // 解析 feedback 参数
+    // 写入 Experience 表 (source_type=agent_feedback, status=raw)
+    // 自动关联 TaskTag
+    // 如果有 files_read，更新 TaskProfile 缓存
+}
+```
+
+**新增 API**：
+
+| 路径 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/feedback/submit` | POST | 客户端 Agent 提交反馈 |
+
+### 3.8 内部 Agent output 参数扩展
+
+不是所有 Agent 都需要单独的 feedback 工具。内部 Agent（Audit/Fix/Evaluate/Maintain）已有 output 工具，只需**扩展输出参数**来捕获推理过程：
+
+#### audit_output 扩展
+
+```diff
+  { name: "level",         type: "string",  required: true },
+  { name: "issues",        type: "array" },
+  { name: "reject_reason", type: "string" },
++ { name: "pattern_observed",          type: "string",  description: "Recurring pattern seen in this submission" },
++ { name: "suggestion_for_submitter", type: "string",  description: "How the submitter could avoid this issue next time" }
+```
+
+#### fix_output 扩展
+
+```diff
+  { name: "action",        type: "string",  required: true },
+  { name: "fixed",         type: "boolean" },
+  { name: "delegate_to",   type: "string" },
+  { name: "reject_reason", type: "string" },
++ { name: "fix_strategy",    type: "string",  description: "What fix approach worked or why it couldn't be fixed" },
++ { name: "false_positive",  type: "boolean", description: "Was this a false positive from audit?" }
+```
+
+#### evaluate_output 扩展
+
+```diff
+  { name: "result",            type: "string",  required: true },
+  { name: "merge_cost_rating",  type: "string" },
+  { name: "reason",             type: "string" },
++ { name: "quality_patterns",   type: "array",   description: "Code quality patterns observed (good or bad)" },
++ { name: "common_mistakes",    type: "array",   description: "Recurring mistakes seen across PRs from this project" }
+```
+
+#### biz_review_output 扩展
+
+```diff
+  { name: "result",             type: "string",  required: true },
+  { name: "biz_review",         type: "string" },
+  { name: "version_suggestion", type: "string" },
++ { name: "alignment_rationale", type: "string", description: "Why this PR aligns or misaligns with project direction" }
+```
+
+**后端处理改动**：
+
+`tool_handler.go` 的 `HandleToolCallResult`：在处理原有参数后，提取扩展参数，写入 Experience 表。
+
+```go
+// 伪代码
+func HandleToolCallResult(sessionID, changeID, projectID, toolName string, args map[string]interface{}) {
+    // ... 原有逻辑 ...
+    
+    // 提取经验并写入 Experience
+    if hasExperienceFields(toolName, args) {
+        writeExperience(sessionID, projectID, toolName, args)
+    }
+}
+```
+
 ---
 
 ## 4. Learn 层详细设计
@@ -218,12 +437,13 @@ RoleAnalyze Role = "analyze"
 ```
 
 **职责**：
-- 分析最近 N 个 AgentSession + ToolCallTrace
-- 聚类失败模式（哪些 FailureMode 高频出现）
-- 找高成功复用模式（哪些 tag 组合下 L0 率高）
+- 蒸馏 raw Experience 记录（合并同一 task 的多条 experience，去重、提炼、归纳）
+- 聚类失败模式（哪些 FailureMode + pitfall 组合高频出现）
+- 找高成功复用模式（哪些 tag 组合下 key_insight 可复用）
 - 产出候选技能（SkillCandidate）
 - 产出候选策略（Policy 建议）
 - 模型效果对比（不同模型在同一角色下的成功率差异）
+- 将 raw experience 标记为 distilled
 
 **触发方式**：
 - 新增 `StartAnalyzeTimer()`，每日凌晨运行（类似 `StartMaintainTimer`）
@@ -233,8 +453,8 @@ RoleAnalyze Role = "analyze"
 - `analyze_output`：输出分析结果
 
 **Prompt 核心输入**：
-- 最近 100 个 AgentSession（含 role, status, duration, model）
-- 对应的 ToolCallTrace（工具调用链）
+- 最近 status=raw 的 Experience 记录（含 source_type, outcome, key_insight, pitfalls, do_differently）
+- 对应的 AgentSession（含 role, status, duration, model）
 - Change 审核结果（L0/L1/L2 + FailureMode）
 - TaskTag 分布
 - 当前已有 Skill/Policy 列表（避免重复）
@@ -244,6 +464,7 @@ RoleAnalyze Role = "analyze"
 - 结构化的 policy 候选（name, match_condition, actions, priority）
 - 标签建议（哪些 task 应该打什么标签）
 - 模型建议（哪个角色应该用什么模型）
+- 需要标记为 distilled 的 experience ID 列表
 
 ### 4.2 SkillCandidate 库
 
@@ -476,6 +697,7 @@ RoleChief Role = "chief"
 | `model/agent_session.go` | AgentSession 模型 |
 | `model/tool_call_trace.go` | ToolCallTrace 模型 |
 | `model/task_tag.go` | TaskTag 模型 |
+| `model/experience.go` | Experience 经验记录模型（核心） |
 | `model/skill_candidate.go` | SkillCandidate 模型 |
 | `model/policy.go` | Policy 模型 |
 
@@ -485,6 +707,7 @@ RoleChief Role = "chief"
 | `service/task_profiler.go` | TaskProfiler 画像逻辑 |
 | `service/policy_engine.go` | PolicyEngine 策略路由 |
 | `service/analyze.go` | Analyze Agent 触发 + 输出处理 |
+| `service/experience.go` | Experience 写入 + 查询逻辑 |
 
 ### 后端 handler
 | 文件 | 内容 |
@@ -492,6 +715,12 @@ RoleChief Role = "chief"
 | `handler/skill.go` | Skill CRUD API |
 | `handler/policy.go` | Policy CRUD API |
 | `handler/chief.go` | Chief Agent 对话 API |
+| `handler/feedback.go` | 客户端 Agent feedback 接收 API |
+
+### MCP 客户端
+| 文件 | 内容 |
+|------|------|
+| `client/mcp/src/index.ts` | 新增 `feedback` 工具定义 |
 
 ### Agent 定义
 | 文件 | 内容 |
@@ -500,6 +729,15 @@ RoleChief Role = "chief"
 | `.opencode/agents/chief.md` | Chief Agent 定义 |
 | `.opencode/tools/analyze_output.ts` | Analyze 输出工具 |
 | `.opencode/tools/chief_output.ts` | Chief 输出工具 |
+
+### Agent output 扩展（修改现有文件）
+| 文件 | 改动 |
+|------|------|
+| `.opencode/tools/audit_output.ts` | 新增 pattern_observed, suggestion_for_submitter 参数 |
+| `.opencode/tools/fix_output.ts` | 新增 fix_strategy, false_positive 参数 |
+| `.opencode/tools/evaluate_output.ts` | 新增 quality_patterns, common_mistakes 参数 |
+| `.opencode/tools/biz_review_output.ts` | 新增 alignment_rationale 参数 |
+| `agent/tools.go` | 对应更新 PlatformTools 定义 |
 
 ### 前端
 | 页面/组件 | 内容 |
@@ -517,10 +755,11 @@ RoleChief Role = "chief"
 
 ```
 P0-1 Session持久化 ──┐
-P0-2 ToolCall轨迹 ───┤──→ P1-1 Analyze Agent ──→ P1-2 SkillCandidate ──→ P2-1 TaskProfiler
-P0-3 结果标签自动标注 ┤                                                    │
-P0-4 TaskTag ─────────┘                                                    ↓
-                                                                    P2-2 PolicyEngine ──→ P2-4 Chief Agent
+P0-2 ToolCall轨迹 ───┤
+P0-3 结果标签自动标注 ┤──→ P1-1 Analyze Agent ──→ P1-2 SkillCandidate ──→ P2-1 TaskProfiler
+P0-4 TaskTag ─────────┤                                                    │
+P0-5 Experience ──────┤                                                    ↓
+P0-6 feedback工具+output扩展 ┘                                    P2-2 PolicyEngine ──→ P2-4 Chief Agent
                                                                            ↑
                                                                     P1-3 Policy库 ─────┘
                                                                     P2-3 AutonomyLevel
@@ -530,9 +769,9 @@ P0-4 TaskTag ─────────┘                                     
 
 | Sprint | 内容 | 预计工作量 | 交付物 |
 |--------|------|-----------|--------|
-| **Sprint 1** | P0-1 + P0-2 | 2-3 天 | AgentSession 持久化 + ToolCallTrace 记录 |
-| **Sprint 2** | P0-3 + P0-4 | 1-2 天 | FailureMode 自动标注 + TaskTag 系统 |
-| **Sprint 3** | P1-1 + analyze.md + analyze_output.ts | 2-3 天 | Analyze Agent 可运行 |
+| **Sprint 1** | P0-1 + P0-2 + P0-5 | 2-3 天 | AgentSession 持久化 + ToolCallTrace + Experience 模型 |
+| **Sprint 2** | P0-3 + P0-4 + P0-6 | 2-3 天 | FailureMode + TaskTag + feedback 工具 + output 扩展 |
+| **Sprint 3** | P1-1 + analyze.md + analyze_output.ts | 2-3 天 | Analyze Agent 可运行，蒸馏 raw experience |
 | **Sprint 4** | P1-2 + P1-3 | 1-2 天 | SkillCandidate + Policy 数据库 + API |
 | **Sprint 5** | P2-1 + P2-2 | 2-3 天 | TaskProfiler + PolicyEngine 运行时生效 |
 | **Sprint 6** | P2-3 + P2-4 | 3-4 天 | AutonomyLevel + Chief Agent |
@@ -543,9 +782,9 @@ P0-4 TaskTag ─────────┘                                     
 
 | Sprint | 验证方式 |
 |--------|---------|
-| Sprint 1 | 重启后端后，历史 Session 仍可查询；ToolCallTrace 表有数据 |
-| Sprint 2 | 提交一个 L1 change，FailureMode 自动填充；TaskTag 可通过 API 创建和查询 |
-| Sprint 3 | Analyze Agent 定时触发，输出 SkillCandidate 记录到 DB |
+| Sprint 1 | 重启后端后，历史 Session 仍可查询；ToolCallTrace 表有数据；Experience 表可写入 |
+| Sprint 2 | 提交一个 L1 change，FailureMode 自动填充；客户端 Agent 可调用 feedback 工具；内部 Agent output 扩展参数写入 Experience |
+| Sprint 3 | Analyze Agent 定时触发，将 raw experience 蒸馏为 distilled，输出 SkillCandidate 记录到 DB |
 | Sprint 4 | Dashboard 可查看/审批 SkillCandidate；Policy API 可 CRUD |
 | Sprint 5 | 新任务领用时返回 TaskProfile；Policy 匹配后影响模型选择/prompt 注入 |
 | Sprint 6 | 通过 Dashboard 与 Chief Agent 对话，自动创建里程碑和任务 |
@@ -558,6 +797,7 @@ P0-4 TaskTag ─────────┘                                     
 
 | 路径 | 方法 | 说明 |
 |------|------|------|
+| `/api/v1/feedback/submit` | POST | 客户端 Agent 提交任务反馈（经验内化） |
 | `/api/v1/task/:task_id/tags` | GET/POST | 获取/添加任务标签 |
 | `/api/v1/chief/chat` | POST | 与 Chief Agent 对话 |
 | `/api/v1/skill/list` | GET | 列出技能候选 |
@@ -568,6 +808,7 @@ P0-4 TaskTag ─────────┘                                     
 | `/api/v1/policy/:id/deactivate` | POST | 停用策略 |
 | `/api/v1/project/:id/autonomy` | POST | 设置自治等级 |
 | `/api/v1/metrics/dashboard` | GET | 指标仪表盘数据 |
+| `/api/v1/experience/list` | GET | 查看经验记录（支持按 status/source_type 筛选） |
 
 ### 9.2 内部 API
 
@@ -600,6 +841,18 @@ P0-4 TaskTag ─────────┘                                     
 
 标签系统的目标是"对调度有用"，不是"学术完美"。先覆盖高价值场景（bugfix/feature/multi_file/high_risk），后续由 Analyze Agent 自动扩展。
 
+### 10.5 为什么用 feedback 工具而不是事后分析原始日志
+
+- **Agent 自己知道什么重要** — 它经历过整个过程，比事后分析更准确
+- **天然压缩** — 几万 token → 几百 token 结构化经验，存储成本极低
+- **即时性** — 不用等定时分析，经验在任务完成时就沉淀
+- **可操作性** — Agent 提炼的 `key_insight` 和 `would_do_differently` 直接可用
+- **反事实学习** — `would_do_differently` 是"如果重来我会怎么做"，比记录"做了什么"更有价值
+
+### 10.6 为什么 Experience 是 Observe 层核心而不是 ToolCallTrace
+
+ToolCallTrace 记录的是"做了什么"（行为），Experience 记录的是"学到了什么"（认知）。对自进化来说，认知比行为更有价值——同一个行为在不同上下文下可能是对的也可能是错的，但认知（key_insight）是跨场景可迁移的。
+
 ---
 
-> **文档结束**。Phase 3 的核心是将 A3C 从"流程自动化平台"升级为"经验驱动的自进化平台"。P0（Observe 层）是最优先的——没有轨迹数据，后面一切都是空谈。
+> **文档结束**。Phase 3 的核心是将 A3C 从"流程自动化平台"升级为"经验驱动的自进化平台"。关键原则：**Token 不浪费** — 让每个消耗了 token 的 Agent 在完成时主动做经验压缩，通过 feedback 工具和扩展 output 参数，将决策推理、踩坑过程、改进建议内化为 Experience 记录，再由 Analyze Agent 蒸馏为可复用的 Skill 和 Policy。
