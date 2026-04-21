@@ -18,6 +18,7 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/config"
+	"github.com/a3c/platform/internal/model"
 )
 
 type Scheduler struct {
@@ -294,14 +295,26 @@ type jsonToolState struct {
 // runAgentViaServe creates a serve session, sends the message via HTTP API, and processes the response.
 // This replaces the old run --pure approach, enabling multi-round conversation support.
 func (s *Scheduler) runAgentViaServe(session *agent.Session, message string, agentName string, modelStr string) {
+	startTime := time.Now()
 	defer func() {
 		if session.Status == "running" {
 			session.Status = "failed"
 		}
+		// Record duration and update DB
+		durationMs := int(time.Since(startTime).Milliseconds())
+		now := time.Now()
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", session.ID).Updates(map[string]interface{}{
+			"status":       session.Status,
+			"duration_ms":  durationMs,
+			"completed_at": now,
+			"model_id":     modelStr,
+		})
 		// Note: audit/fix sessions are not in agentServeSessionMap, no cleanup needed
 	}()
 
 	session.Status = "running"
+	// Update DB status to running
+	model.DB.Model(&model.AgentSession{}).Where("id = ?", session.ID).Update("status", "running")
 
 	if s.pureServeURL == "" {
 		log.Printf("[OpenCode] No serve URL, falling back to run --pure for session %s", session.ID)
@@ -732,6 +745,26 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 	if ToolCallHandler != nil {
 		ToolCallHandler(session.ID, session.ChangeID, session.ProjectID, toolName, args)
 	}
+
+	// Record ToolCallTrace
+	argsJSON, _ := json.Marshal(args)
+	if len(argsJSON) > 2000 {
+		argsJSON = argsJSON[:2000] // truncate large args
+	}
+	trace := &model.ToolCallTrace{
+		ID:        model.GenerateID("tct"),
+		SessionID: session.ID,
+		ProjectID: session.ProjectID,
+		ToolName:  toolName,
+		Args:      string(argsJSON),
+		Success:   true, // if handler didn't error, assume success
+		CreatedAt: time.Now(),
+	}
+	go func() {
+		if err := model.DB.Create(trace).Error; err != nil {
+			log.Printf("[Trace] Failed to record ToolCallTrace for %s: %v", toolName, err)
+		}
+	}()
 
 	// Broadcast tool call to frontend in real-time
 	if BroadcastHandler != nil {

@@ -44,6 +44,7 @@ func InitDB(cfg *config.DatabaseConfig) error {
 		&Milestone{}, &MilestoneArchive{},
 		&Task{}, &FileLock{}, &Change{},
 		&Branch{}, &PullRequest{}, &RoleOverride{},
+		&AgentSession{}, &ToolCallTrace{}, &TaskTag{},
 	); err != nil {
 		log.Printf("[DB] AutoMigrate warning: %v (attempting retry)", err)
 		// Retry once - GORM sometimes fails on first pass with index issues

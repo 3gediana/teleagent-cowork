@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"text/template"
+	"time"
 
 	"github.com/a3c/platform/internal/model"
 )
@@ -100,27 +101,97 @@ func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionCo
 		Status:        "pending",
 	}
 	m.sessions[sessionID] = session
+
+	// Persist to DB
+	dbSession := &model.AgentSession{
+		ID:            sessionID,
+		Role:          string(role),
+		ProjectID:     projectID,
+		TriggerReason: trigger,
+		Status:        "pending",
+		CreatedAt:     time.Now(),
+	}
+	if ctx != nil && ctx.ChangeInfo != nil {
+		dbSession.ChangeID = ctx.ChangeInfo.ChangeID
+	}
+	if err := model.DB.Create(dbSession).Error; err != nil {
+		log.Printf("[Agent] Failed to persist session %s to DB: %v", sessionID, err)
+	}
+
 	return session
 }
 
 func (m *AgentManager) RegisterSession(session *Session) {
 	m.sessions[session.ID] = session
+
+	// Persist to DB (upsert)
+	dbSession := &model.AgentSession{
+		ID:            session.ID,
+		Role:          string(session.Role),
+		ProjectID:     session.ProjectID,
+		ChangeID:      session.ChangeID,
+		PRID:          session.PRID,
+		TriggerReason:  session.TriggerReason,
+		Status:        session.Status,
+		OpenCodeSessionID: session.OpenCodeSessionID,
+		CreatedAt:     time.Now(),
+	}
+	if err := model.DB.Create(dbSession).Error; err != nil {
+		// Session may already exist in DB (e.g. from CreateSession), update instead
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", session.ID).Updates(map[string]interface{}{
+			"status":              session.Status,
+			"opencode_session_id": session.OpenCodeSessionID,
+		})
+	}
 }
 
 func (m *AgentManager) GetSession(id string) *Session {
-	return m.sessions[id]
+	if s, ok := m.sessions[id]; ok {
+		return s
+	}
+	// Fallback: load from DB
+	var dbSession model.AgentSession
+	if err := model.DB.Where("id = ?", id).First(&dbSession).Error; err != nil {
+		return nil
+	}
+	s := &Session{
+		ID:                dbSession.ID,
+		Role:              Role(dbSession.Role),
+		ProjectID:         dbSession.ProjectID,
+		ChangeID:          dbSession.ChangeID,
+		PRID:              dbSession.PRID,
+		TriggerReason:     dbSession.TriggerReason,
+		Status:            dbSession.Status,
+		Output:            dbSession.Output,
+		OpenCodeSessionID: dbSession.OpenCodeSessionID,
+	}
+	m.sessions[id] = s
+	return s
 }
 
 func (m *AgentManager) UpdateSessionOutput(id string, output string) {
 	if session, ok := m.sessions[id]; ok {
 		session.Output = output
 		session.Status = "completed"
+
+		now := time.Now()
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"status":       "completed",
+			"output":       output,
+			"completed_at":  now,
+		})
 	}
 }
 
 func (m *AgentManager) MarkSessionFailed(id string) {
 	if session, ok := m.sessions[id]; ok {
 		session.Status = "failed"
+
+		now := time.Now()
+		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"status":       "failed",
+			"completed_at":  now,
+		})
 	}
 }
 

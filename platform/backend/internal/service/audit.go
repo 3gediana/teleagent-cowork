@@ -164,6 +164,10 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.Status = "pending_fix"
 		change.AuditLevel = &result.Level
 		change.AuditReason = fmt.Sprintf("L1 issues: %d issues found", len(result.Issues))
+		// Auto-label FailureMode based on issue types
+		if failureMode := classifyFailureMode(result.Issues); failureMode != "" {
+			change.FailureMode = failureMode
+		}
 		model.DB.Save(&change)
 		notifyAuditCompletion(changeID, "pending_fix", "L1", change.AuditReason)
 
@@ -332,4 +336,22 @@ func BuildChangeContext(change *model.Change) *agent.SessionContext {
 			Diff:          change.Diff,
 		},
 	}
+}
+
+// classifyFailureMode maps audit issue types to a failure mode label.
+// Returns the first matching mode, or empty string if no known type found.
+func classifyFailureMode(issues []AuditIssue) string {
+	typeToMode := map[string]string{
+		"wrong_assumption": "wrong_assumption",
+		"missing_context":  "missing_context",
+		"tool_misuse":      "tool_misuse",
+		"over_edit":        "over_edit",
+		"invalid_output":   "invalid_output",
+	}
+	for _, issue := range issues {
+		if mode, ok := typeToMode[issue.Type]; ok {
+			return mode
+		}
+	}
+	return ""
 }

@@ -70,6 +70,12 @@ func StartHeartbeatChecker() {
 							Updates(map[string]interface{}{"status": "pending", "assignee_id": nil}).Error; err != nil {
 							return err
 						}
+						// Release branch occupant
+						if err := tx.Model(&model.Branch{}).
+							Where("occupant_id = ? AND status = 'active'", a.ID).
+							Update("occupant_id", nil).Error; err != nil {
+							return err
+						}
 						return nil
 					})
 

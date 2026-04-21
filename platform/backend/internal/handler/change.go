@@ -142,6 +142,13 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		changeStatus = "pending_human_confirm"
 	}
 
+	// Check if this is a retry (same task has previous rejected change)
+	retryCount := 0
+	var prevChanges []model.Change
+	if model.DB.Where("task_id = ? AND status IN ?", req.TaskID, []string{"rejected", "pending_fix"}).Find(&prevChanges); len(prevChanges) > 0 {
+		retryCount = len(prevChanges)
+	}
+
 	change := model.Change{
 		ID:            changeID,
 		ProjectID:     projectID,
@@ -154,6 +161,7 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		Diff:          string(diffJSON),
 		Description:   req.Description,
 		Status:        changeStatus,
+		RetryCount:    retryCount,
 	}
 
 	if err := model.DB.Create(&change).Error; err != nil {

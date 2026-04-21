@@ -139,6 +139,8 @@ type Change struct {
 	Status        string     `gorm:"size:20;default:'pending'" json:"status"` // pending/pending_human_confirm/approved/rejected
 	AuditLevel    *string    `gorm:"size:2" json:"audit_level"`               // L0/L1/L2
 	AuditReason   string     `gorm:"type:text" json:"audit_reason"`
+	FailureMode   string     `gorm:"size:64" json:"failure_mode"`             // wrong_assumption/missing_context/tool_misuse/over_edit/invalid_output/incomplete_fix
+	RetryCount    int        `gorm:"default:0" json:"retry_count"`            // how many times this task was resubmitted
 	ReviewedAt    *time.Time `json:"reviewed_at"`
 	CreatedAt     time.Time  `gorm:"index:idx_change_created" json:"created_at"`
 }
