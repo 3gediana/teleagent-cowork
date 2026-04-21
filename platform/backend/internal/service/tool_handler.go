@@ -235,6 +235,13 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] audit_output error: %v", err)
 		}
 
+		// M19: Capture audit observation as Experience
+		patternObserved, _ := args["pattern_observed"].(string)
+		suggestionForSubmitter, _ := args["suggestion_for_submitter"].(string)
+		if patternObserved != "" || suggestionForSubmitter != "" {
+			go CreateExperienceFromAudit(projectID, sessionID, "audit_1", changeID, patternObserved, suggestionForSubmitter)
+		}
+
 	case "fix_output":
 		action, _ := args["action"].(string)
 		fixed, _ := args["fixed"].(bool)
@@ -248,6 +255,13 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 		}
 		if err := ProcessFixOutput(changeID, result); err != nil {
 			log.Printf("[ToolHandler] fix_output error: %v", err)
+		}
+
+		// M19: Capture fix strategy as Experience
+		fixStrategy, _ := args["fix_strategy"].(string)
+		falsePositive, _ := args["false_positive"].(bool)
+		if fixStrategy != "" || falsePositive {
+			go CreateExperienceFromFix(projectID, sessionID, changeID, fixStrategy, falsePositive)
 		}
 
 	case "audit2_output":
@@ -297,6 +311,17 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] evaluate_output error: %v", err)
 		}
 
+		// M19: Capture eval patterns as Experience
+		qualityPatterns, _ := args["quality_patterns"].(string)
+		commonMistakes, _ := args["common_mistakes"].(string)
+		if qualityPatterns != "" || commonMistakes != "" {
+			prID := ""
+			if s := agent.DefaultManager.GetSession(sessionID); s != nil {
+				prID = s.PRID
+			}
+			go CreateExperienceFromEvaluate(projectID, sessionID, prID, qualityPatterns, commonMistakes)
+		}
+
 	case "merge_output":
 		if err := HandleMergeOutput(sessionID, projectID, args); err != nil {
 			log.Printf("[ToolHandler] merge_output error: %v", err)
@@ -305,6 +330,21 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 	case "biz_review_output":
 		if err := HandleBizReviewOutput(sessionID, projectID, args); err != nil {
 			log.Printf("[ToolHandler] biz_review_output error: %v", err)
+		}
+
+		// M19: Capture biz review rationale as Experience
+		alignmentRationale, _ := args["alignment_rationale"].(string)
+		if alignmentRationale != "" {
+			prID := ""
+			if s := agent.DefaultManager.GetSession(sessionID); s != nil {
+				prID = s.PRID
+			}
+			go CreateExperienceFromBizReview(projectID, sessionID, prID, alignmentRationale)
+		}
+
+	case "analyze_output":
+		if err := HandleAnalyzeOutput(sessionID, projectID, args); err != nil {
+			log.Printf("[ToolHandler] analyze_output error: %v", err)
 		}
 
 	default:

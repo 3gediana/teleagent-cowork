@@ -8,6 +8,8 @@ export default tool({
     fixed: tool.schema.boolean().optional().describe("Whether the issue was fixed"),
     delegate_to: tool.schema.string().optional().describe("Delegate target"),
     reject_reason: tool.schema.string().optional().describe("Reason for rejection"),
+    fix_strategy: tool.schema.string().optional().describe("What fix strategy was used and why it worked or did not work"),
+    false_positive: tool.schema.boolean().optional().describe("Whether the audit issue was a false positive"),
   },
   async execute(args, context) {
     return JSON.stringify({ success: true, data: { tool: "fix_output", change_id: args.change_id, action: args.action, status: "captured" } })

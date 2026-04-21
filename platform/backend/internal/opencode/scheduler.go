@@ -138,6 +138,11 @@ func (s *Scheduler) Dispatch(session *agent.Session) error {
 		return fmt.Errorf("unknown role: %s", session.Role)
 	}
 
+	// M23: Apply matching policies before building prompt
+	if session.ProjectID != "" && session.Context != nil {
+		s.applyPoliciesToSession(session)
+	}
+
 	prompt, err := agent.BuildPrompt(session.Role, session.Context)
 	if err != nil {
 		return fmt.Errorf("failed to build prompt: %w", err)
@@ -737,6 +742,7 @@ func (s *Scheduler) processToolCall(session *agent.Session, toolName string, inp
 		"switch_milestone": true,
 		"create_policy":    true,
 		"chief_output":     true,
+		"analyze_output":  true,
 	}
 
 	if !platformTools[toolName] {
@@ -797,6 +803,7 @@ var retryPolicies = map[agent.Role]retryPolicy{
 	agent.RoleAudit1:  {MaxRetries: 1, BackoffSec: 20},
 	agent.RoleFix:     {MaxRetries: 1, BackoffSec: 20},
 	agent.RoleChief:   {MaxRetries: 1, BackoffSec: 10},
+	agent.RoleAnalyze: {MaxRetries: 1, BackoffSec: 30},
 	// Maintain: no retry, next periodic trigger will re-run
 	// Consult/Assess/Audit2: no retry
 }
@@ -868,4 +875,65 @@ func (s *Scheduler) PollSession(session *agent.Session) error {
 
 	session.Status = "failed"
 	return fmt.Errorf("session %s timed out", session.ID)
+}
+
+// applyPoliciesToSession matches and applies active policies to a session before dispatch.
+func (s *Scheduler) applyPoliciesToSession(session *agent.Session) {
+	var policies []model.Policy
+	model.DB.Where("status = ?", "active").Order("priority DESC").Find(&policies)
+
+	for i := range policies {
+		p := &policies[i]
+
+		var mc map[string]interface{}
+		if err := json.Unmarshal([]byte(p.MatchCondition), &mc); err != nil {
+			continue
+		}
+
+		// Check role match
+		if reqRole, ok := mc["role"].(string); ok && reqRole != "" && string(session.Role) != reqRole {
+			continue
+		}
+
+		// Check tag match
+		if reqTags, ok := mc["tags"].([]interface{}); ok && len(reqTags) > 0 {
+			var taskTags []model.TaskTag
+			model.DB.Where("task_id = ?", session.ChangeID).Find(&taskTags)
+			tagSet := make(map[string]bool)
+			for _, t := range taskTags {
+				tagSet[t.Tag] = true
+			}
+			matched := false
+			for _, rt := range reqTags {
+				if s, ok := rt.(string); ok && tagSet[s] {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// Policy matches — apply actions
+		var actions map[string]interface{}
+		if err := json.Unmarshal([]byte(p.Actions), &actions); err != nil {
+			continue
+		}
+
+		if gp, ok := actions["guard_prompt"].(string); ok && gp != "" {
+			session.Context.InputContent += "\n\n[Policy Guard]: " + gp
+		}
+		if reqCtx, ok := actions["require_context"].(string); ok && reqCtx != "" {
+			session.Context.InputContent += "\n\n[Required Context]: You must read the following files first: " + reqCtx
+		}
+		if maxFiles, ok := actions["max_file_changes"].(float64); ok {
+			session.Context.InputContent += fmt.Sprintf("\n\n[Policy Constraint]: Maximum file changes allowed: %d", int(maxFiles))
+		}
+
+		// Increment hit count
+		model.DB.Model(&model.Policy{}).Where("id = ?", p.ID).Update("hit_count", p.HitCount+1)
+
+		log.Printf("[PolicyEngine] Applied policy %s to session %s", p.Name, session.ID)
+	}
 }

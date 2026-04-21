@@ -7,6 +7,8 @@ export default tool({
     level: tool.schema.string().describe("Audit level: L0, L1, or L2"),
     issues: tool.schema.array(tool.schema.object({})).optional().describe("List of audit issues"),
     reject_reason: tool.schema.string().optional().describe("Reason for rejection"),
+    pattern_observed: tool.schema.string().optional().describe("Repeated pattern observed in this submission"),
+    suggestion_for_submitter: tool.schema.string().optional().describe("How the submitter can avoid this issue next time"),
   },
   async execute(args, context) {
     return JSON.stringify({ success: true, data: { tool: "audit_output", change_id: args.change_id, level: args.level, status: "captured" } })

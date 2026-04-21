@@ -290,6 +290,28 @@ async function main() {
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })
 
+  // ===== Feedback Tool =====
+
+  server.tool('feedback', 'Submit task completion feedback with lessons learned. Call this after completing or failing a task. Your insights will be distilled into reusable skills for future tasks.', {
+    task_id: z.string().describe('Task ID'),
+    outcome: z.enum(['success', 'partial', 'failed']).describe('Task outcome'),
+    approach: z.string().optional().describe('What approach did you take and why'),
+    pitfalls: z.string().optional().describe('What went wrong or what was tricky'),
+    key_insight: z.string().optional().describe('One key insight for future similar tasks'),
+    missing_context: z.string().optional().describe('What info did you need but did not have'),
+    would_do_differently: z.string().optional().describe('What would you do differently next time'),
+    files_read: z.array(z.string()).optional().describe('Files that were actually useful'),
+  }, async ({ task_id, outcome, approach, pitfalls, key_insight, missing_context, would_do_differently, files_read }) => {
+    try {
+      const data = await api.post('/feedback/submit', {
+        task_id, outcome, approach, pitfalls, key_insight, missing_context, would_do_differently, files_read,
+      })
+      return { content: [{ type: 'text', text: `Experience recorded: ${JSON.stringify(data)}` }] }
+    } catch (e: any) {
+      return { content: [{ type: 'text', text: `Feedback failed: ${e?.response?.data?.error?.message || e.message}` }] }
+    }
+  })
+
   poller.setBroadcastHandler(async (messages) => {
     console.error('[Broadcast] Received %d messages', messages.length)
     let sessionId = await oc.getLatestSession()

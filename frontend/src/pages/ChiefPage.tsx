@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
-import { chiefApi } from '../api/endpoints'
+import { chiefApi, experienceApi, skillApi, policyApi } from '../api/endpoints'
 
 interface ChiefMessage {
   id: string
@@ -32,7 +32,32 @@ interface Session {
   completed_at: string | null
 }
 
-type TabType = 'chat' | 'policies' | 'sessions'
+interface Experience {
+  id: string
+  project_id: string
+  source_type: string
+  source_id: string
+  agent_role: string
+  task_id: string
+  outcome: string
+  approach: string
+  pitfalls: string
+  key_insight: string
+  missing_context: string
+  do_differently: string
+  pattern_observed: string
+  fix_strategy: string
+  false_positive: boolean
+  status: string
+  created_at: string
+}
+
+type TabType = 'chat' | 'policies' | 'sessions' | 'experience' | 'skills'
+
+function getTabLabel(t: string): string {
+  const labels: Record<string, string> = { chat: 'Chat', policies: 'Policies', sessions: 'Sessions', experience: 'Exp', skills: 'Skills' }
+  return labels[t] || t
+}
 
 export default function ChiefPage() {
   const { selectedProjectId } = useAppStore()
@@ -43,12 +68,18 @@ export default function ChiefPage() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [expandedSession, setExpandedSession] = useState<string | null>(null)
   const [traces, setTraces] = useState<any[]>([])
+  const [experiences, setExperiences] = useState<Experience[]>([])
+  const [expStatusFilter, setExpStatusFilter] = useState('raw')
+  const [skills, setSkills] = useState<any[]>([])
+  const [skillStatusFilter, setSkillStatusFilter] = useState('candidate')
   const [loading, setLoading] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (tab === 'policies') loadPolicies()
     if (tab === 'sessions' && selectedProjectId) loadSessions()
+    if (tab === 'experience' && selectedProjectId) loadExperiences()
+    if (tab === 'skills') loadSkills()
   }, [tab, selectedProjectId])
 
   useEffect(() => {
@@ -69,6 +100,37 @@ export default function ChiefPage() {
   const loadTraces = async (sessionId: string) => {
     const res = await chiefApi.traces(sessionId)
     if (res.success) setTraces(res.data.traces || [])
+  }
+
+  const loadExperiences = async () => {
+    if (!selectedProjectId) return
+    const res = await experienceApi.list(selectedProjectId, expStatusFilter)
+    if (res.success) setExperiences(res.data.experiences || [])
+  }
+
+  const loadSkills = async () => {
+    const res = await skillApi.list(skillStatusFilter)
+    if (res.success) setSkills(res.data.skills || [])
+  }
+
+  const handleApproveSkill = async (id: string) => {
+    const res = await skillApi.approve(id)
+    if (res.success) loadSkills()
+  }
+
+  const handleRejectSkill = async (id: string) => {
+    const res = await skillApi.reject(id)
+    if (res.success) loadSkills()
+  }
+
+  const handleActivatePolicy = async (id: string) => {
+    const res = await policyApi.activate(id)
+    if (res.success) loadPolicies()
+  }
+
+  const handleDeactivatePolicy = async (id: string) => {
+    const res = await policyApi.deactivate(id)
+    if (res.success) loadPolicies()
   }
 
   const handleSend = async () => {
@@ -138,19 +200,18 @@ export default function ChiefPage() {
     <div className="h-full flex flex-col">
       {/* Tab Header */}
       <div className="flex items-center gap-2 mb-6 px-1 shrink-0">
-        {(['chat', 'policies', 'sessions'] as TabType[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-5 py-2 rounded-xl text-sm font-marker transition-all ${
-              tab === t
-                ? 'bg-[#5d4037] text-[#efebe9] shadow-md scale-105'
-                : 'bg-[#f4ece1] text-[#5d4037]/70 border border-[#8b4513]/20 hover:bg-[#8b4513]/10'
-            }`}
-          >
-            {t === 'chat' ? '💬 Chat' : t === 'policies' ? '📜 Policies' : '📋 Sessions'}
-          </button>
-        ))}
+        {(['chat', 'policies', 'sessions', 'experience', 'skills'] as TabType[]).map((t) => {
+          const isActive = tab === t
+          return (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={'px-5 py-2 rounded-xl text-sm font-marker transition-all ' + (isActive ? 'bg-[#5d4037] text-[#efebe9] shadow-md scale-105' : 'bg-[#f4ece1] text-[#5d4037]/70 border border-[#8b4513]/20 hover:bg-[#8b4513]/10')}
+            >
+              {getTabLabel(t)}
+            </button>
+          )
+        })}
         <span className="ml-auto text-[10px] font-bold text-[#8b4513]/40 uppercase tracking-widest">
           Chief Agent
         </span>
@@ -259,6 +320,32 @@ export default function ChiefPage() {
                         </pre>
                       </div>
                     </div>
+                    {p.status === 'candidate' && (
+                      <div className="flex gap-2 mt-3">
+                        <button
+                          onClick={() => handleActivatePolicy(p.id)}
+                          className="px-3 py-1.5 text-xs font-marker bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all"
+                        >
+                          Activate
+                        </button>
+                        <button
+                          onClick={() => handleDeactivatePolicy(p.id)}
+                          className="px-3 py-1.5 text-xs font-marker bg-gray-400 text-white rounded-lg hover:bg-gray-500 transition-all"
+                        >
+                          Deprecate
+                        </button>
+                      </div>
+                    )}
+                    {p.status === 'active' && (
+                      <div className="mt-3">
+                        <button
+                          onClick={() => handleDeactivatePolicy(p.id)}
+                          className="px-3 py-1.5 text-xs font-marker bg-rose-500 text-white rounded-lg hover:bg-rose-600 transition-all"
+                        >
+                          Deactivate
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )
               })}
@@ -332,6 +419,195 @@ export default function ChiefPage() {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Experience Tab */}
+      {tab === 'experience' && (
+        <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+          <div className="flex items-center gap-2 mb-4">
+            {['raw', 'distilled', 'skill', ''].map((s) => (
+              <button
+                key={s}
+                onClick={() => { setExpStatusFilter(s); }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-marker transition-all ${
+                  expStatusFilter === s
+                    ? 'bg-[#5d4037] text-[#efebe9] shadow-sm'
+                    : 'bg-[#f4ece1] text-[#5d4037]/60 border border-[#8b4513]/10 hover:bg-[#8b4513]/10'
+                }`}
+              >
+                {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {experiences.length === 0 ? (
+            <div className="text-center py-16 text-[#8b4513]/30">
+              <p className="text-4xl mb-3 opacity-40">🧠</p>
+              <p className="font-marker text-lg text-[#8b4513]/50">No experiences yet</p>
+              <p className="font-hand text-sm mt-1">Agent feedback and audit observations will appear here.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {experiences.map((exp) => {
+                const sourceIcon: Record<string, string> = {
+                  agent_feedback: '💬',
+                  audit_observation: '🔍',
+                  fix_strategy: '🔧',
+                  eval_pattern: '📊',
+                  maintain_rationale: '📝',
+                }
+                const outcomeColor: Record<string, string> = {
+                  success: 'text-emerald-600',
+                  partial: 'text-amber-600',
+                  failed: 'text-rose-600',
+                }
+                return (
+                  <div key={exp.id} className="parchment border border-[#8b4513]/20 rounded-2xl p-4 shadow-sm hover:shadow-md transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-lg">{sourceIcon[exp.source_type] || '📝'}</span>
+                      <span className="text-[10px] font-bold bg-[#8b4513]/10 text-[#8b4513]/60 px-2 py-0.5 rounded font-mono">
+                        {exp.source_type}
+                      </span>
+                      <span className="text-[10px] font-mono text-[#8b4513]/30">{exp.agent_role}</span>
+                      {exp.outcome && (
+                        <span className={`text-[10px] font-bold ${outcomeColor[exp.outcome] || 'text-gray-500'}`}>
+                          {exp.outcome}
+                        </span>
+                      )}
+                      <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded border ${
+                        exp.status === 'raw' ? 'bg-amber-50 text-amber-600 border-amber-200' :
+                        exp.status === 'distilled' ? 'bg-blue-50 text-blue-600 border-blue-200' :
+                        exp.status === 'skill' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' :
+                        'bg-gray-50 text-gray-500 border-gray-200'
+                      }`}>
+                        {exp.status}
+                      </span>
+                    </div>
+                    {exp.key_insight && (
+                      <p className="font-hand text-sm text-[#5d4037] mb-2 bg-white/40 p-2 rounded-lg border border-[#8b4513]/10">
+                        💡 {exp.key_insight}
+                      </p>
+                    )}
+                    {exp.pattern_observed && (
+                      <p className="font-hand text-xs text-[#8b4513]/60 mb-1">
+                        🔍 Pattern: {exp.pattern_observed}
+                      </p>
+                    )}
+                    {exp.do_differently && (
+                      <p className="font-hand text-xs text-[#8b4513]/60 mb-1">
+                        🔄 Do differently: {exp.do_differently}
+                      </p>
+                    )}
+                    {exp.pitfalls && (
+                      <p className="font-hand text-xs text-[#8b4513]/60 mb-1">
+                        ⚠️ Pitfalls: {exp.pitfalls}
+                      </p>
+                    )}
+                    {exp.fix_strategy && (
+                      <p className="font-hand text-xs text-[#8b4513]/60 mb-1">
+                        🔧 Fix strategy: {exp.fix_strategy}
+                      </p>
+                    )}
+                    {exp.false_positive && (
+                      <span className="text-[10px] font-bold bg-rose-50 text-rose-600 px-2 py-0.5 rounded border border-rose-200">
+                        False Positive
+                      </span>
+                    )}
+                    <div className="text-[10px] font-mono text-[#8b4513]/30 mt-2">
+                      {new Date(exp.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Skills Tab */}
+      {tab === 'skills' && (
+        <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+          <div className="flex items-center gap-2 mb-4">
+            {['candidate', 'active', 'deprecated', ''].map((s) => (
+              <button
+                key={s}
+                onClick={() => { setSkillStatusFilter(s); }}
+                className={'px-3 py-1.5 rounded-lg text-xs font-marker transition-all ' + (skillStatusFilter === s ? 'bg-[#5d4037] text-[#efebe9] shadow-sm' : 'bg-[#f4ece1] text-[#5d4037]/60 border border-[#8b4513]/10 hover:bg-[#8b4513]/10')}
+              >
+                {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {skills.length === 0 ? (
+            <div className="text-center py-16 text-[#8b4513]/30">
+              <p className="text-4xl mb-3 opacity-40">⚡</p>
+              <p className="font-marker text-lg text-[#8b4513]/50">No skills yet</p>
+              <p className="font-hand text-sm mt-1">Analyze Agent will distill experiences into skills.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {skills.map((sk: any) => {
+                const typeIcon: Record<string, string> = { process: '⚙️', prompt: '💬', routing: '🔀', guard: '🛡️' }
+                return (
+                  <div key={sk.id} className="parchment border border-[#8b4513]/20 rounded-2xl p-4 shadow-sm hover:shadow-md transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-lg">{typeIcon[sk.type] || '📝'}</span>
+                      <span className="font-marker font-bold text-[#5d4037]">{sk.name}</span>
+                      <span className="text-[10px] font-bold bg-[#8b4513]/10 text-[#8b4513]/60 px-2 py-0.5 rounded font-mono">
+                        {sk.type}
+                      </span>
+                      <span className={'ml-auto text-[10px] font-bold px-2 py-0.5 rounded border ' + (
+                        sk.status === 'candidate' ? 'bg-amber-50 text-amber-600 border-amber-200' :
+                        sk.status === 'active' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' :
+                        sk.status === 'rejected' ? 'bg-rose-50 text-rose-600 border-rose-200' :
+                        'bg-gray-50 text-gray-500 border-gray-200'
+                      )}>
+                        {sk.status}
+                      </span>
+                    </div>
+                    {sk.action && (
+                      <p className="font-hand text-sm text-[#5d4037] mb-1 bg-white/40 p-2 rounded-lg border border-[#8b4513]/10">
+                        Action: {sk.action}
+                      </p>
+                    )}
+                    {sk.precondition && (
+                      <p className="font-hand text-xs text-[#8b4513]/60 mb-1">
+                        Precondition: {sk.precondition}
+                      </p>
+                    )}
+                    {sk.prohibition && (
+                      <p className="font-hand text-xs text-rose-500/70 mb-1">
+                        Prohibition: {sk.prohibition}
+                      </p>
+                    )}
+                    {sk.evidence && (
+                      <p className="font-hand text-xs text-[#8b4513]/40 mb-1">
+                        Evidence: {sk.evidence}
+                      </p>
+                    )}
+                    {sk.status === 'candidate' && (
+                      <div className="flex gap-2 mt-3">
+                        <button
+                          onClick={() => handleApproveSkill(sk.id)}
+                          className="px-3 py-1.5 text-xs font-marker bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => handleRejectSkill(sk.id)}
+                          className="px-3 py-1.5 text-xs font-marker bg-rose-500 text-white rounded-lg hover:bg-rose-600 transition-all"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

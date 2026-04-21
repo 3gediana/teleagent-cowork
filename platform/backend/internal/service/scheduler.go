@@ -128,3 +128,41 @@ func StoreOfflineMessage(agentID string, message string) {
 	model.RDB.LPush(model.DB.Statement.Context, key, message)
 	model.RDB.Expire(model.DB.Statement.Context, key, 24*time.Hour)
 }
+
+var analyzeTimerRunning = false
+
+// StartAnalyzeTimer runs the Analyze Agent daily for each project with raw experiences.
+func StartAnalyzeTimer() {
+	if analyzeTimerRunning {
+		return
+	}
+	analyzeTimerRunning = true
+
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+
+		log.Printf("[Analyze] Daily timer started")
+
+		// Run once immediately on startup
+		runAnalyzeForAllProjects()
+
+		for range ticker.C {
+			runAnalyzeForAllProjects()
+		}
+	}()
+}
+
+func runAnalyzeForAllProjects() {
+	var projects []model.Project
+	model.DB.Where("status = 'ready' OR status = 'idle'").Find(&projects)
+
+	for _, project := range projects {
+		// Check if there are raw experiences to distill
+		var rawCount int64
+		model.DB.Model(&model.Experience{}).Where("project_id = ? AND status = ?", project.ID, "raw").Count(&rawCount)
+		if rawCount >= 3 { // Only run if there's enough data
+			TriggerAnalyzeAgent(project.ID)
+		}
+	}
+}

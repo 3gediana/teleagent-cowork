@@ -77,6 +77,10 @@ func main() {
 	prHandler := handler.NewPRHandler()
 	roleHandler := handler.NewRoleHandler()
 	chiefHandler := handler.NewChiefHandler()
+	feedbackHandler := handler.NewFeedbackHandler()
+	experienceHandler := handler.NewExperienceHandler()
+	skillHandler := handler.NewSkillHandler()
+	policyHandler := handler.NewPolicyHandler()
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -156,6 +160,20 @@ func main() {
 		auth.GET("/chief/sessions", chiefHandler.Sessions)
 		auth.GET("/chief/traces", chiefHandler.ToolTraces)
 		auth.GET("/chief/policies", chiefHandler.Policies)
+
+		// Experience & Feedback APIs
+		auth.POST("/feedback/submit", feedbackHandler.Submit)
+		auth.GET("/experience/list", experienceHandler.List)
+
+		// Skill & Policy CRUD APIs
+		auth.GET("/skill/list", skillHandler.List)
+		auth.GET("/skill/:id", skillHandler.Get)
+		auth.POST("/skill/:id/approve", skillHandler.Approve)
+		auth.POST("/skill/:id/reject", skillHandler.Reject)
+		auth.GET("/policy/list", policyHandler.List)
+		auth.GET("/policy/:id", policyHandler.Get)
+		auth.POST("/policy/:id/activate", policyHandler.Activate)
+		auth.POST("/policy/:id/deactivate", policyHandler.Deactivate)
 	}
 
 	internal := v1.Group("/internal")
@@ -180,6 +198,7 @@ func main() {
 
 	service.StartMaintainTimer()
 	service.StartHeartbeatChecker()
+	service.StartAnalyzeTimer()
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)

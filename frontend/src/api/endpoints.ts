@@ -138,3 +138,30 @@ export const chiefApi = {
   policies: (status?: string) =>
     api.get('/chief/policies', { params: { status } }) as Promise<{ success: boolean; data: { policies: any[] } }>,
 }
+
+export const experienceApi = {
+  list: (projectId: string, status?: string, sourceType?: string) =>
+    api.get('/experience/list', { params: { project_id: projectId, status, source_type: sourceType } }) as Promise<{ success: boolean; data: { experiences: any[] } }>,
+}
+
+export const skillApi = {
+  list: (status?: string) =>
+    api.get('/skill/list', { params: { status } }) as Promise<{ success: boolean; data: { skills: any[] } }>,
+  get: (id: string) =>
+    api.get('/skill/' + id) as Promise<{ success: boolean; data: any }>,
+  approve: (id: string) =>
+    api.post('/skill/' + id + '/approve') as Promise<{ success: boolean; data: any }>,
+  reject: (id: string) =>
+    api.post('/skill/' + id + '/reject') as Promise<{ success: boolean; data: any }>,
+}
+
+export const policyApi = {
+  list: (status?: string) =>
+    api.get('/policy/list', { params: { status } }) as Promise<{ success: boolean; data: { policies: any[] } }>,
+  get: (id: string) =>
+    api.get('/policy/' + id) as Promise<{ success: boolean; data: any }>,
+  activate: (id: string) =>
+    api.post('/policy/' + id + '/activate') as Promise<{ success: boolean; data: any }>,
+  deactivate: (id: string) =>
+    api.post('/policy/' + id + '/deactivate') as Promise<{ success: boolean; data: any }>,
+}

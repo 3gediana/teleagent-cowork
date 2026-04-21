@@ -295,6 +295,8 @@ func GetRoleForTrigger(trigger string) Role {
 		return RoleChief
 	case "chief_decision_pr_review", "chief_decision_pr_merge", "chief_decision_milestone_switch":
 		return RoleChief
+	case "analyze_distill":
+		return RoleAnalyze
 	default:
 		return RoleMaintain
 	}
