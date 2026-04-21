@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,23 +70,29 @@ func InitScheduler(cfg config.OpenCodeConfig) {
 	// Find a free port for pure serve
 	port := findFreePort(15000)
 	
-	// Inline config that disables ALL MCP servers and only allows platform tools
-	pureConfigContent := `{"$schema":"https://opencode.ai/config.json","permission":"allow","tools":{"a3c_*":false,"tavily_*":false,"context7_*":false}}`
+	// Load pure-opencode.json which contains provider API keys and disables MCP/a3c tools
+	pureConfigContent := loadPureConfig()
 	
 	args := []string{"serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port)}
 	cmd := exec.Command("opencode", args...)
-	cmd.Dir = cfg.ProjectPath
-	if cmd.Dir == "" {
-		cmd.Dir = "."
+	// Run serve from a clean temp workdir to prevent opencode from walking up the
+	// directory tree and finding .opencode (which contains zod v4 tools that crash
+	// opencode's bundled zod v3 code). The actual config (providers) is passed
+	// via OPENCODE_CONFIG_CONTENT so no local .opencode is needed.
+	serveWorkDir, err := os.MkdirTemp("", "a3c-serve-*")
+	if err != nil {
+		log.Printf("[OpenCode] Failed to create serve workdir: %v, falling back to cwd", err)
+		serveWorkDir = "."
 	}
-	// Override config to disable MCP
+	cmd.Dir = serveWorkDir
+	// Pass config via env so provider API keys are available to the serve instance
 	cmd.Env = append(os.Environ(), "OPENCODE_CONFIG_CONTENT="+pureConfigContent)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = &bytes.Buffer{}
 
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		log.Printf("[OpenCode] Failed to start pure serve: %v", err)
 		DefaultScheduler = &Scheduler{cfg: cfg}
@@ -103,6 +110,26 @@ func InitScheduler(cfg config.OpenCodeConfig) {
 	}
 	initSchedulerClient(fmt.Sprintf("http://127.0.0.1:%d", port))
 	log.Printf("[OpenCode] Pure serve started on port %d", port)
+}
+
+// loadPureConfig reads pure-opencode.json (with provider API keys, without MCP) for the pure serve instance
+func loadPureConfig() string {
+	// Try executable directory first, then working directory
+	searchPaths := []string{
+		filepath.Join(filepath.Dir(os.Args[0]), "pure-opencode.json"),
+		"pure-opencode.json",
+	}
+	for _, p := range searchPaths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			content := strings.TrimSpace(string(data))
+			log.Printf("[OpenCode] Loaded pure config from %s (%d bytes)", p, len(content))
+			return content
+		}
+	}
+	// Fallback: minimal config without provider (model calls will fail)
+	log.Printf("[OpenCode] WARNING: pure-opencode.json not found, model calls will fail")
+	return `{"$schema":"https://opencode.ai/config.json","permission":"allow","tools":{"a3c_*":false,"tavily_*":false,"context7_*":false}}`
 }
 
 // DefaultClient returns an OpenCode API client using the scheduler's serve URL
@@ -565,10 +592,15 @@ func (s *Scheduler) pollServeResponse(ocSessionID string, maxWaitSec int) (*serv
 		// Look for assistant message with parts
 		for i := len(messages) - 1; i >= 0; i-- {
 			msg := messages[i]
-			if msg.Info.Role == "assistant" && len(msg.Parts) > 0 {
-				result := &serveMessageResponse{Parts: msg.Parts}
-				log.Printf("[OpenCode] pollServeResponse: found assistant response with %d parts", len(msg.Parts))
-				return result, nil
+			if msg.Info.Role == "assistant" {
+				if len(msg.Parts) > 0 {
+					result := &serveMessageResponse{Parts: msg.Parts}
+					log.Printf("[OpenCode] pollServeResponse: found assistant response with %d parts", len(msg.Parts))
+					return result, nil
+				}
+				// Assistant responded but with empty parts — model likely errored
+				log.Printf("[OpenCode] pollServeResponse: assistant responded with 0 parts (model error?)")
+				return nil, fmt.Errorf("assistant responded with empty parts — model may have failed")
 			}
 		}
 
