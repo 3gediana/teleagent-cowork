@@ -64,8 +64,33 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 		return
 	}
 
-	var claimedTask model.Task
-	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", aid).First(&claimedTask).Error; err == nil {
+	// Atomic claim: check "agent already has task" and update target in one transaction
+	// to avoid TOCTOU where two concurrent Claim calls both pass the existence check.
+	var task model.Task
+	var heldTask model.Task
+	var errCode string
+	claimErr := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("assignee_id = ? AND status = 'claimed'", aid).First(&heldTask).Error; err == nil {
+			errCode = "AGENT_HAS_TASK"
+			return gorm.ErrInvalidTransaction
+		}
+		result := tx.Model(&model.Task{}).
+			Where("id = ? AND status = 'pending'", req.TaskID).
+			Updates(map[string]interface{}{
+				"status":      "claimed",
+				"assignee_id": aid,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			errCode = "TASK_UNCLAIMABLE"
+			return gorm.ErrInvalidTransaction
+		}
+		return tx.Where("id = ?", req.TaskID).First(&task).Error
+	})
+
+	if errCode == "AGENT_HAS_TASK" {
 		c.JSON(409, gin.H{
 			"success": false,
 			"error": gin.H{
@@ -73,45 +98,53 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 				"message": "You already have a claimed task",
 			},
 			"data": gin.H{
-				"claimed_task_id":   claimedTask.ID,
-				"claimed_task_name": claimedTask.Name,
+				"claimed_task_id":   heldTask.ID,
+				"claimed_task_name": heldTask.Name,
 			},
 		})
 		return
 	}
-
-	result := model.DB.Model(&model.Task{}).
-		Where("id = ? AND status = 'pending'", req.TaskID).
-		Updates(map[string]interface{}{
-			"status":      "claimed",
-			"assignee_id": aid,
-		})
-
-	if result.Error != nil {
-		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to claim task"}})
-		return
-	}
-
-	if result.RowsAffected == 0 {
-		var task model.Task
-		if err := model.DB.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
+	if errCode == "TASK_UNCLAIMABLE" {
+		var existing model.Task
+		if err := model.DB.Where("id = ?", req.TaskID).First(&existing).Error; err != nil {
 			c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
 			return
 		}
-		if task.Status == "claimed" {
-			c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_CLAIMED", "message": "Task already claimed"}})
-			return
+		// Suggest up to 5 alternative pending tasks in the same project so the
+		// losing side of a claim race has something actionable to do next.
+		alternatives := make([]gin.H, 0, 5)
+		if existing.ProjectID != "" {
+			var alts []model.Task
+			model.DB.Where("project_id = ? AND status = 'pending'", existing.ProjectID).
+				Order("CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC").
+				Limit(5).Find(&alts)
+			for _, t := range alts {
+				alternatives = append(alternatives, gin.H{
+					"id": t.ID, "name": t.Name, "priority": t.Priority,
+				})
+			}
 		}
-		if task.Status == "completed" {
-			c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_COMPLETED", "message": "Task already completed"}})
-			return
+
+		code := "TASK_UNCLAIMABLE"
+		message := "Task cannot be claimed"
+		if existing.Status == "claimed" {
+			code = "TASK_CLAIMED"
+			message = "Task was just claimed by another agent"
+		} else if existing.Status == "completed" {
+			code = "TASK_COMPLETED"
+			message = "Task already completed"
 		}
-		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_UNCLAIMABLE", "message": "Task cannot be claimed"}})
+		c.JSON(409, gin.H{
+			"success": false,
+			"error":   gin.H{"code": code, "message": message},
+			"data":    gin.H{"alternatives": alternatives},
+		})
 		return
 	}
-
-	var task model.Task
-	model.DB.Where("id = ?", req.TaskID).First(&task)
+	if claimErr != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to claim task"}})
+		return
+	}
 
 	c.JSON(200, gin.H{
 		"success": true,
@@ -242,12 +275,85 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	})
 }
 
+// Release lets an agent abandon a claimed task without completing it,
+// returning it to the pending pool so another agent can pick it up. Fixes
+// the "stuck on wrong task" deadlock where AGENT_HAS_TASK blocks the agent
+// from doing anything else until heartbeat times out.
+func (h *TaskHandler) Release(c *gin.Context) {
+	agentID, _ := c.Get("agent_id")
+	aid, _ := agentID.(string)
+
+	var req struct {
+		TaskID string `json:"task_id" binding:"required"`
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	now := time.Now()
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var task model.Task
+		if err := tx.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
+			return err
+		}
+		if task.Status != "claimed" || task.AssigneeID == nil || *task.AssigneeID != aid {
+			return gorm.ErrInvalidTransaction
+		}
+		// Reset task state
+		if err := tx.Model(&model.Task{}).Where("id = ?", req.TaskID).
+			Updates(map[string]interface{}{"status": "pending", "assignee_id": nil}).Error; err != nil {
+			return err
+		}
+		// Release any filelocks this agent held for this task
+		return tx.Model(&model.FileLock{}).
+			Where("task_id = ? AND agent_id = ? AND released_at IS NULL", req.TaskID, aid).
+			Update("released_at", now).Error
+	})
+
+	if err == gorm.ErrRecordNotFound {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
+		return
+	}
+	if err == gorm.ErrInvalidTransaction {
+		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_CLAIMED_BY_YOU", "message": "Task is not claimed by you"}})
+		return
+	}
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to release task"}})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"task_id": req.TaskID,
+			"status":  "pending",
+			"reason":  req.Reason,
+		},
+	})
+}
+
 func (h *TaskHandler) Delete(c *gin.Context) {
 	taskID := c.Param("task_id")
 
 	var task model.Task
 	if err := model.DB.Where("id = ?", taskID).First(&task).Error; err != nil {
 		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
+		return
+	}
+
+	// Ownership check: requester must be in the same project as the task
+	agentID, _ := c.Get("agent_id")
+	aid, _ := agentID.(string)
+	var requester model.Agent
+	if err := model.DB.Where("id = ?", aid).First(&requester).Error; err != nil {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
+		return
+	}
+	if requester.CurrentProjectID == nil || *requester.CurrentProjectID != task.ProjectID {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "FORBIDDEN", "message": "Task belongs to a different project"}})
 		return
 	}
 

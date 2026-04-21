@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agent"
@@ -12,6 +13,22 @@ import (
 	"github.com/a3c/platform/internal/repo"
 	"github.com/a3c/platform/internal/service"
 )
+
+// callerIsHuman returns true iff the authenticated agent is flagged IsHuman=true.
+// Used to restrict human-only endpoints (dashboard input, direction/milestone
+// changes, Chief chat) to the frontend user and not arbitrary client agents.
+func callerIsHuman(c *gin.Context) bool {
+	agentIDRaw, _ := c.Get("agent_id")
+	aid, _ := agentIDRaw.(string)
+	if aid == "" {
+		return false
+	}
+	var a model.Agent
+	if err := model.DB.Where("id = ?", aid).First(&a).Error; err != nil {
+		return false
+	}
+	return a.IsHuman
+}
 
 func dashboardGetAgentName(agentID string) string {
 	var agent model.Agent
@@ -121,14 +138,57 @@ func dashboardGetAgentNamePtr(id *string) string {
 }
 
 type DashboardInput struct {
-	InputID     string `json:"input_id"`
-	TargetBlock string `json:"target_block"`
-	Content     string `json:"content"`
-	ProjectID   string `json:"-"`
-	Confirmed   bool   `json:"confirmed"`
+	InputID     string    `json:"input_id"`
+	TargetBlock string    `json:"target_block"`
+	Content     string    `json:"content"`
+	ProjectID   string    `json:"-"`
+	AgentID     string    `json:"-"` // creator, for ownership check on Confirm
+	Confirmed   bool      `json:"confirmed"`
+	CreatedAt   time.Time `json:"-"`
 }
 
-var pendingInputs = make(map[string]*DashboardInput)
+// pendingInputs is accessed from concurrent HTTP handlers. It must be
+// guarded by a mutex. Entries also expire after pendingInputTTL to prevent
+// unbounded memory growth.
+var (
+	pendingInputs   = make(map[string]*DashboardInput)
+	pendingInputsMu sync.Mutex
+)
+
+const pendingInputTTL = 30 * time.Minute
+
+func storePendingInput(input *DashboardInput) {
+	pendingInputsMu.Lock()
+	defer pendingInputsMu.Unlock()
+	input.CreatedAt = time.Now()
+	pendingInputs[input.InputID] = input
+	// Opportunistic GC of expired entries
+	for id, in := range pendingInputs {
+		if time.Since(in.CreatedAt) > pendingInputTTL {
+			delete(pendingInputs, id)
+		}
+	}
+}
+
+func takePendingInput(id string) (*DashboardInput, bool) {
+	pendingInputsMu.Lock()
+	defer pendingInputsMu.Unlock()
+	in, ok := pendingInputs[id]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(in.CreatedAt) > pendingInputTTL {
+		delete(pendingInputs, id)
+		return nil, false
+	}
+	return in, true
+}
+
+func deletePendingInput(id string) {
+	pendingInputsMu.Lock()
+	delete(pendingInputs, id)
+	pendingInputsMu.Unlock()
+}
 
 // dashboardSession tracks the active OpenCode serve session per project for multi-round dialogue
 type dashboardSessionInfo struct {
@@ -171,6 +231,15 @@ func SetDashboardSessionForProject(projectID, ocSessionID, agentSessionID, model
 }
 
 func (h *DashboardHandler) Input(c *gin.Context) {
+	// Dashboard is the human's channel to direct the Maintain Agent. Non-human
+	// agents must NOT be able to change direction / milestones / tasks this way,
+	// otherwise any compromised or misaligned agent could rewrite the project
+	// plan. Only callers flagged is_human=true may use this endpoint.
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "Dashboard input is reserved for human users"}})
+		return
+	}
+
 	var req struct {
 		TargetBlock string `json:"target_block" binding:"required"`
 		Content     string `json:"content" binding:"required"`
@@ -187,12 +256,15 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 
 	projectID := c.Query("project_id")
 	inputID := model.GenerateID("inp")
+	agentIDRaw, _ := c.Get("agent_id")
+	agentID, _ := agentIDRaw.(string)
 
 	input := &DashboardInput{
 		InputID:     inputID,
 		TargetBlock: req.TargetBlock,
 		Content:     req.Content,
 		ProjectID:   projectID,
+		AgentID:     agentID,
 	}
 
 	// Check for existing active dashboard session (multi-round dialogue)
@@ -222,7 +294,7 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 				}
 			}
 
-			pendingInputs[inputID] = input
+			storePendingInput(input)
 
 			// Broadcast chat update to frontend via SSE
 			service.BroadcastEvent(projectID, "CHAT_UPDATE", gin.H{
@@ -250,7 +322,7 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 		go func() {
 			service.TriggerMaintainAgent(projectID, "dashboard_task_input", req.Content)
 		}()
-		pendingInputs[inputID] = input
+		storePendingInput(input)
 		c.JSON(200, gin.H{
 			"success": true,
 			"data": gin.H{
@@ -264,7 +336,7 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 	}
 
 	if req.TargetBlock == "direction" {
-		pendingInputs[inputID] = input
+		storePendingInput(input)
 		c.JSON(200, gin.H{
 			"success": true,
 			"data": gin.H{
@@ -277,7 +349,7 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 		return
 	}
 
-	pendingInputs[inputID] = input
+	storePendingInput(input)
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
@@ -289,6 +361,11 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 }
 
 func (h *DashboardHandler) Confirm(c *gin.Context) {
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "Dashboard confirm is reserved for human users"}})
+		return
+	}
+
 	var req struct {
 		InputID   string `json:"input_id" binding:"required"`
 		Confirmed bool   `json:"confirmed"`
@@ -298,14 +375,22 @@ func (h *DashboardHandler) Confirm(c *gin.Context) {
 		return
 	}
 
-	input, ok := pendingInputs[req.InputID]
+	input, ok := takePendingInput(req.InputID)
 	if !ok {
 		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "Input not found or expired"}})
 		return
 	}
 
+	// Ownership check: only the agent who created this input may confirm it.
+	agentIDRaw, _ := c.Get("agent_id")
+	aid, _ := agentIDRaw.(string)
+	if input.AgentID != "" && input.AgentID != aid {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "FORBIDDEN", "message": "Only the creator can confirm this input"}})
+		return
+	}
+
 	if !req.Confirmed {
-		delete(pendingInputs, req.InputID)
+		deletePendingInput(req.InputID)
 		c.JSON(200, gin.H{"success": true, "data": gin.H{"input_id": req.InputID, "action": "cancelled"}})
 		return
 	}
@@ -332,7 +417,7 @@ func (h *DashboardHandler) Confirm(c *gin.Context) {
 		model.DB.Save(&cb)
 	}
 
-	delete(pendingInputs, req.InputID)
+	deletePendingInput(req.InputID)
 
 	eventType := "MILESTONE_UPDATE"
 	if input.TargetBlock == "direction" {
@@ -383,6 +468,10 @@ func (h *DashboardHandler) Confirm(c *gin.Context) {
 }
 
 func (h *DashboardHandler) ClearContext(c *gin.Context) {
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "Dashboard clear is reserved for human users"}})
+		return
+	}
 	projectID := c.Query("project_id")
 	if projectID == "" {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})

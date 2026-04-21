@@ -27,13 +27,14 @@ type SSEHeader struct {
 }
 
 type SSEClient struct {
-	ID       string
-	Channel  chan SSEMessage
-	Quit     chan struct{}
+	ID        string // unique per-connection ID
+	ProjectID string // project this client is subscribed to
+	Channel   chan SSEMessage
+	Quit      chan struct{}
 }
 
 type SSEManagerStruct struct {
-	clients   map[string]*SSEClient
+	clients   map[string]*SSEClient // keyed by unique client ID, NOT by projectID
 	mu        sync.RWMutex
 }
 
@@ -41,14 +42,19 @@ var SSEManager = &SSEManagerStruct{
 	clients: make(map[string]*SSEClient),
 }
 
-func (m *SSEManagerStruct) AddClient(clientID string) *SSEClient {
+// AddClient creates a new SSE client subscribed to a project. The returned
+// client.ID is a unique connection ID so multiple clients can subscribe to
+// the same project simultaneously (previously a new connection overwrote any
+// existing one for the same project).
+func (m *SSEManagerStruct) AddClient(projectID string) *SSEClient {
 	client := &SSEClient{
-		ID:      clientID,
-		Channel: make(chan SSEMessage, 10),
-		Quit:    make(chan struct{}),
+		ID:        model.GenerateID("sse"),
+		ProjectID: projectID,
+		Channel:   make(chan SSEMessage, 10),
+		Quit:      make(chan struct{}),
 	}
 	m.mu.Lock()
-	m.clients[clientID] = client
+	m.clients[client.ID] = client
 	m.mu.Unlock()
 	return client
 }
@@ -85,13 +91,18 @@ func (m *SSEManagerStruct) BroadcastToProject(projectID string, eventType string
 	model.RDB.LTrim(ctx, msgKey, 0, 99)
 	model.RDB.Expire(ctx, msgKey, 24*time.Hour)
 
+	// Ack key TTL: the actual key is created later by SAdd in GetUnackedBroadcasts
+	// or AckAllBroadcasts; each SAdd call resets the TTL so the set eventually
+	// expires when no more agents acknowledge. The Expire here is harmless if
+	// the key doesn't exist yet.
 	ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
 	model.RDB.Expire(ctx, ackKey, 24*time.Hour)
+	_ = ackKey
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, client := range m.clients {
-		if client.ID == projectID {
+		if client.ProjectID == projectID {
 			select {
 			case client.Channel <- msg:
 			default:
@@ -115,6 +126,54 @@ func (m *SSEManagerStruct) GetRecentBroadcasts(projectID string, limit int64) []
 		}
 	}
 	return messages
+}
+
+// GetRecentSince returns all buffered messages produced after the given
+// message ID, oldest-first (ready to replay). If lastEventID is empty,
+// returns the last few messages as a cold-start snapshot. Caller can use
+// this for SSE resume-from-id semantics.
+func (m *SSEManagerStruct) GetRecentSince(projectID string, lastEventID string) []SSEMessage {
+	key := "a3c:broadcast:" + projectID
+	ctx := context.Background()
+	data, err := model.RDB.LRange(ctx, key, 0, 99).Result()
+	if err != nil {
+		return nil
+	}
+	// Redis list has newest-first (LPush). Reverse to chronological order.
+	reversed := make([]SSEMessage, 0, len(data))
+	for i := len(data) - 1; i >= 0; i-- {
+		var msg SSEMessage
+		if json.Unmarshal([]byte(data[i]), &msg) == nil {
+			reversed = append(reversed, msg)
+		}
+	}
+	if lastEventID == "" {
+		// Cold start: return only the last 5 for a quick primer.
+		start := 0
+		if len(reversed) > 5 {
+			start = len(reversed) - 5
+		}
+		return reversed[start:]
+	}
+	// Resume: return everything produced strictly after lastEventID.
+	out := make([]SSEMessage, 0, len(reversed))
+	found := false
+	for _, msg := range reversed {
+		if !found {
+			if msg.Header.MessageID == lastEventID {
+				found = true
+			}
+			continue
+		}
+		out = append(out, msg)
+	}
+	// If the last ID wasn't in the buffer (e.g. evicted by LTRIM), fall
+	// back to sending the full buffered history so the client at least
+	// has continuity within our retention window.
+	if !found {
+		return reversed
+	}
+	return out
 }
 
 func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string) []SSEMessage {
@@ -162,6 +221,9 @@ func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string
 
 		result = append(result, msg)
 		model.RDB.SAdd(ctx, ackKey, agentID)
+		// Set TTL on the set each time we add to it. Without this, the key
+		// created by SAdd has no expiry and leaks in Redis forever.
+		model.RDB.Expire(ctx, ackKey, 24*time.Hour)
 	}
 	return result
 }
@@ -237,5 +299,6 @@ func (m *SSEManagerStruct) AckAllBroadcasts(projectID string, agentID string) {
 		}
 		ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
 		model.RDB.SAdd(ctx, ackKey, agentID)
+		model.RDB.Expire(ctx, ackKey, 24*time.Hour)
 	}
 }

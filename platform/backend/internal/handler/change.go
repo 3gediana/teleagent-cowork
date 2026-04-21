@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -109,14 +110,25 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		os.WriteFile(pendingDelPath, []byte{}, 0644)
 	}
 
-	// Build diff content for audit
+	// Build diff content for audit. Distinguish "new" (file did not exist
+	// before) from "modified" (file existed and content changed). Previously
+	// all writes were tagged "new", misleading the audit agent.
+	newFileSet := make(map[string]bool, len(newFiles))
+	for _, f := range newFiles {
+		newFileSet[f] = true
+	}
 	diffMap := make(map[string]interface{})
 	for _, w := range req.Writes {
-		if w.Content != "" {
-			diffMap[w.Path] = map[string]interface{}{
-				"status":  "new",
-				"content": w.Content,
-			}
+		if w.Content == "" {
+			continue
+		}
+		status := "modified"
+		if newFileSet[w.Path] {
+			status = "new"
+		}
+		diffMap[w.Path] = map[string]interface{}{
+			"status":  status,
+			"content": w.Content,
 		}
 	}
 	for _, d := range req.Deletes {
@@ -195,12 +207,30 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"success": true,
 			"data": gin.H{
-				"change_id": changeID,
-				"status":    "pending",
-				"message":   "Audit timeout or error, check status later",
+				"change_id":        changeID,
+				"status":           "pending",
+				"next_action":      "poll_change_status",
+				"poll_endpoint":    "GET /api/v1/change/status?change_id=" + changeID,
+				"message":          "Audit did not finish within 120s. Poll the endpoint above for the final result. Do NOT resubmit.",
 			},
 		})
 		return
+	}
+
+	// Structured "what should the agent do next" guidance so LLMs don't have
+	// to guess from status codes alone.
+	nextAction := "done"
+	message := "Audit approved and merged."
+	switch result.Status {
+	case "approved":
+		nextAction = "done"
+		message = "Audit approved; change merged. Task is now completed."
+	case "pending_fix":
+		nextAction = "wait"
+		message = "Audit flagged L1 issues. A Fix Agent is already working on it — do NOT resubmit. Wait for the AUDIT_RESULT broadcast on your poll channel."
+	case "rejected":
+		nextAction = "revise"
+		message = "Audit rejected your change (L2). Read audit_reason, revise your approach, and submit a new change. Your task is still claimed."
 	}
 
 	c.JSON(200, gin.H{
@@ -210,7 +240,72 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 			"status":       result.Status,
 			"audit_level":  result.AuditLevel,
 			"audit_reason": result.AuditReason,
-			"message":      "Audit completed",
+			"next_action":  nextAction,
+			"message":      message,
+		},
+	})
+}
+
+// Status returns a single change by ID. Agents use this after a change.submit
+// that returned status="pending" (audit didn't finish in time) to poll the
+// final outcome without scanning the entire project list.
+func (h *ChangeHandler) Status(c *gin.Context) {
+	changeID := c.Query("change_id")
+	if changeID == "" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "change_id is required"}})
+		return
+	}
+
+	var ch model.Change
+	if err := model.DB.Where("id = ?", changeID).First(&ch).Error; err != nil {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "CHANGE_NOT_FOUND", "message": "Change not found"}})
+		return
+	}
+
+	agentIDRaw, _ := c.Get("agent_id")
+	aid, _ := agentIDRaw.(string)
+	if ch.AgentID != aid {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "FORBIDDEN", "message": "Not your change"}})
+		return
+	}
+
+	level := ""
+	if ch.AuditLevel != nil {
+		level = *ch.AuditLevel
+	}
+
+	// Provide next_action guidance to match what change/submit returns.
+	var nextAction, message string
+	switch ch.Status {
+	case "pending", "pending_human_confirm":
+		nextAction = "wait"
+		message = "Audit still running or waiting for human confirmation. Poll again in a few seconds."
+	case "pending_fix":
+		nextAction = "wait"
+		message = "Fix Agent is working on it. Wait for AUDIT_RESULT broadcast; do not resubmit."
+	case "approved":
+		nextAction = "done"
+		message = "Change approved and merged."
+	case "rejected":
+		nextAction = "revise"
+		message = "Change was rejected. Read audit_reason, revise, and submit a new change."
+	default:
+		nextAction = "wait"
+		message = "Change in state " + ch.Status
+	}
+
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"change_id":    ch.ID,
+			"status":       ch.Status,
+			"audit_level":  level,
+			"audit_reason": ch.AuditReason,
+			"failure_mode": ch.FailureMode,
+			"retry_count":  ch.RetryCount,
+			"reviewed_at":  ch.ReviewedAt,
+			"next_action":  nextAction,
+			"message":      message,
 		},
 	})
 }
@@ -223,13 +318,29 @@ func (h *ChangeHandler) List(c *gin.Context) {
 	}
 
 	status := c.Query("status")
+	limit := 100
+	if l := c.Query("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	offset := 0
+	if o := c.Query("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
 	query := model.DB.Where("project_id = ?", projectID)
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
 
+	var total int64
+	query.Model(&model.Change{}).Count(&total)
+
 	var changes []model.Change
-	query.Order("created_at desc").Find(&changes)
+	query.Order("created_at desc").Limit(limit).Offset(offset).Find(&changes)
 
 	result := make([]gin.H, 0, len(changes))
 	for _, ch := range changes {
@@ -251,7 +362,15 @@ func (h *ChangeHandler) List(c *gin.Context) {
 		result = append(result, item)
 	}
 
-	c.JSON(200, gin.H{"success": true, "data": gin.H{"changes": result}})
+	c.JSON(200, gin.H{
+		"success": true,
+		"data": gin.H{
+			"changes": result,
+			"total":   total,
+			"limit":   limit,
+			"offset":  offset,
+		},
+	})
 }
 
 // ApproveForReview handles human confirmation to send a change to audit (manual mode only)

@@ -62,6 +62,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 				tasks[i].AssigneeID = nil
 				model.DB.Save(&tasks[i])
 			}
+
+			// Release branch occupancy so other agents can enter the branch,
+			// matching what StartHeartbeatChecker does for timed-out agents.
+			model.DB.Model(&model.Branch{}).
+				Where("occupant_id = ? AND status = 'active'", agent.ID).
+				Update("occupant_id", nil)
 			// Fall through to normal login
 		} else {
 			c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "AUTH_ALREADY_ONLINE", "message": "Agent is already online. Please logout first: ⚙ a3c_platform [action=logout]"}})
@@ -76,7 +82,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	agent.SessionID = sessionID
 	model.DB.Save(agent)
 
-	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 300*time.Second)
+	// Match the 7-minute heartbeat timeout in scheduler.go to tolerate jitter.
+	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
 
 	// Auto-ack existing broadcasts so new agents don't receive stale history
 	if agent.CurrentProjectID != nil && *agent.CurrentProjectID != "" {
@@ -146,34 +153,39 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Invalid access key"}})
 		return
 	}
-		now := time.Now()
-		agent.Status = "offline"
-		agent.LastHeartbeat = &now
-		model.DB.Save(agent)
+	now := time.Now()
+	agent.Status = "offline"
+	agent.LastHeartbeat = &now
+	model.DB.Save(agent)
 
-		var locks []model.FileLock
-		model.DB.Where("agent_id = ? AND released_at IS NULL", agent.ID).Find(&locks)
-		for i := range locks {
-			locks[i].ReleasedAt = &now
-			model.DB.Save(&locks[i])
-		}
+	var locks []model.FileLock
+	model.DB.Where("agent_id = ? AND released_at IS NULL", agent.ID).Find(&locks)
+	for i := range locks {
+		locks[i].ReleasedAt = &now
+		model.DB.Save(&locks[i])
+	}
 
-		var tasks []model.Task
-		model.DB.Where("assignee_id = ? AND status = 'claimed'", agent.ID).Find(&tasks)
-		releasedTasks := make([]string, 0)
-		for i := range tasks {
-			tasks[i].Status = "pending"
-			tasks[i].AssigneeID = nil
-			model.DB.Save(&tasks[i])
-			releasedTasks = append(releasedTasks, tasks[i].ID)
-		}
+	var tasks []model.Task
+	model.DB.Where("assignee_id = ? AND status = 'claimed'", agent.ID).Find(&tasks)
+	releasedTasks := make([]string, 0)
+	for i := range tasks {
+		tasks[i].Status = "pending"
+		tasks[i].AssigneeID = nil
+		model.DB.Save(&tasks[i])
+		releasedTasks = append(releasedTasks, tasks[i].ID)
+	}
 
-		model.RDB.Del(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat")
+	// Release branch occupancy on logout too.
+	model.DB.Model(&model.Branch{}).
+		Where("occupant_id = ? AND status = 'active'", agent.ID).
+		Update("occupant_id", nil)
 
-		releasedFiles := make([]string, 0)
-		for _, l := range locks {
-			releasedFiles = append(releasedFiles, l.ID)
-		}
+	model.RDB.Del(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat")
+
+	releasedFiles := make([]string, 0)
+	for _, l := range locks {
+		releasedFiles = append(releasedFiles, l.ID)
+	}
 
 	c.JSON(200, gin.H{
 		"success": true,
@@ -252,15 +264,14 @@ func (h *AuthHandler) SelectProject(c *gin.Context) {
 		})
 	}
 
-	// Notify other agents already in this project (exclude self)
-	for _, a := range onlineAgents {
-		if a.ID != agent.ID {
-			service.BroadcastEvent(req.Project, "AGENT_ONLINE", gin.H{
-				"agent_id":   agent.ID,
-				"agent_name": agent.Name,
-			}, a.ID)
-		}
-	}
+	// Notify other agents of this one coming online. Send a single project-wide
+	// broadcast; the consumer side already filters out the sender via the SSE
+	// ack mechanism (AckAllBroadcasts was called on our own login earlier).
+	// Previously this fanned out N-1 copies which bloated Redis.
+	service.BroadcastEvent(req.Project, "AGENT_ONLINE", gin.H{
+		"agent_id":   agent.ID,
+		"agent_name": agent.Name,
+	})
 
 	// Get active branches for this project
 	branches, _ := service.ListBranchesWithOccupants(req.Project)
@@ -288,7 +299,7 @@ func (h *AuthHandler) Heartbeat(c *gin.Context) {
 		agent.LastHeartbeat = &now
 		agent.Status = "online"
 		model.DB.Save(agent)
-	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 300*time.Second)
+	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
 
 		var locks []model.FileLock
 		model.DB.Where("agent_id = ? AND released_at IS NULL AND expires_at > NOW()", agent.ID).Find(&locks)
@@ -310,6 +321,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	var req struct {
 		Name      string `json:"name" binding:"required"`
 		ProjectID string `json:"project_id"`
+		IsHuman   bool   `json:"is_human"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
@@ -328,6 +340,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Name:      req.Name,
 		AccessKey: model.GenerateKey(),
 		Status:    "offline",
+		IsHuman:   req.IsHuman,
 	}
 	if req.ProjectID != "" {
 		agent.CurrentProjectID = &req.ProjectID
@@ -336,12 +349,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	var existing model.Agent
 	model.DB.Where("name = ?", req.Name).First(&existing)
 	if existing.ID != "" {
-		c.JSON(200, gin.H{
-			"success": true,
-			"data": gin.H{
-				"agent_id":   existing.ID,
-				"name":       existing.Name,
-				"access_key": existing.AccessKey,
+		// SECURITY: do NOT return the existing agent's access_key. Previously
+		// this endpoint would hand out any registered agent's credentials to
+		// anyone knowing its name.
+		c.JSON(409, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "AGENT_NAME_TAKEN",
+				"message": "Agent name already registered. Use your original access key or choose a different name.",
 			},
 		})
 		return

@@ -12,11 +12,15 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 
-		// No auth header = human user, allow through with human flag
+		// Missing Authorization header = reject. Previously this silently
+		// treated unauthenticated requests as "human" with agent_id="human",
+		// which effectively disabled auth on all protected endpoints.
 		if authHeader == "" {
-			c.Set("is_human", true)
-			c.Set("agent_id", "human")
-			c.Next()
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error":   gin.H{"code": "AUTH_MISSING", "message": "Authorization header required"},
+			})
+			c.Abort()
 			return
 		}
 

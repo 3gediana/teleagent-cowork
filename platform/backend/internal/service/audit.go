@@ -189,7 +189,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.AuditReason = result.RejectReason
 		model.DB.Save(&change)
 
-		// Start 10-minute timer for task reclamation (requires heartbeat or resubmit)
+		// Start 10-minute watchdog: reset task ONLY if agent is silent (no recent
+		// heartbeat AND no resubmit) throughout the entire window. Previous
+		// version always fell through to reset after 10 minutes regardless.
 		go func() {
 			if change.TaskID == nil {
 				return // no task to reclaim
@@ -198,21 +200,20 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 			agentID := change.AgentID
 			for i := 0; i < 10; i++ {
 				time.Sleep(1 * time.Minute)
-				// Check for heartbeat or new submission each minute
+				// Alive signal 1: heartbeat within last 2 minutes
 				var a model.Agent
 				if model.DB.Where("id = ?", agentID).First(&a).Error == nil {
-					lastHeartbeat := a.LastHeartbeat
-					if lastHeartbeat != nil && time.Since(*lastHeartbeat) < 2*time.Minute {
-						continue // Agent is active, keep waiting
+					if a.LastHeartbeat != nil && time.Since(*a.LastHeartbeat) < 2*time.Minute {
+						return // agent is active, abandon watchdog
 					}
 				}
-				// Check for new change submission from same agent for same task
+				// Alive signal 2: resubmit after this change
 				var newerChange model.Change
 				if model.DB.Where("task_id = ? AND agent_id = ? AND created_at > ?", taskID, agentID, change.CreatedAt).First(&newerChange).Error == nil {
-					continue // Agent resubmitted, keep waiting
+					return // agent resubmitted, abandon watchdog
 				}
 			}
-			// 10 minutes passed without heartbeat or resubmit, reset task
+			// Full window elapsed with no heartbeat and no resubmit: reset task
 			var task model.Task
 			if err := model.DB.Where("id = ?", taskID).First(&task).Error; err == nil {
 				if task.Status == "claimed" && task.AssigneeID != nil && *task.AssigneeID == agentID {

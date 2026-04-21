@@ -19,6 +19,11 @@ func NewChiefHandler() *ChiefHandler {
 // Chat handles human-to-Chief conversation requests.
 // POST /chief/chat?project_id=xxx
 func (h *ChiefHandler) Chat(c *gin.Context) {
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "Chief chat is reserved for human users"}})
+		return
+	}
+
 	projectID := c.Query("project_id")
 	if projectID == "" {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})
@@ -84,14 +89,19 @@ func (h *ChiefHandler) Chat(c *gin.Context) {
 		}
 	}
 
-	// No active session: create new Chief chat session
+	// No active session: create new Chief chat session. Response shape matches
+	// the multi-round case: { session_id, status, agent_response } — agent_response
+	// is empty for async starts; the caller should poll /chief/sessions or listen
+	// for CHIEF_CHAT_UPDATE broadcasts to get the reply.
 	go service.TriggerChiefChat(projectID, req.Message)
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"status":  "started",
-			"message": "Chief Agent session started",
+			"status":              "started",
+			"agent_response":      "",
+			"opencode_session_id": "",
+			"message":             "Chief Agent session started. Listen for CHIEF_CHAT_UPDATE on SSE, or poll /chief/sessions for the session row.",
 		},
 	})
 }
@@ -151,8 +161,10 @@ func (h *ChiefHandler) Policies(c *gin.Context) {
 	}
 
 	var policies []model.Policy
-	query := model.DB.Where("status = ?", status)
-	query = query.Order("priority DESC, created_at DESC").Find(&policies)
+	model.DB.Where("status = ?", status).
+		Order("priority DESC, created_at DESC").
+		Limit(200).
+		Find(&policies)
 
 	c.JSON(200, gin.H{
 		"success": true,

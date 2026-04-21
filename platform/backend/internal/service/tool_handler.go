@@ -11,6 +11,7 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/repo"
 )
 
 var DataPath string
@@ -392,6 +393,11 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 		if err := ExecuteMerge(pr.BranchID); err != nil {
 			pr.Status = "merge_failed"
 			model.DB.Save(&pr)
+			BroadcastEvent(projectID, "PR_MERGE_FAILED", map[string]interface{}{
+				"pr_id":  pr.ID,
+				"title":  pr.Title,
+				"reason": err.Error(),
+			})
 			return fmt.Errorf("merge failed: %w", err)
 		}
 
@@ -400,7 +406,27 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 		pr.MergedAt = &now
 		model.DB.Save(&pr)
 
-		newVersion, _ := IncrementVersion(pr.ProjectID)
+		// Honor the version_suggestion from biz review before falling back to
+		// auto-increment. Previously the Chief path always minor-incremented
+		// regardless of biz review suggestion, diverging from the manual path.
+		var newVersion string
+		if pr.VersionSuggestion != "" {
+			newVersion = pr.VersionSuggestion
+			if vb, _ := repo.GetContentBlock(pr.ProjectID, "version"); vb != nil {
+				vb.Content = newVersion
+				vb.Version++
+				model.DB.Save(vb)
+			}
+			GitTagVersion(pr.ProjectID, newVersion)
+		} else {
+			newVersion, _ = IncrementVersion(pr.ProjectID)
+		}
+
+		BroadcastEvent(projectID, "PR_MERGED", map[string]interface{}{
+			"pr_id":       pr.ID,
+			"title":       pr.Title,
+			"new_version": newVersion,
+		})
 		log.Printf("[Chief] PR %s merged, new version: %s", prID, newVersion)
 
 	default:

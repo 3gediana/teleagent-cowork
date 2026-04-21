@@ -44,3 +44,8 @@ yarn-error.log*
 dump.rdb
 biz_review.txt
 tech_review.txt
+stream_result.txt
+test_req.json
+debug_*.md
+platform/backend/bin/
+platform/backend/cmd/dbquery/

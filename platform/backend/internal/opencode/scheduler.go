@@ -1047,17 +1047,29 @@ func (s *Scheduler) applyPoliciesToSession(session *agent.Session) {
 			continue
 		}
 
-		// Check tag match
+		// Check tag match. TaskTag.task_id stores Task IDs, but sessions carry
+		// ChangeID. We must resolve ChangeID -> Change.TaskID first. If the
+		// session has no associated task, tag-gated policies don't apply.
 		if reqTags, ok := mc["tags"].([]interface{}); ok && len(reqTags) > 0 {
+			taskID := ""
+			if session.ChangeID != "" {
+				var change model.Change
+				if err := model.DB.Where("id = ?", session.ChangeID).First(&change).Error; err == nil && change.TaskID != nil {
+					taskID = *change.TaskID
+				}
+			}
+			if taskID == "" {
+				continue
+			}
 			var taskTags []model.TaskTag
-			model.DB.Where("task_id = ?", session.ChangeID).Find(&taskTags)
+			model.DB.Where("task_id = ?", taskID).Find(&taskTags)
 			tagSet := make(map[string]bool)
 			for _, t := range taskTags {
 				tagSet[t.Tag] = true
 			}
 			matched := false
 			for _, rt := range reqTags {
-				if s, ok := rt.(string); ok && tagSet[s] {
+				if tag, ok := rt.(string); ok && tagSet[tag] {
 					matched = true
 					break
 				}

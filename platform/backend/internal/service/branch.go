@@ -108,6 +108,18 @@ func CreateBranch(projectID, branchName, creatorID string) (*model.Branch, error
 	return branch, nil
 }
 
+// BranchOccupiedError is returned when EnterBranch finds an active occupant.
+// Contains structured info so callers can surface actionable data to agents.
+type BranchOccupiedError struct {
+	OccupantID     string
+	OccupantName   string
+	LastActiveUnix int64
+}
+
+func (e *BranchOccupiedError) Error() string {
+	return fmt.Sprintf("branch is occupied by %s", e.OccupantName)
+}
+
 // EnterBranch assigns an agent to a branch (marks as occupied)
 func EnterBranch(branchID, agentID string) error {
 	var branch model.Branch
@@ -118,14 +130,20 @@ func EnterBranch(branchID, agentID string) error {
 		return fmt.Errorf("branch is %s, not active", branch.Status)
 	}
 	if branch.OccupantID != nil {
-		// Check if occupant is still online
 		var occupant model.Agent
 		if model.DB.Where("id = ?", *branch.OccupantID).First(&occupant).Error == nil {
 			if occupant.Status == "online" {
-				return fmt.Errorf("branch is occupied by %s", occupant.Name)
+				lastActive := int64(0)
+				if branch.LastActiveAt != nil {
+					lastActive = branch.LastActiveAt.Unix()
+				}
+				return &BranchOccupiedError{
+					OccupantID:     occupant.ID,
+					OccupantName:   occupant.Name,
+					LastActiveUnix: lastActive,
+				}
 			}
 		}
-		// Occupant is offline, allow takeover
 		log.Printf("[Branch] Taking over branch %s from offline agent %s", branchID, *branch.OccupantID)
 	}
 
@@ -383,6 +401,11 @@ func ExecuteMerge(branchID string) error {
 		return fmt.Errorf("merge commit failed: %w", err)
 	}
 
+	// Kick agent(s) off the branch BEFORE nullifying OccupantID. Previously
+	// this check always evaluated false because OccupantID was cleared first,
+	// leaving agents stuck pointing to a merged/deleted branch.
+	model.DB.Model(&model.Agent{}).Where("current_branch_id = ?", branchID).Update("current_branch_id", nil)
+
 	// Update branch status
 	now := time.Now()
 	branch.Status = "merged"
@@ -394,11 +417,6 @@ func ExecuteMerge(branchID string) error {
 	branchRepoPath := getBranchRepoPath(branch.ProjectID, branchID)
 	if _, err := os.Stat(branchRepoPath); err == nil {
 		runGitInDir(mainRepoPath, "worktree", "remove", branchRepoPath, "--force")
-	}
-
-	// Kick agent off branch
-	if branch.OccupantID != nil {
-		model.DB.Model(&model.Agent{}).Where("current_branch_id = ?", branchID).Update("current_branch_id", nil)
 	}
 
 	// Release branch file locks

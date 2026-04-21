@@ -37,13 +37,20 @@ func (h *SSEHandler) Events(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	client := service.SSEManager.AddClient(projectID)
-	defer service.SSEManager.RemoveClient(projectID)
+	defer service.SSEManager.RemoveClient(client.ID)
 
-	recent := service.SSEManager.GetRecentBroadcasts(projectID, 5)
+	// On (re)connect, allow the client to request all messages since a given
+	// ID via the standard `Last-Event-ID` header or `?last_event_id=`. This
+	// prevents losing events during brief disconnects.
+	lastEventID := c.GetHeader("Last-Event-ID")
+	if lastEventID == "" {
+		lastEventID = c.Query("last_event_id")
+	}
+	recent := service.SSEManager.GetRecentSince(projectID, lastEventID)
 	if len(recent) > 0 {
 		for _, msg := range recent {
 			data, _ := json.Marshal(msg)
-			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", msg.Header.Type, string(data))
+			fmt.Fprintf(c.Writer, "id: %s\nevent: %s\ndata: %s\n\n", msg.Header.MessageID, msg.Header.Type, string(data))
 		}
 		c.Writer.Flush()
 	}
@@ -55,7 +62,7 @@ func (h *SSEHandler) Events(c *gin.Context) {
 				return
 			}
 			data, _ := json.Marshal(msg)
-			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", msg.Header.Type, string(data))
+			fmt.Fprintf(c.Writer, "id: %s\nevent: %s\ndata: %s\n\n", msg.Header.MessageID, msg.Header.Type, string(data))
 			c.Writer.Flush()
 		case <-client.Quit:
 			return

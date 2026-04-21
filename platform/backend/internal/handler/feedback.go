@@ -55,12 +55,21 @@ func (h *FeedbackHandler) Submit(c *gin.Context) {
 		service.MarshalToJSON(req.FilesRead, &filesJSON)
 	}
 
+	// Tag the experience with the actual agent name so Analyze can still
+	// group by persona. AgentRole is left as a fixed "client_agent" sentinel
+	// to avoid polluting role-based policy matching (which expects platform
+	// role names like "audit_1" / "fix" / "evaluate" / "maintain").
+	tagsJSON := "null"
+	if agent.Name != "" {
+		service.MarshalToJSON([]string{"agent:" + agent.Name}, &tagsJSON)
+	}
+
 	exp := model.Experience{
 		ID:             model.GenerateID("exp"),
 		ProjectID:      projectID,
 		SourceType:     "agent_feedback",
 		SourceID:       agent.ID,
-		AgentRole:      agent.Name, // Agent name identifies the role context
+		AgentRole:      "client_agent",
 		TaskID:         req.TaskID,
 		Outcome:        req.Outcome,
 		Approach:       req.Approach,
@@ -68,6 +77,7 @@ func (h *FeedbackHandler) Submit(c *gin.Context) {
 		KeyInsight:     req.KeyInsight,
 		MissingContext: req.MissingContext,
 		DoDifferently:  req.DoDifferently,
+		Tags:           tagsJSON,
 		FilesInvolved:  filesJSON,
 		Status:         "raw",
 		CreatedAt:      time.Now(),

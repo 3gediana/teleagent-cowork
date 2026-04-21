@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,20 +27,34 @@ func (h *PRHandler) Submit(c *gin.Context) {
 		return
 	}
 
+	// Accept self_review either as an object (preferred) or as a pre-stringified
+	// JSON string (backward compat). Storing canonical JSON string internally.
 	var req struct {
-		Title       string `json:"title" binding:"required"`
-		Description string `json:"description"`
-		SelfReview  string `json:"self_review" binding:"required"` // JSON string with self-review
+		Title       string          `json:"title" binding:"required"`
+		Description string          `json:"description"`
+		SelfReview  json.RawMessage `json:"self_review" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
 		return
 	}
 
-	// Validate self_review is valid JSON
+	selfReviewStr := strings.TrimSpace(string(req.SelfReview))
+	if selfReviewStr == "" || selfReviewStr == "null" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_SELF_REVIEW", "message": "self_review is required"}})
+		return
+	}
+	// If the client sent a JSON string literal (e.g. "{...}"), unwrap it.
+	if len(selfReviewStr) > 1 && selfReviewStr[0] == '"' {
+		var unwrapped string
+		if err := json.Unmarshal(req.SelfReview, &unwrapped); err == nil {
+			selfReviewStr = strings.TrimSpace(unwrapped)
+		}
+	}
+	// Validate the final value parses as JSON.
 	var selfReview interface{}
-	if err := json.Unmarshal([]byte(req.SelfReview), &selfReview); err != nil {
-		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_SELF_REVIEW", "message": "self_review must be valid JSON"}})
+	if err := json.Unmarshal([]byte(selfReviewStr), &selfReview); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_SELF_REVIEW", "message": "self_review must be valid JSON (object or stringified JSON)"}})
 		return
 	}
 
@@ -71,7 +86,7 @@ func (h *PRHandler) Submit(c *gin.Context) {
 		BranchID:    branchID,
 		Title:       req.Title,
 		Description: req.Description,
-		SelfReview:  req.SelfReview,
+		SelfReview:  selfReviewStr,
 		DiffStat:    diffStat,
 		DiffFull:    diffFull,
 		Status:      "pending_human_review",
@@ -273,11 +288,15 @@ func (h *PRHandler) ApproveMerge(c *gin.Context) {
 		newVersion, _ = service.IncrementVersion(pr.ProjectID)
 	}
 
-	// Broadcast merge success
+	// Broadcast merge success. Include a hint so any agent that was on this
+	// branch knows to call `branch list` or `select_branch` rather than
+	// attempting to read from the now-removed worktree.
 	service.BroadcastEvent(pr.ProjectID, "PR_MERGED", map[string]interface{}{
 		"pr_id":       pr.ID,
 		"title":       pr.Title,
+		"branch_id":   pr.BranchID,
 		"new_version": newVersion,
+		"next_action": "If you were working on this branch, it has been merged and its worktree removed. Use `branch list` to see what's available or return to main.",
 	})
 
 	c.JSON(200, gin.H{

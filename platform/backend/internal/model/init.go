@@ -60,6 +60,20 @@ func InitDB(cfg *config.DatabaseConfig) error {
 	DB.Exec("ALTER TABLE milestone CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 	DB.Exec("ALTER TABLE project CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 
+	// Bootstrap IsHuman: if the Agent table exists but no agent is flagged as
+	// human (e.g. the column was just added in this deploy), promote the
+	// oldest agent so the dashboard / Chief chat remain usable without
+	// manual DB surgery.
+	var humanCount int64
+	DB.Model(&Agent{}).Where("is_human = ?", true).Count(&humanCount)
+	if humanCount == 0 {
+		var oldest Agent
+		if err := DB.Order("created_at ASC").First(&oldest).Error; err == nil && oldest.ID != "" {
+			DB.Model(&Agent{}).Where("id = ?", oldest.ID).Update("is_human", true)
+			log.Printf("[DB] Bootstrap: promoted oldest agent %s (%s) to is_human=true so dashboard/Chief remain usable", oldest.ID, oldest.Name)
+		}
+	}
+
 	log.Println("Database connected successfully")
 	return nil
 }

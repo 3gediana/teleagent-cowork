@@ -22,8 +22,8 @@ export const authApi = {
   login: (key: string, project?: string) =>
     api.post('/auth/login', { key, project }) as Promise<{ success: boolean; data: any }>,
 
-  register: (name: string, projectId?: string) =>
-    api.post('/agent/register', { name, project_id: projectId }) as Promise<{ success: boolean; data: any }>,
+  register: (name: string, projectId?: string, isHuman: boolean = true) =>
+    api.post('/agent/register', { name, project_id: projectId, is_human: isHuman }) as Promise<{ success: boolean; data: any }>,
 
   logout: () =>
     api.post('/auth/logout', {}) as Promise<{ success: boolean; data: any }>,

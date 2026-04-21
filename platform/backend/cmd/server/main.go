@@ -97,6 +97,7 @@ func main() {
 		auth.POST("/task/create", taskHandler.Create)
 		auth.POST("/task/claim", taskHandler.Claim)
 		auth.POST("/task/complete", taskHandler.Complete)
+		auth.POST("/task/release", taskHandler.Release)
 		auth.DELETE("/task/:task_id", taskHandler.Delete)
 		auth.GET("/task/list", taskHandler.List)
 
@@ -107,6 +108,7 @@ func main() {
 
 		auth.POST("/change/submit", changeHandler.Submit)
 		auth.GET("/change/list", changeHandler.List)
+		auth.GET("/change/status", changeHandler.Status)
 		auth.POST("/change/review", changeHandler.Review)
 		auth.POST("/change/approve_for_review", changeHandler.ApproveForReview)
 

@@ -1,10 +1,17 @@
 package handler
 
 import (
+	"errors"
+	"regexp"
+
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/service"
 )
+
+// branchNamePattern restricts user-supplied branch name suffixes to a safe
+// subset, preventing injection of git flags or path traversal sequences.
+var branchNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type BranchHandler struct{}
 
@@ -30,9 +37,19 @@ func (h *BranchHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Validate branch name (no spaces, special chars)
+	// Validate branch name: must be 1-64 chars and match safe pattern to
+	// prevent path traversal / git flag injection (e.g. names starting with
+	// '-' are interpreted as options by git worktree add).
 	if len(req.Name) == 0 || len(req.Name) > 64 {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_NAME", "message": "Branch name must be 1-64 characters"}})
+		return
+	}
+	if !branchNamePattern.MatchString(req.Name) {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_NAME", "message": "Branch name may only contain letters, digits, '.', '_', '-' and must start with an alphanumeric"}})
+		return
+	}
+	if !branchNamePattern.MatchString(agent.Name) {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_AGENT_NAME", "message": "Agent name contains characters unsafe for a git branch"}})
 		return
 	}
 
@@ -70,6 +87,23 @@ func (h *BranchHandler) Enter(c *gin.Context) {
 	}
 
 	if err := service.EnterBranch(req.BranchID, agentID.(string)); err != nil {
+		var occErr *service.BranchOccupiedError
+		if errors.As(err, &occErr) {
+			c.JSON(409, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "BRANCH_OCCUPIED",
+					"message": err.Error(),
+					"occupant": gin.H{
+						"agent_id":         occErr.OccupantID,
+						"agent_name":       occErr.OccupantName,
+						"last_active_unix": occErr.LastActiveUnix,
+					},
+					"hint": "Occupant is online. Wait for them to `leave` or pick a different branch via `branch list`.",
+				},
+			})
+			return
+		}
 		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "BRANCH_ENTER_FAILED", "message": err.Error()}})
 		return
 	}
@@ -124,6 +158,23 @@ func (h *BranchHandler) Close(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+
+	// Ownership check: requester must be in the same project as the branch
+	agentID, _ := c.Get("agent_id")
+	var requester model.Agent
+	if err := model.DB.Where("id = ?", agentID).First(&requester).Error; err != nil {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
+		return
+	}
+	var branch model.Branch
+	if err := model.DB.Where("id = ?", req.BranchID).First(&branch).Error; err != nil {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "BRANCH_NOT_FOUND", "message": "Branch not found"}})
+		return
+	}
+	if requester.CurrentProjectID == nil || *requester.CurrentProjectID != branch.ProjectID {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "FORBIDDEN", "message": "Branch belongs to a different project"}})
 		return
 	}
 

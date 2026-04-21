@@ -231,9 +231,7 @@ func (h *AgentHandler) SubmitOutput(c *gin.Context) {
 
 	// If this is a tool output, process it through the tool handler
 	if toolName, _ := output["tool"].(string); toolName != "" && toolName != "project_status" {
-		if service.HandleToolCallResult != nil {
-			go service.HandleToolCallResult(sessionID, session.ChangeID, session.ProjectID, toolName, output)
-		}
+		go service.HandleToolCallResult(sessionID, session.ChangeID, session.ProjectID, toolName, output)
 	}
 
 	c.JSON(200, gin.H{
