@@ -99,6 +99,21 @@ export class ApiClient {
     version: string
     writes: (string | { path: string; content: string })[]
     deletes?: string[]
+    /**
+     * Optional list of KnowledgeArtifact IDs the client received on
+     * task.claim and was guided by while producing this change. Enables
+     * the server-side feedback loop: HandleChangeAudit uses this list to
+     * bump success_count / failure_count on the exact artifacts whose
+     * advice was acted upon. Safe to omit.
+     */
+    injected_artifact_ids?: string[]
+    /**
+     * Richer alternative to injected_artifact_ids. Each entry preserves
+     * the selector's reason + score at claim time, letting the server
+     * compute per-reason success rates (semantic vs importance vs
+     * recency) over time. Server prefers this field when both are sent.
+     */
+    injected_refs?: { id: string; reason?: string; score?: number }[]
   }) {
     // Use longer timeout for audit workflow (2 minutes)
     const { data } = await this.client.post('/api/v1/change/submit', changeData, {

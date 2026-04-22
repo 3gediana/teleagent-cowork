@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/a3c/platform/internal/model"
+	"github.com/a3c/platform/internal/service/refinery"
 	"gorm.io/gorm"
 )
 
@@ -133,6 +134,60 @@ func StoreOfflineMessage(agentID string, message string) {
 }
 
 var analyzeTimerRunning = false
+var refineryTimerRunning = false
+
+// StartRefineryTimer runs the Refinery pipeline weekly for each active project.
+// This ensures knowledge artifacts are kept up-to-date without manual triggers.
+func StartRefineryTimer() {
+	if refineryTimerRunning {
+		return
+	}
+	refineryTimerRunning = true
+
+	go func() {
+		ticker := time.NewTicker(7 * 24 * time.Hour) // weekly
+		defer ticker.Stop()
+
+		log.Printf("[Refinery] Weekly timer started (first run in 7 days)")
+
+		for range ticker.C {
+			runRefineryForAllProjects()
+		}
+	}()
+}
+
+func runRefineryForAllProjects() {
+	var projects []model.Project
+	model.DB.Where("status = 'ready' OR status = 'idle'").Find(&projects)
+
+	for _, project := range projects {
+		var sessionCount int64
+		model.DB.Model(&model.AgentSession{}).Where("project_id = ?", project.ID).Count(&sessionCount)
+		if sessionCount >= 5 { // only run if there's enough data
+			go func(pid string) {
+				r := refinery.New()
+				if _, err := r.Run(pid, 24*14, "scheduled"); err != nil {
+					log.Printf("[Refinery] Scheduled run failed for project %s: %v", pid, err)
+				} else {
+					log.Printf("[Refinery] Scheduled run completed for project %s", pid)
+				}
+			}(project.ID)
+		}
+	}
+
+	// Global promoter: after project runs, consolidate highly-validated
+	// artifacts into the cross-project pool. We wait briefly so the
+	// per-project goroutines above have a chance to finish first.
+	go func() {
+		time.Sleep(5 * time.Minute)
+		gr := refinery.NewGlobalOnly()
+		if _, err := gr.Run("", 24*30, "scheduled_global"); err != nil {
+			log.Printf("[Refinery] Scheduled global promotion failed: %v", err)
+		} else {
+			log.Printf("[Refinery] Scheduled global promotion completed")
+		}
+	}()
+}
 
 // StartAnalyzeTimer runs the Analyze Agent daily for each project with raw experiences.
 func StartAnalyzeTimer() {

@@ -1,0 +1,10 @@
+# Local Python virtualenv
+.venv/
+
+# HuggingFace / sentence-transformers model cache (large binaries — never
+# commit these; they're fetched on first launch of app.py).
+models/
+
+# PyCache
+__pycache__/
+*.pyc

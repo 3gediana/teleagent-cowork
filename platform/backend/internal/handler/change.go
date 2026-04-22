@@ -26,6 +26,23 @@ type SubmitChangeRequest struct {
 	Version     string                `json:"version"`
 	Writes      []model.ChangeFileEntry `json:"writes"`
 	Deletes     []string              `json:"deletes"`
+
+	// InjectedArtifactIDs is the list of KnowledgeArtifact IDs the client
+	// received on task.claim and was guided by while producing this
+	// change. The server stores it on the Change row and — once Audit
+	// gives L0/L1/L2 — calls HandleChangeAudit to bump success/failure
+	// counters on those exact artifacts. Safe to omit: older clients
+	// that never learned the hints protocol still work, they just don't
+	// contribute to the feedback loop.
+	InjectedArtifactIDs []string `json:"injected_artifact_ids,omitempty"`
+
+	// InjectedRefs is the richer shape that also preserves per-artifact
+	// selection metadata (reason + score at claim time). Preferred over
+	// InjectedArtifactIDs when the client sends both; falls back to
+	// InjectedArtifactIDs otherwise. HandleChangeAudit uses the ids in
+	// either shape; the reason/score fields let us compute per-reason
+	// success rates for offline analysis.
+	InjectedRefs []service.InjectedRef `json:"injected_refs,omitempty"`
 }
 
 func (h *ChangeHandler) Submit(c *gin.Context) {
@@ -161,19 +178,48 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		retryCount = len(prevChanges)
 	}
 
+	// Persist the artifacts the client was guided by so HandleChangeAudit
+	// can attribute the audit verdict back to them. We prefer the richer
+	// `injected_refs` shape (id + reason + score) because it lets the
+	// feedback loop compute per-reason success rates downstream. If the
+	// client only sent the flat id array we synthesise refs with an
+	// empty reason — HandleChangeAudit still bumps counters fine, just
+	// without the per-reason breakdown.
+	//
+	// Silent no-op when neither is present: the loop simply doesn't
+	// contribute to artifact feedback for this change, matching the
+	// graceful-degradation contract for every piece of the refinery
+	// pipeline.
+	injectedArtifactsJSON := ""
+	switch {
+	case len(req.InjectedRefs) > 0:
+		if b, err := json.Marshal(req.InjectedRefs); err == nil {
+			injectedArtifactsJSON = string(b)
+		}
+	case len(req.InjectedArtifactIDs) > 0:
+		refs := make([]service.InjectedRef, len(req.InjectedArtifactIDs))
+		for i, id := range req.InjectedArtifactIDs {
+			refs[i] = service.InjectedRef{ID: id}
+		}
+		if b, err := json.Marshal(refs); err == nil {
+			injectedArtifactsJSON = string(b)
+		}
+	}
+
 	change := model.Change{
-		ID:            changeID,
-		ProjectID:     projectID,
-		AgentID:       agentID.(string),
-		TaskID:        &req.TaskID,
-		Version:       currentVersion,
-		ModifiedFiles: string(modifiedFilesJSON),
-		NewFiles:      string(newFilesJSON),
-		DeletedFiles:  string(deletedFilesJSON),
-		Diff:          string(diffJSON),
-		Description:   req.Description,
-		Status:        changeStatus,
-		RetryCount:    retryCount,
+		ID:                changeID,
+		ProjectID:         projectID,
+		AgentID:           agentID.(string),
+		TaskID:            &req.TaskID,
+		Version:           currentVersion,
+		ModifiedFiles:     string(modifiedFilesJSON),
+		NewFiles:          string(newFilesJSON),
+		DeletedFiles:      string(deletedFilesJSON),
+		Diff:              string(diffJSON),
+		Description:       req.Description,
+		Status:            changeStatus,
+		RetryCount:        retryCount,
+		InjectedArtifacts: injectedArtifactsJSON,
 	}
 
 	if err := model.DB.Create(&change).Error; err != nil {

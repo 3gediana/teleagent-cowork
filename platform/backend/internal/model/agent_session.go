@@ -16,6 +16,11 @@ type AgentSession struct {
 	OpenCodeSessionID string     `gorm:"size:128;column:opencode_session_id" json:"opencode_session_id"`
 	Output            string     `gorm:"type:text" json:"output"`
 	PromptHash        string     `gorm:"size:64" json:"prompt_hash"`
+	// InjectedArtifacts: JSON array of KnowledgeArtifact IDs that were included
+	// in this session's prompt. Used to close the feedback loop — when the
+	// session finishes, downstream code can bump these artifacts' success /
+	// failure counts based on the session outcome.
+	InjectedArtifacts string     `gorm:"type:text" json:"injected_artifacts"`
 	DurationMs        int        `json:"duration_ms"`
 	RetryCount        int        `gorm:"default:0" json:"retry_count"`
 	LastError         string     `gorm:"type:text" json:"last_error"`

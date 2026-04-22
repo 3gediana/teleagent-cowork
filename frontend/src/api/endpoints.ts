@@ -57,6 +57,35 @@ export const taskApi = {
     api.post('/task/complete', { task_id: taskId }) as Promise<{ success: boolean; data: any }>,
 }
 
+// tagApi wraps the /tag/* endpoints added in PR 6 so the review UI can
+// confirm / reject / supersede proposed tags without a page reload.
+// All mutation endpoints are human-only on the server; the UI still
+// shows the buttons for agents so the failure message comes from the
+// platform, not the frontend — surface the real error rather than
+// hiding the affordance.
+export const tagApi = {
+  list: (taskId: string, status?: string) =>
+    api.get('/tag/list', { params: { task_id: taskId, status } }) as Promise<{ success: boolean; data: any }>,
+
+  confirm: (tagId: string, note?: string) =>
+    api.post('/tag/confirm', { tag_id: tagId, note }) as Promise<{ success: boolean; data: any }>,
+
+  reject: (tagId: string, note?: string) =>
+    api.post('/tag/reject', { tag_id: tagId, note }) as Promise<{ success: boolean; data: any }>,
+
+  supersede: (oldTagId: string, newTagId: string) =>
+    api.post('/tag/supersede', { old_tag_id: oldTagId, new_tag_id: newTagId }) as Promise<{ success: boolean; data: any }>,
+}
+
+// metricsApi exposes read-only analytics derived from change-audit
+// feedback. Today only the injection-signal rollup (PR 9) is live; as
+// more metrics land, group them into this same client so the
+// KnowledgePage / dashboard can hydrate one surface at a time.
+export const metricsApi = {
+  injectionSignal: (projectId: string, limit?: number) =>
+    api.get('/metrics/injection-signal', { params: { project_id: projectId, limit } }) as Promise<{ success: boolean; data: any }>,
+}
+
 export const changeApi = {
   list: (projectId: string, status?: string) =>
     api.get('/change/list', { params: { project_id: projectId, status } }) as Promise<{ success: boolean; data: any }>,
@@ -164,4 +193,17 @@ export const policyApi = {
     api.post('/policy/' + id + '/activate') as Promise<{ success: boolean; data: any }>,
   deactivate: (id: string) =>
     api.post('/policy/' + id + '/deactivate') as Promise<{ success: boolean; data: any }>,
+}
+
+export const refineryApi = {
+  run: (projectId: string, lookbackHours?: number) =>
+    api.post('/refinery/run', { project_id: projectId, lookback_hours: lookbackHours }) as Promise<{ success: boolean; data: { run_id: string; status: string } }>,
+  runs: (projectId: string, limit = 20) =>
+    api.get('/refinery/runs', { params: { project_id: projectId, limit } }) as Promise<{ success: boolean; data: { runs: any[] } }>,
+  artifacts: (projectId: string, kind?: string, status?: string, limit = 200) =>
+    api.get('/refinery/artifacts', { params: { project_id: projectId, kind, status, limit } }) as Promise<{ success: boolean; data: { artifacts: any[]; counts: { kind: string; total: number }[] } }>,
+  growth: (projectId: string, days = 30) =>
+    api.get('/refinery/growth', { params: { project_id: projectId, days } }) as Promise<{ success: boolean; data: { series: { day: string; kind: string; count: number }[]; days: number } }>,
+  updateStatus: (artifactId: string, status: string) =>
+    api.put('/refinery/artifacts/' + artifactId + '/status', { status }) as Promise<{ success: boolean; data: { id: string; status: string } }>,
 }

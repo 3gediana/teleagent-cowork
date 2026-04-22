@@ -96,6 +96,16 @@ type Task struct {
 	Status      string     `gorm:"size:20;default:'pending'" json:"status"` // pending/claimed/completed/deleted
 	AssigneeID  *string    `gorm:"size:64;index:idx_task_assignee" json:"assignee_id"`
 	CreatedBy   string     `gorm:"size:64;not null" json:"created_by"`
+
+	// Semantic embedding of (Name + "\n" + Description), produced by the
+	// bge-base-zh-v1.5 sidecar at task-create time. Used by the injection
+	// selector to find the most semantically relevant past artifacts for
+	// this task without relying solely on tags. Nil when the embedder was
+	// unreachable; a background reconciler will backfill it later.
+	DescriptionEmbedding    []byte     `gorm:"type:longblob" json:"-"`
+	DescriptionEmbeddingDim int        `gorm:"default:0" json:"description_embedding_dim"`
+	DescriptionEmbeddedAt   *time.Time `json:"description_embedded_at"`
+
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	CompletedAt *time.Time `json:"completed_at"`
@@ -143,6 +153,20 @@ type Change struct {
 	FailureMode   string     `gorm:"size:64" json:"failure_mode"`             // wrong_assumption/missing_context/tool_misuse/over_edit/invalid_output/incomplete_fix
 	RetryCount    int        `gorm:"default:0" json:"retry_count"`            // how many times this task was resubmitted
 	ReviewedAt    *time.Time `json:"reviewed_at"`
+
+	// InjectedArtifacts is the JSON-encoded list of KnowledgeArtifact IDs
+	// that were surfaced to the claiming MCP client via task.claim hints
+	// and are therefore accountable for this change's outcome. Echoed back
+	// by the client on change.submit; consumed by HandleChangeAudit when
+	// the audit verdict lands (L0=success, L2=failure) to bump the
+	// artifacts' success_count / failure_count.
+	InjectedArtifacts string `gorm:"type:json;default:null" json:"injected_artifacts"`
+
+	// FeedbackApplied guards against double-accounting: once an audit
+	// verdict has been translated into artifact counter bumps, we set
+	// this so retries or re-submissions don't re-fire the feedback.
+	FeedbackApplied bool `gorm:"default:false" json:"feedback_applied"`
+
 	CreatedAt     time.Time  `gorm:"index:idx_change_created" json:"created_at"`
 }
 

@@ -21,6 +21,10 @@ type TaskProfile struct {
 	SuggestedModel string   `json:"suggested_model"`
 	GuardRails     []string `json:"guard_rails"`
 	RelevantSkills []string `json:"relevant_skills"`
+	// Refinery knowledge: IDs of KnowledgeArtifacts that apply to this task.
+	// Patterns are suggested tool sequences; anti-patterns become guard rails.
+	RelevantPatterns     []string `json:"relevant_patterns"`
+	RelevantAntiPatterns []string `json:"relevant_anti_patterns"`
 }
 
 // ProfileTask generates a TaskProfile for a given task.
@@ -97,15 +101,42 @@ func ProfileTask(taskID string) *TaskProfile {
 		}
 	}
 
+	// 5. Refinery artifacts — patterns / anti-patterns scoped to this project.
+	// We fetch the task's project, then pull active artifacts.
+	relevantPatterns := []string{}
+	relevantAntiPatterns := []string{}
+	var task model.Task
+	if model.DB.Select("project_id").Where("id = ?", taskID).First(&task).Error == nil && task.ProjectID != "" {
+		var artifacts []model.KnowledgeArtifact
+		// Include project-scoped + global (project_id="") artifacts
+		model.DB.Where("(project_id = ? OR project_id = '') AND status IN ?", task.ProjectID, []string{"active", "candidate"}).
+			Order("confidence DESC").Limit(30).Find(&artifacts)
+		for _, a := range artifacts {
+			switch a.Kind {
+			case "pattern":
+				relevantPatterns = append(relevantPatterns, a.ID)
+			case "anti_pattern":
+				relevantAntiPatterns = append(relevantAntiPatterns, a.ID)
+				// Anti-patterns also feed into guard_rails so downstream
+				// dispatch code gets a compact human-readable warning.
+				if a.Summary != "" {
+					guardRails = append(guardRails, "[anti-pattern] "+a.Summary)
+				}
+			}
+		}
+	}
+
 	return &TaskProfile{
-		TaskID:         taskID,
-		Tags:           tagNames,
-		SimilarPast:    similarPast,
-		RiskLevel:      riskLevel,
-		SuggestedFlow:  suggestedFlow,
-		SuggestedModel: suggestedModel,
-		GuardRails:     guardRails,
-		RelevantSkills: relevantSkills,
+		TaskID:               taskID,
+		Tags:                 tagNames,
+		SimilarPast:          similarPast,
+		RiskLevel:            riskLevel,
+		SuggestedFlow:        suggestedFlow,
+		SuggestedModel:       suggestedModel,
+		GuardRails:           guardRails,
+		RelevantSkills:       relevantSkills,
+		RelevantPatterns:     relevantPatterns,
+		RelevantAntiPatterns: relevantAntiPatterns,
 	}
 }
 

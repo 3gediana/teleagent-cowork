@@ -17,6 +17,72 @@ const ACCESS_KEY = process.env.A3C_ACCESS_KEY || ''
 const PROJECT = process.env.A3C_PROJECT || ''
 const OPENCODE_SERVE_URL = process.env.OPENCODE_SERVE_URL || 'http://127.0.0.1:4096'
 
+/**
+ * formatClaimResponse turns the backend's task.claim response into a
+ * markdown-like text block the upstream coding agent can actually use.
+ *
+ * The backend now attaches `hints` — recipes, patterns and anti-patterns
+ * selected by the refinery + semantic retrieval — to every successful
+ * claim. Dumping the raw JSON would work (the agent can parse anything),
+ * but a structured layout is easier for both the agent and the operator
+ * inspecting a transcript. We also preserve the injected_ids so the
+ * change.submit path can echo them back for feedback accounting.
+ *
+ * If the backend is old (no hints field) or the hints were unavailable
+ * for this task (sidecar down, cold cache), the function gracefully
+ * falls back to plain task metadata — an agent on the old protocol sees
+ * the same thing it used to.
+ */
+function formatClaimResponse(data: any): string {
+  if (!data?.success) return JSON.stringify(data, null, 2)
+  const d = data.data || {}
+  const lines: string[] = []
+  lines.push(`# Task claimed — ${d.name}`)
+  lines.push('')
+  lines.push(`- id: ${d.id}`)
+  if (d.priority) lines.push(`- priority: ${d.priority}`)
+  if (d.milestone_id) lines.push(`- milestone: ${d.milestone_id}`)
+  if (d.description) {
+    lines.push('')
+    lines.push('## Description')
+    lines.push(d.description)
+  }
+
+  const hints = d.hints
+  if (!hints || !Array.isArray(hints.injected_ids) || hints.injected_ids.length === 0) {
+    lines.push('')
+    lines.push('_(no experience hints available for this task yet)_')
+    return lines.join('\n')
+  }
+
+  const fmtItem = (h: any): string =>
+    `- **${h.name}** (score=${(h.score ?? 0).toFixed(2)})\n  ${h.summary}\n  _reason: ${h.reason}_`
+
+  lines.push('')
+  lines.push('## Experience hints (from past work)')
+  lines.push(`selected ${hints.meta?.selected ?? 0} of ${hints.meta?.candidate_pool ?? 0} candidates`)
+
+  if (Array.isArray(hints.recipes) && hints.recipes.length > 0) {
+    lines.push('')
+    lines.push('### 🛠 Recipes — try these steps in this order')
+    hints.recipes.forEach((h: any) => lines.push(fmtItem(h)))
+  }
+  if (Array.isArray(hints.patterns) && hints.patterns.length > 0) {
+    lines.push('')
+    lines.push('### ✓ Patterns — what usually works in this situation')
+    hints.patterns.forEach((h: any) => lines.push(fmtItem(h)))
+  }
+  if (Array.isArray(hints.anti_patterns) && hints.anti_patterns.length > 0) {
+    lines.push('')
+    lines.push('### ⚠ Anti-patterns — avoid these, known failure modes')
+    hints.anti_patterns.forEach((h: any) => lines.push(fmtItem(h)))
+  }
+
+  lines.push('')
+  lines.push(`<!-- a3c_injected_ids: ${hints.injected_ids.join(',')} -->`)
+  return lines.join('\n')
+}
+
 async function main() {
   const savedConfig = loadConfig()
   const initialKey = ACCESS_KEY || savedConfig.access_key || ''
@@ -104,7 +170,7 @@ async function main() {
         case 'claim': {
           if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required for claim' }] }
           const data = await api.claimTask(task_id)
-          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+          return { content: [{ type: 'text', text: formatClaimResponse(data) }] }
         }
         case 'release': {
           if (!task_id) return { content: [{ type: 'text', text: 'Error: task_id required for release' }] }
@@ -145,13 +211,31 @@ async function main() {
     version: z.string().describe('Current version (read from .a3c_version)'),
     writes: z.array(z.union([z.string(), z.object({ path: z.string(), content: z.string() })])).describe('Files to write'),
     deletes: z.array(z.string()).optional().describe('Files to delete'),
-  }, async ({ task_id, description, version, writes, deletes }) => {
+    injected_artifact_ids: z.array(z.string()).optional().describe(
+      'KnowledgeArtifact IDs echoed back from the task.claim hints bundle. ' +
+      'Pass them here so the server can bump success/failure counters on ' +
+      'the exact artifacts that guided this change once the audit verdict ' +
+      'lands. Safe to omit if no hints were consulted.'
+    ),
+    injected_refs: z.array(z.object({
+      id: z.string(),
+      reason: z.string().optional(),
+      score: z.number().optional(),
+    })).optional().describe(
+      'Richer variant of injected_artifact_ids, copied verbatim from the ' +
+      '`injected_refs` field in the task.claim response. Preserves per-' +
+      'artifact selector reason + score so the server can compute per-' +
+      'reason success rates over time. Preferred over injected_artifact_ids.'
+    ),
+  }, async ({ task_id, description, version, writes, deletes, injected_artifact_ids, injected_refs }) => {
     const data = await api.submitChange({
       task_id,
       description: description || '',
       version,
       writes,
       deletes: deletes || [],
+      injected_artifact_ids: injected_artifact_ids,
+      injected_refs: injected_refs,
     })
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
   })

@@ -1,16 +1,48 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
+	"gorm.io/gorm"
 )
+
+// buildChiefQueryText builds the semantic query used to retrieve relevant
+// artifacts for the Chief Agent. Chief isn't working on one specific task
+// so we describe what the project is actively doing: the current milestone
+// plus the names of pending / claimed tasks. This gives the bge encoder a
+// representative sample of the "topic space" Chief is about to reason about.
+//
+// Kept as a separate function so tests can assert stable text without
+// spinning up the full chief context.
+func buildChiefQueryText(milestoneContent string, tasks []model.Task) string {
+	parts := []string{}
+	if milestoneContent != "" {
+		parts = append(parts, milestoneContent)
+	}
+	// Only include actionable tasks — completed ones represent done work
+	// and aren't what Chief needs to think about next.
+	active := 0
+	for _, t := range tasks {
+		if t.Status != "pending" && t.Status != "claimed" {
+			continue
+		}
+		parts = append(parts, t.Name)
+		active++
+		if active >= 10 {
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
 
 // TriggerChiefDecision triggers the Chief Agent to make a decision.
 // decisionType: "pr_review", "pr_merge", "milestone_switch", etc.
@@ -153,6 +185,37 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 		policyList += "- [" + p.Source + "] " + p.Name + ": match=" + p.MatchCondition + " actions=" + p.Actions + "\n"
 	}
 
+	// Knowledge artifacts from refinery — scored by relevance to what the
+	// project is actively doing, not just top-N by confidence. Query text
+	// summarises the current work surface (milestone + pending task
+	// names) so semantic retrieval pulls artifacts related to the right
+	// topics. See SelectArtifactsForInjection for the scoring formula.
+	queryText := buildChiefQueryText(milestoneContent, tasks)
+	injected := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: projectID,
+		Audience:  AudienceCommander,
+		QueryText: queryText,
+	})
+	artifactList := ""
+	injectedIDs := make([]string, 0, len(injected))
+	for _, ia := range injected {
+		a := ia.Artifact
+		successRate := 0.0
+		if a.UsageCount > 0 {
+			successRate = float64(a.SuccessCount) / float64(a.UsageCount)
+		}
+		artifactList += fmt.Sprintf("- [%s] %s (score=%.2f via %s, used=%d, success_rate=%.0f%%): %s\n",
+			a.Kind, a.Name, ia.Score, ia.Reason, a.UsageCount, successRate*100, a.Summary)
+		injectedIDs = append(injectedIDs, a.ID)
+	}
+	// Bump usage_count for each injected artifact (feedback loop for lifecycle)
+	if len(injectedIDs) > 0 {
+		model.DB.Model(&model.KnowledgeArtifact{}).Where("id IN ?", injectedIDs).
+			Update("usage_count", gorm.Expr("usage_count + 1"))
+		model.DB.Model(&model.KnowledgeArtifact{}).Where("id IN ?", injectedIDs).
+			Update("last_used_at", time.Now())
+	}
+
 	// PR status for this project
 	var prs []model.PullRequest
 	model.DB.Where("project_id = ?", projectID).Order("created_at DESC").Limit(10).Find(&prs)
@@ -202,10 +265,10 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 
 	// Build global state string
 	globalState := fmt.Sprintf(
-		"## 平台全局状态\n\n### 项目\n- 方向: %s\n- 当前里程碑: %s\n- 版本: %s\n- AutoMode: %v\n\n### 任务概览\n- 待领取: %d 个\n- 进行中: %d 个\n- 已完成: %d 个\n%s\n### Agent 状态\n%s\n### 待处理事项\n%s\n### 最近审核结果\n%s\n### PR 状态\n%s\n### 当前策略\n%s",
+		"## 平台全局状态\n\n### 项目\n- 方向: %s\n- 当前里程碑: %s\n- 版本: %s\n- AutoMode: %v\n\n### 任务概览\n- 待领取: %d 个\n- 进行中: %d 个\n- 已完成: %d 个\n%s\n### Agent 状态\n%s\n### 待处理事项\n%s\n### 最近审核结果\n%s\n### PR 状态\n%s\n### 当前策略\n%s\n### 知识库 (Refinery)\n%s",
 		directionContent, milestoneContent, versionContent, autoMode,
 		pendingCount, inProgressCount, completedCount,
-		taskList, agentList, pendingActions, auditList, prList, policyList,
+		taskList, agentList, pendingActions, auditList, prList, policyList, artifactList,
 	)
 
 	// Decision-specific context
@@ -223,14 +286,15 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 	}
 
 	return &agent.SessionContext{
-		DirectionBlock: directionContent,
-		MilestoneBlock: milestoneContent,
-		TaskList:      taskList,
-		Version:       versionContent,
-		InputContent:  inputContent,
-		TriggerReason: "chief_decision_" + decisionType,
-		GlobalState:   globalState,
-		AutoMode:      autoMode,
+		DirectionBlock:      directionContent,
+		MilestoneBlock:      milestoneContent,
+		TaskList:            taskList,
+		Version:             versionContent,
+		InputContent:        inputContent,
+		TriggerReason:       "chief_decision_" + decisionType,
+		GlobalState:         globalState,
+		AutoMode:            autoMode,
+		InjectedArtifactIDs: injectedIDs,
 	}
 }
 

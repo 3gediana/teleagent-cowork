@@ -1,15 +1,89 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/opencode"
+	"gorm.io/gorm"
 )
+
+// ctxBg is a tiny indirection so tests can override the background
+// context used by Analyze's selector call (e.g. inject a cancelled ctx
+// to exercise graceful degradation).
+var ctxBg = func() context.Context { return context.Background() }
+
+// buildPendingTagsBlock renders the project's oldest `limit` proposed
+// TaskTag rows as an indented, per-tag markdown list for Analyze to see.
+// Joining to Task so Analyze knows which task each tag belongs to
+// (otherwise it can't judge correctness against the real execution
+// outcome).
+//
+// Returns "(none)" when there's nothing to review, keeping the prompt
+// concise instead of emitting a stray header.
+func buildPendingTagsBlock(projectID string, limit int) string {
+	type row struct {
+		TagID      string
+		TagDim     string
+		TagValue   string
+		Confidence float64
+		Source     string
+		TaskID     string
+		TaskName   string
+	}
+	var rows []row
+	// Single JOIN query — proposed tags + their parent tasks in the
+	// given project. Order by created_at asc so the oldest (riskiest
+	// to leave pending) surface first.
+	model.DB.Raw(`
+		SELECT t.id AS tag_id, t.dimension AS tag_dim, t.tag AS tag_value,
+		       t.confidence AS confidence, t.source AS source,
+		       tk.id AS task_id, tk.name AS task_name
+		FROM task_tag t
+		JOIN task tk ON tk.id = t.task_id
+		WHERE t.status = 'proposed' AND tk.project_id = ?
+		ORDER BY t.created_at ASC
+		LIMIT ?
+	`, projectID, limit).Scan(&rows)
+
+	if len(rows) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		parts = append(parts, fmt.Sprintf(
+			"- tag_id=%s  [%s] %s  conf=%.2f source=%s  on task %q (%s)",
+			r.TagID, r.TagDim, r.TagValue, r.Confidence, r.Source,
+			r.TaskName, r.TaskID,
+		))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// buildAnalyzeQueryText summarises the batch of raw experiences Analyze
+// is about to distill. The names (task_id + outcome tag) form a compact
+// topic signal for the bge encoder — enough to pull related patterns
+// without bloating the query beyond the model's useful range.
+func buildAnalyzeQueryText(exps []model.Experience) string {
+	if len(exps) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(exps))
+	for i, e := range exps {
+		if i >= 20 {
+			break // bge-zh handles ~512 tokens; keep query concise
+		}
+		// TaskID + outcome is the most discriminative pair for recall.
+		parts = append(parts, fmt.Sprintf("%s %s", e.TaskID, e.Outcome))
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
 
 // TriggerAnalyzeAgent creates and dispatches an Analyze Agent session for a project.
 func TriggerAnalyzeAgent(projectID string) {
@@ -75,12 +149,46 @@ func TriggerAnalyzeAgent(projectID string) {
 		policySummary += fmt.Sprintf("\n- [%s] %s: match=%s actions=%s", p.Status, p.Name, p.MatchCondition, p.Actions)
 	}
 
+	// Refinery knowledge artifacts via the scoped selector. Analyze gets the
+	// "analyzer" budget — the full-width view over all agent-facing kinds —
+	// because its job is to spot gaps/conflicts across the whole artifact
+	// set, not just find a few relevant ones. Query text is the titles of
+	// the raw experiences being shepherded, so semantic retrieval biases
+	// toward artifacts touching the same topics.
+	queryText := buildAnalyzeQueryText(rawExperiences)
+	injected := SelectArtifactsForInjection(ctxBg(), ArtifactQuery{
+		ProjectID: projectID,
+		Audience:  AudienceAnalyzer,
+		QueryText: queryText,
+	})
+	artifactSummary := ""
+	artifactIDs := make([]string, 0, len(injected))
+	for _, ia := range injected {
+		a := ia.Artifact
+		artifactSummary += fmt.Sprintf("\n- [%s] %s (score=%.2f via %s): %s",
+			a.Kind, a.Name, ia.Score, ia.Reason, a.Summary)
+		artifactIDs = append(artifactIDs, a.ID)
+	}
+	// Bump usage_count for each injected artifact (feedback loop for lifecycle)
+	if len(artifactIDs) > 0 {
+		model.DB.Model(&model.KnowledgeArtifact{}).Where("id IN ?", artifactIDs).
+			Update("usage_count", gorm.Expr("usage_count + 1"))
+		model.DB.Model(&model.KnowledgeArtifact{}).Where("id IN ?", artifactIDs).
+			Update("last_used_at", time.Now())
+	}
+
 	// Serialize experience IDs for the context
 	expIDs := make([]string, 0, len(rawExperiences))
 	for _, exp := range rawExperiences {
 		expIDs = append(expIDs, exp.ID)
 	}
 	expIDsJSON, _ := json.Marshal(expIDs)
+
+	// Surface pending proposed tags so Analyze can issue tag_reviews
+	// ("the rule said bugfix but the session turned out to be a refactor
+	// — reject"). We cap to the most recent 40 so prompts stay bounded;
+	// the remainder will be picked up in subsequent Analyze runs.
+	pendingTagsBlock := buildPendingTagsBlock(projectID, 40)
 
 	ctx := &agent.SessionContext{
 		InputContent: fmt.Sprintf(`## Raw Experiences (last %d)
@@ -92,14 +200,22 @@ func TriggerAnalyzeAgent(projectID string) {
 ## Current Policies
 %s
 
+## Refinery Knowledge Artifacts
+%s
+
+## Pending Proposed Tags (review via tag_reviews in analyze_output)
+%s
+
 ## Statistics
 - Total sessions: %d
 - L0 count: %d, L1 count: %d, L2 count: %d
 - Experience IDs: %s`,
-			len(rawExperiences), expSummary, skillSummary, policySummary,
+			len(rawExperiences), expSummary, skillSummary, policySummary, artifactSummary,
+			pendingTagsBlock,
 			totalSessions, l0Count, l1Count, l2Count, string(expIDsJSON)),
 		GlobalState: fmt.Sprintf("raw_experiences=%d, skills=%d, policies=%d",
 			len(rawExperiences), len(currentSkills), len(currentPolicies)),
+		InjectedArtifactIDs: artifactIDs,
 	}
 
 	session := agent.DefaultManager.CreateSession(agent.RoleAnalyze, projectID, ctx, "analyze_distill")
@@ -190,27 +306,78 @@ func HandleAnalyzeOutput(sessionID, projectID string, args map[string]interface{
 		log.Printf("[Analyze] Created %d policy suggestions", len(policies))
 	}
 
-	// 4. Apply tag suggestions
+	// 4. Apply tag suggestions — fresh tags Analyze wants to attach
+	//    based on real execution data. These land as `confirmed` with
+	//    source=analyze because Analyze is a stronger-than-rule signal
+	//    (it saw the actual session run). Idempotent dedup on
+	//    (task_id, dimension, tag) so repeated Analyze runs don't flood
+	//    the table with duplicates.
 	if tagSuggestions, ok := args["tag_suggestions"]; ok {
 		var suggestions []struct {
 			TaskID        string   `json:"task_id"`
 			SuggestedTags []string `json:"suggested_tags"`
+			Dimension     string   `json:"dimension,omitempty"` // optional, defaults to "category"
 		}
 		if b, err := json.Marshal(tagSuggestions); err == nil {
 			json.Unmarshal(b, &suggestions)
 		}
+		added := 0
 		for _, ts := range suggestions {
+			dimension := ts.Dimension
+			if dimension == "" {
+				dimension = "category"
+			}
 			for _, tag := range ts.SuggestedTags {
-				tt := model.TaskTag{
-					ID:     model.GenerateID("ttag"),
-					TaskID: ts.TaskID,
-					Tag:    tag,
-					Source: "analyze",
+				// Skip if the pair already exists in any state — a
+				// rejected tag should block Analyze from re-proposing
+				// it just like it blocks the rule engine.
+				var existing model.TaskTag
+				if err := model.DB.Where("task_id = ? AND dimension = ? AND tag = ?",
+					ts.TaskID, dimension, tag).First(&existing).Error; err == nil {
+					continue
 				}
-				model.DB.Create(&tt)
+				now := time.Now()
+				tt := model.TaskTag{
+					ID:         model.GenerateID("ttag"),
+					TaskID:     ts.TaskID,
+					Tag:        tag,
+					Dimension:  dimension,
+					Source:     "analyze",
+					Status:     "confirmed",
+					Confidence: 0.85,
+					ReviewedBy: "analyze/v1",
+					ReviewedAt: &now,
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				if err := model.DB.Create(&tt).Error; err == nil {
+					added++
+				}
 			}
 		}
-		log.Printf("[Analyze] Applied %d tag suggestions", len(suggestions))
+		log.Printf("[Analyze] Applied %d new tag suggestions (dedup skipped pre-existing)", added)
+	}
+
+	// 4b. Apply tag reviews — Analyze re-adjudicates RULE-proposed tags
+	//     that have real execution evidence backing (or contradicting)
+	//     them. Uses AnalyzeReviewTag which refuses to overwrite
+	//     human-touched rows, so Analyze can never undo a manual call.
+	if tagReviews, ok := args["tag_reviews"]; ok {
+		var reviews []struct {
+			TagID  string `json:"tag_id"`
+			Action string `json:"action"` // "confirm" | "reject"
+			Note   string `json:"note"`
+		}
+		if b, err := json.Marshal(tagReviews); err == nil {
+			json.Unmarshal(b, &reviews)
+		}
+		applied := 0
+		for _, r := range reviews {
+			if err := AnalyzeReviewTag(r.TagID, r.Action, r.Note); err == nil {
+				applied++
+			}
+		}
+		log.Printf("[Analyze] Applied %d/%d tag reviews", applied, len(reviews))
 	}
 
 	// 5. Log model suggestions (for human review)

@@ -40,6 +40,9 @@ func main() {
 	// Wire tool call handler to bridge opencode → service without import cycle
 	opencode.ToolCallHandler = service.HandleToolCallResult
 
+	// Wire session completion handler for refinery artifact feedback loop
+	opencode.SessionCompletionHandler = service.HandleSessionCompletion
+
 	// Wire broadcast handler for real-time SSE push from scheduler to frontend
 	opencode.BroadcastHandler = func(projectID, eventType string, payload map[string]interface{}) {
 		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
@@ -62,6 +65,8 @@ func main() {
 	authHandler := handler.NewAuthHandler()
 	projectHandler := handler.NewProjectHandler()
 	taskHandler := handler.NewTaskHandler()
+	tagHandler := handler.NewTagHandler()
+	metricsHandler := handler.NewMetricsHandler()
 	lockHandler := handler.NewFileLockHandler()
 	statusHandler := handler.NewStatusHandler()
 	dashboardHandler := handler.NewDashboardHandler()
@@ -81,6 +86,7 @@ func main() {
 	experienceHandler := handler.NewExperienceHandler()
 	skillHandler := handler.NewSkillHandler()
 	policyHandler := handler.NewPolicyHandler()
+	refineryHandler := handler.NewRefineryHandler()
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -100,6 +106,15 @@ func main() {
 		auth.POST("/task/release", taskHandler.Release)
 		auth.DELETE("/task/:task_id", taskHandler.Delete)
 		auth.GET("/task/list", taskHandler.List)
+
+		// Tag lifecycle — see @platform/backend/internal/handler/tag.go
+		auth.GET("/tag/list", tagHandler.List)
+		auth.POST("/tag/confirm", tagHandler.Confirm)
+		auth.POST("/tag/reject", tagHandler.Reject)
+		auth.POST("/tag/supersede", tagHandler.Supersede)
+
+		// Injection-signal metrics — see @platform/backend/internal/handler/metrics.go
+		auth.GET("/metrics/injection-signal", metricsHandler.InjectionSignal)
 
 		auth.POST("/filelock/acquire", lockHandler.Acquire)
 		auth.POST("/filelock/release", lockHandler.Release)
@@ -176,6 +191,13 @@ func main() {
 		auth.GET("/policy/:id", policyHandler.Get)
 		auth.POST("/policy/:id/activate", policyHandler.Activate)
 		auth.POST("/policy/:id/deactivate", policyHandler.Deactivate)
+
+		// Refinery pipeline (M1): multi-pass knowledge distillation.
+		auth.POST("/refinery/run", refineryHandler.Run)
+		auth.GET("/refinery/runs", refineryHandler.Runs)
+		auth.GET("/refinery/artifacts", refineryHandler.Artifacts)
+		auth.GET("/refinery/growth", refineryHandler.Growth)
+		auth.PUT("/refinery/artifacts/:id/status", refineryHandler.UpdateArtifactStatus)
 	}
 
 	internal := v1.Group("/internal")
@@ -198,9 +220,17 @@ func main() {
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("Server starting on %s", addr)
 
+	// Hook the bge-base-zh-v1.5 sidecar into the refinery pipeline so every
+	// artifact gets a semantic embedding at creation time. Safe to call
+	// before the sidecar is up — individual embed calls are best-effort
+	// and simply log + skip when the service is unreachable.
+	service.InstallEmbedderIntoRefinery(nil)
+
 	service.StartMaintainTimer()
 	service.StartHeartbeatChecker()
 	service.StartAnalyzeTimer()
+	service.StartRefineryTimer()
+	service.StartTaskEmbeddingBackfillTimer()
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
