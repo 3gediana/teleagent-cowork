@@ -95,6 +95,18 @@ interface AppState {
   setProject: (p: ProjectState) => void
   setTargetBlock: (b: 'direction' | 'milestone' | 'task') => void
   addChatMessage: (m: ChatMessage) => void
+  // upsertChatMessage replaces a message with the same id if one
+  // exists, or appends if not. Powers live typewriter streaming for
+  // native-runtime sessions (AGENT_TEXT_DELTA → repeated upsert with
+  // the same `stream-${session_id}` key). Opencode sessions never
+  // use this — their CHAT_UPDATE adds a fresh message via
+  // addChatMessage as before.
+  upsertChatMessage: (m: ChatMessage) => void
+  // removeChatMessage drops a message by id. Used to tear down the
+  // streaming placeholder when a terminal CHAT_UPDATE lands (the
+  // finalised message is added via addChatMessage; we don't want
+  // duplicates).
+  removeChatMessage: (id: string) => void
   clearChat: () => void
   setInputText: (t: string) => void
   setLoading: (l: boolean) => void
@@ -131,6 +143,16 @@ export const useAppStore = create<AppState>((set) => ({
   setProject: (p) => set({ project: p }),
   setTargetBlock: (b) => set({ targetBlock: b }),
   addChatMessage: (m) => set((s) => ({ chatMessages: [...s.chatMessages, m] })),
+  upsertChatMessage: (m) => set((s) => {
+    const idx = s.chatMessages.findIndex((x) => x.id === m.id)
+    if (idx === -1) return { chatMessages: [...s.chatMessages, m] }
+    const next = s.chatMessages.slice()
+    next[idx] = m
+    return { chatMessages: next }
+  }),
+  removeChatMessage: (id) => set((s) => ({
+    chatMessages: s.chatMessages.filter((x) => x.id !== id),
+  })),
   clearChat: () => set({ chatMessages: [], pendingChanges: [] }),
   setInputText: (t) => set({ inputText: t }),
   setLoading: (l) => set({ loading: l }),

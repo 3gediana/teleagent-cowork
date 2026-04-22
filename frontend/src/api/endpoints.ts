@@ -86,6 +86,60 @@ export const metricsApi = {
     api.get('/metrics/injection-signal', { params: { project_id: projectId, limit } }) as Promise<{ success: boolean; data: any }>,
 }
 
+// llmApi manages user-registered LLM endpoints (the replacement for
+// the opencode-hosted provider catalogue). Any authenticated agent
+// can List/Get; only humans may Create/Update/Delete/Test (server
+// enforces via IsHuman gate — UI just surfaces whatever error the
+// backend returns).
+//
+// Shape of an endpoint row (wire shape from the server):
+//   { id, name, format: 'openai'|'anthropic', base_url,
+//     api_key_redacted, api_key_set, models: ModelInfo[],
+//     default_model, status, registered, created_at, updated_at }
+export const llmApi = {
+  list: () =>
+    api.get('/llm/endpoints') as Promise<{ success: boolean; data: { endpoints: any[] } }>,
+
+  get: (id: string) =>
+    api.get(`/llm/endpoints/${id}`) as Promise<{ success: boolean; data: any }>,
+
+  create: (payload: {
+    name: string
+    format: 'openai' | 'anthropic'
+    base_url?: string
+    api_key: string
+    models?: any[]
+    default_model?: string
+    status?: 'active' | 'disabled'
+  }) =>
+    api.post('/llm/endpoints', payload) as Promise<{ success: boolean; data: any; warning?: string }>,
+
+  // On update, omit api_key to keep the existing secret (GET returns a
+  // redacted value, so the UI can't round-trip it safely). Send an
+  // empty base_url explicitly to reset to the provider's canonical URL.
+  update: (id: string, payload: {
+    name?: string
+    format?: 'openai' | 'anthropic'
+    base_url?: string
+    api_key?: string
+    models?: any[]
+    default_model?: string
+    status?: 'active' | 'disabled'
+  }) =>
+    api.put(`/llm/endpoints/${id}`, payload) as Promise<{ success: boolean; data: any; warning?: string }>,
+
+  // Delete is soft on the first call (status→disabled) and hard on the
+  // second. UI can distinguish via the `deleted` field ("soft" vs "hard")
+  // in the response if it wants to render a confirmation flow.
+  del: (id: string) =>
+    api.delete(`/llm/endpoints/${id}`) as Promise<{ success: boolean; data: { deleted: 'soft' | 'hard' } }>,
+
+  // Dispatches a 1-token probe request. Intended for the "Test connection"
+  // button in the endpoint editor — returns the provider error verbatim.
+  test: (id: string, model?: string) =>
+    api.post(`/llm/endpoints/${id}/test`, {}, { params: model ? { model } : {} }) as Promise<{ success: boolean; data: any }>,
+}
+
 export const changeApi = {
   list: (projectId: string, status?: string) =>
     api.get('/change/list', { params: { project_id: projectId, status } }) as Promise<{ success: boolean; data: any }>,

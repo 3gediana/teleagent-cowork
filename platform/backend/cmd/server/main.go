@@ -8,9 +8,11 @@ import (
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/handler"
+	"github.com/a3c/platform/internal/llm"
 	"github.com/a3c/platform/internal/middleware"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/opencode"
+	"github.com/a3c/platform/internal/runner"
 	"github.com/a3c/platform/internal/service"
 )
 
@@ -28,11 +30,36 @@ func main() {
 
 	opencode.InitScheduler(cfg.OpenCode)
 
+	// LLM endpoint registry — load every user-registered endpoint
+	// from the DB before any agent dispatches, so the runtime has
+	// models available as soon as it comes up. Empty registry is
+	// fine; handler routes let operators register on the fly.
+	llm.LoadAll()
+
 	service.InitDataPath(cfg.DataDir)
 
-	agent.RegisterDispatcher(func(session *agent.Session) error {
+	// Register dispatcher. The runner package routes by RoleOverride:
+	//   * ModelProvider starts with "llm_" → native runner (our code)
+	//   * anything else                    → opencode (legacy path)
+	// Keeping opencode behind a fallback lets operators migrate
+	// roles one at a time by re-assigning models in the dashboard.
+	runner.OpencodeFallback = func(session *agent.Session) error {
 		return opencode.DefaultScheduler.Dispatch(session)
-	})
+	}
+	// Upgrade from DefaultRegistryBuilder (builtin-only) to the
+	// production builder that also exposes platform tools per role.
+	runner.NativeRegistryBuilder = runner.PlatformRegistryBuilder
+	// Route platform tool calls (audit_output, create_task, ...)
+	// into the same service handler opencode uses, so both runtimes
+	// produce identical side effects on the DB + change pipeline.
+	runner.PlatformToolSink = service.HandleToolCallResult
+	// Stream runner events (CHAT_UPDATE / TOOL_CALL / AGENT_DONE / ...)
+	// to every SSE client subscribed to the session's project so the
+	// dashboard lights up the same way it does for opencode sessions.
+	runner.StreamEmitter = func(projectID, eventType string, payload map[string]interface{}) {
+		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
+	}
+	agent.RegisterDispatcher(runner.Dispatch)
 
 	// Wire dashboard session callback to bridge service → handler without import cycle
 	service.DashboardSessionCallback = handler.SetDashboardSessionForProject
@@ -67,6 +94,7 @@ func main() {
 	taskHandler := handler.NewTaskHandler()
 	tagHandler := handler.NewTagHandler()
 	metricsHandler := handler.NewMetricsHandler()
+	llmEndpointHandler := handler.NewLLMEndpointHandler()
 	lockHandler := handler.NewFileLockHandler()
 	statusHandler := handler.NewStatusHandler()
 	dashboardHandler := handler.NewDashboardHandler()
@@ -115,6 +143,17 @@ func main() {
 
 		// Injection-signal metrics — see @platform/backend/internal/handler/metrics.go
 		auth.GET("/metrics/injection-signal", metricsHandler.InjectionSignal)
+
+		// User-registered LLM endpoints (PR 10 — opencode replacement).
+		// List/Get are open to any authenticated agent so MCP clients
+		// can introspect; mutations + Test are human-only (enforced
+		// inside the handler via requireHuman).
+		auth.GET("/llm/endpoints", llmEndpointHandler.List)
+		auth.GET("/llm/endpoints/:id", llmEndpointHandler.Get)
+		auth.POST("/llm/endpoints", llmEndpointHandler.Create)
+		auth.PUT("/llm/endpoints/:id", llmEndpointHandler.Update)
+		auth.DELETE("/llm/endpoints/:id", llmEndpointHandler.Delete)
+		auth.POST("/llm/endpoints/:id/test", llmEndpointHandler.Test)
 
 		auth.POST("/filelock/acquire", lockHandler.Acquire)
 		auth.POST("/filelock/release", lockHandler.Release)

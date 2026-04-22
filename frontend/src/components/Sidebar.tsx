@@ -10,6 +10,7 @@ const navItems = [
   { path: '/knowledge', label: 'Knowledge', icon: '🧠' },
   { path: '/tags', label: 'Tag Review', icon: '🏷️' },
   { path: '/activity', label: 'Activity', icon: '📊' },
+  { path: '/llm', label: 'LLM Endpoints', icon: '🔌' },
   { path: '/settings', label: 'Settings', icon: '⚙️' },
 ]
 

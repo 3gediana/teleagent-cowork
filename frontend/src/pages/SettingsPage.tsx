@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { projectApi, authApi, roleApi, providerApi } from '../api/endpoints'
+import { projectApi, authApi, roleApi, providerApi, llmApi } from '../api/endpoints'
 import { Modal, Input, Select, Button, SuccessResult, useModal, Textarea } from '../components/Modal'
 import { useAppStore } from '../stores/appStore'
 
@@ -119,10 +119,42 @@ export default function SettingsPage() {
     roleApi.list().then((res) => {
       if (res.success) setRoles(res.data || [])
     })
-    providerApi.list().then((res) => {
-      if (res.success && res.data) {
-        setModelOptions(res.data.models || [])
-      }
+    // Merge two sources of truth:
+    //   1. opencode-hosted provider catalogue (`providerApi.list()`) —
+    //      the legacy path, still serves every agent until Phase 1
+    //      native runtime migration completes.
+    //   2. user-registered LLM endpoints (`llmApi.list()`) — the new
+    //      path from PR 10. These already live in the native Registry;
+    //      assigning one to a role persists (provider=endpoint_id,
+    //      model=model_id), and the backend dispatcher routes to the
+    //      native adapter when provider_id starts with "llm_".
+    // Both feeds produce the same ModelOption row shape, so the
+    // existing picker UI works unchanged. The `source` tag lets us
+    // badge rows so operators can tell the two apart.
+    Promise.all([
+      providerApi.list().then((res) => (res.success && res.data ? res.data.models || [] : [])),
+      llmApi.list().then((res) => {
+        if (!res.success) return []
+        const out: any[] = []
+        for (const ep of res.data?.endpoints || []) {
+          if (ep.status !== 'active') continue
+          for (const m of ep.models || []) {
+            out.push({
+              provider_id: ep.id,
+              provider_name: ep.name,
+              model_id: m.id,
+              model_name: m.name || m.id,
+              format: ep.format,
+              source: 'llm',
+            })
+          }
+        }
+        return out
+      }).catch(() => []),
+    ]).then(([opencode, llm]) => {
+      // Prepend user endpoints so they surface first — operators who
+      // registered their own endpoint usually want to use it.
+      setModelOptions([...llm, ...opencode.map((o: any) => ({ ...o, source: 'opencode' }))])
     })
   }, [])
 
@@ -145,8 +177,13 @@ export default function SettingsPage() {
            <span className="p-1.5 bg-purple-100 text-purple-600 rounded-lg">🧠</span> Agent Model Configuration
         </h2>
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="p-6 border-b border-slate-100">
+          <div className="p-6 border-b border-slate-100 space-y-1">
             <p className="text-slate-500 text-sm">Choose which LLM model each platform agent uses. Overrides are persisted across restarts.</p>
+            <p className="text-slate-400 text-xs">
+              Models tagged <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 border border-emerald-300 rounded px-1 py-[1px]">🔌 native</span>
+              {' '}come from your{' '}
+              <a href="/llm" className="text-blue-600 hover:underline">user-registered endpoints</a>; the rest are served via the opencode provider catalogue.
+            </p>
           </div>
           <div className="divide-y divide-slate-50">
             {roles.map(r => {
@@ -220,7 +257,15 @@ export default function SettingsPage() {
                                   setSearchQuery('')
                                 }}
                               >
-                                <span className="truncate">
+                                <span className="truncate flex items-center gap-2">
+                                  {m.source === 'llm' && (
+                                    <span
+                                      className="text-[9px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 border border-emerald-300 rounded px-1 py-[1px]"
+                                      title={`User-registered ${m.format} endpoint — routed through native runtime`}
+                                    >
+                                      🔌 {m.format}
+                                    </span>
+                                  )}
                                   <span className="font-medium">{m.provider_name}</span>
                                   <span className="text-slate-400 mx-1">/</span>
                                   <span>{m.model_name}</span>

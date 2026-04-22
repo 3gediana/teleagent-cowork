@@ -10,6 +10,7 @@ import PRPage from './pages/PRPage'
 import ChiefPage from './pages/ChiefPage'
 import KnowledgePage from './pages/KnowledgePage'
 import TagReviewPage from './pages/TagReviewPage'
+import LLMEndpointsPage from './pages/LLMEndpointsPage'
 import { Layout } from './components/Layout'
 import LoginPanel from './components/LoginPanel'
 
@@ -36,6 +37,7 @@ function AuthenticatedApp() {
         <Route path="/chief" element={<ChiefPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/tags" element={<TagReviewPage />} />
+        <Route path="/llm" element={<LLMEndpointsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
