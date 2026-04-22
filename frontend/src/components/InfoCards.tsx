@@ -85,9 +85,24 @@ export function AgentsCard() {
       </div>
       <div className="flex flex-wrap gap-2 overflow-y-auto custom-scrollbar content-start">
         {project.agents.map((a) => (
-          <div key={a.id} className="flex items-center gap-2 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 shadow-sm">
+          <div
+            key={a.id}
+            className={`flex items-center gap-2 border rounded-lg px-3 py-2 shadow-sm ${
+              a.is_platform_hosted
+                ? 'bg-amber-50 border-amber-200'
+                : 'bg-slate-50 border-slate-100'
+            }`}
+          >
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
             <span className="text-sm font-medium text-slate-700">{a.name}</span>
+            {a.is_platform_hosted && (
+              <span
+                title="Spawned by the platform agent pool"
+                className="text-[9px] font-marker uppercase tracking-widest bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded"
+              >
+                🏠 hosted
+              </span>
+            )}
             {a.current_task && (
               <span className="text-xs text-slate-500 truncate max-w-32">({a.current_task})</span>
             )}

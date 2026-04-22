@@ -43,6 +43,19 @@ type Agent struct {
 	LastHeartbeat    *time.Time `json:"last_heartbeat"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
+
+	// IsPlatformHosted marks agents spawned by the platform itself —
+	// opencode subprocesses the platform started, auto-injected with
+	// skills and MCP wiring, then treats like any other client agent
+	// claiming tasks. The pool manager sets this; humans registering
+	// via /agent/register always get false. Set at spawn and never
+	// mutated afterwards, so the UI can safely show the "platform
+	// agent" chip based purely on this field.
+	IsPlatformHosted bool   `gorm:"default:false;index" json:"is_platform_hosted"`
+	// PoolInstanceID is the opaque id used by the pool manager to
+	// track subprocess lifecycle (PID, ports, working dir, etc.).
+	// Empty for human-registered / external-client agents.
+	PoolInstanceID   string `gorm:"size:64;index" json:"pool_instance_id"`
 }
 
 func (Agent) TableName() string { return "agent" }

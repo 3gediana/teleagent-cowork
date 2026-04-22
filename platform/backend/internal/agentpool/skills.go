@@ -1,0 +1,229 @@
+package agentpool
+
+// Skill injection at spawn time.
+//
+// Every platform-hosted agent starts with the same baseline skill
+// set — the "how to use this platform" skill from client/skill, plus
+// every SkillCandidate currently active in the DB. This gives the
+// freshly-spawned agent instant fluency: it knows about the A3C MCP
+// tools (task.claim / change.submit / PR flow) without the operator
+// manually symlinking anything.
+//
+// opencode reads skills from `<workdir>/.claude/skills/*/SKILL.md`
+// — the same convention Claude Code uses. We create one subfolder
+// per skill, with a SKILL.md inside. opencode's startup scan picks
+// them up automatically, no extra config.
+//
+// The baseline "using-a3c-platform" skill lives in the repo under
+// client/skill/. We look for it relative to the current working
+// directory (where the platform binary runs) and copy it if found;
+// absence is not fatal (the DB-backed skills still load).
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/a3c/platform/internal/model"
+)
+
+// materialiseSkills writes every active skill into
+// <workDir>/.claude/skills/<slug>/SKILL.md. Returns the list of skill
+// names that were materialised (for telemetry / UI).
+//
+// Best-effort per skill — if one fails to write, we log and continue.
+// Missing a single skill shouldn't brick the whole spawn.
+func materialiseSkills(workDir string) ([]string, error) {
+	skillsDir := filepath.Join(workDir, ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir skills dir: %w", err)
+	}
+
+	injected := []string{}
+
+	// 1. The baseline platform skill — copied from client/skill if
+	// available on this machine. Finding it is best-effort: we walk
+	// up from cwd looking for `client/skill/using-a3c-platform` up
+	// to 3 levels, since the server is usually launched from
+	// platform/backend/.
+	if name, ok := copyBaselineSkill(skillsDir); ok {
+		injected = append(injected, name)
+	}
+
+	// 2. Every active SkillCandidate from the DB. These are the
+	// skills the Analyze agent has distilled + humans approved.
+	// DB unset (e.g. in unit tests) = skip silently; the baseline
+	// skill is enough for a pool agent to come up and claim tasks.
+	if model.DB == nil {
+		return injected, nil
+	}
+	var skills []model.SkillCandidate
+	if err := model.DB.Where("status = ?", "active").Find(&skills).Error; err != nil {
+		// DB read failure is not fatal — log and keep going.
+		return injected, nil
+	}
+	for _, s := range skills {
+		slug := slugify(s.Name)
+		if slug == "" {
+			continue
+		}
+		dir := filepath.Join(skillsDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			continue
+		}
+		md := renderSkillMarkdown(s)
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
+			continue
+		}
+		injected = append(injected, slug)
+	}
+
+	return injected, nil
+}
+
+// copyBaselineSkill walks up from cwd looking for
+// client/skill/using-a3c-platform and copies its SKILL.md into the
+// instance's skills dir. Returns the injected skill's folder name +
+// whether anything was copied.
+func copyBaselineSkill(skillsDir string) (string, bool) {
+	candidates := []string{
+		filepath.Join("client", "skill", "using-a3c-platform"),
+		filepath.Join("..", "client", "skill", "using-a3c-platform"),
+		filepath.Join("..", "..", "client", "skill", "using-a3c-platform"),
+		filepath.Join("..", "..", "..", "client", "skill", "using-a3c-platform"),
+	}
+	src := ""
+	for _, c := range candidates {
+		if _, err := os.Stat(filepath.Join(c, "SKILL.md")); err == nil {
+			src = c
+			break
+		}
+	}
+	if src == "" {
+		return "", false
+	}
+	dst := filepath.Join(skillsDir, "using-a3c-platform")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return "", false
+	}
+	if err := copyFile(filepath.Join(src, "SKILL.md"), filepath.Join(dst, "SKILL.md")); err != nil {
+		return "", false
+	}
+	// Copy references/ subdir if present — the skill links to it.
+	refs := filepath.Join(src, "references")
+	if info, err := os.Stat(refs); err == nil && info.IsDir() {
+		_ = copyDir(refs, filepath.Join(dst, "references"))
+	}
+	return "using-a3c-platform", true
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := copyDir(s, d); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := copyFile(s, d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// slugify converts a skill name into a filesystem-safe folder name.
+// Keeps ASCII alnum + hyphen; collapses runs of other characters to
+// single dashes. Empty result means "don't materialise this skill".
+func slugify(name string) string {
+	var sb strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			sb.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash && sb.Len() > 0 {
+				sb.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+	s := strings.TrimRight(sb.String(), "-")
+	if len(s) > 60 {
+		s = s[:60]
+	}
+	return s
+}
+
+// renderSkillMarkdown turns a SkillCandidate DB row into a SKILL.md
+// conforming to the Claude/opencode skill format: YAML frontmatter
+// with name + description, then the body. Keep it ≤ 200 lines.
+func renderSkillMarkdown(s model.SkillCandidate) string {
+	desc := s.Action
+	if desc == "" {
+		desc = fmt.Sprintf("%s (%s) — auto-loaded from platform skill library", s.Name, s.Type)
+	}
+	// YAML-safe: strip embedded quotes from description.
+	desc = strings.ReplaceAll(desc, "\"", "'")
+
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("name: %s\n", s.Name))
+	sb.WriteString(fmt.Sprintf("description: \"%s\"\n", desc))
+	sb.WriteString(fmt.Sprintf("source: a3c-platform/skill_candidate/%s\n", s.ID))
+	sb.WriteString(fmt.Sprintf("type: %s\n", s.Type))
+	sb.WriteString("---\n\n")
+
+	sb.WriteString(fmt.Sprintf("# %s\n\n", s.Name))
+	if s.Precondition != "" {
+		sb.WriteString("## When to apply\n")
+		sb.WriteString(s.Precondition)
+		sb.WriteString("\n\n")
+	}
+	if s.Action != "" {
+		sb.WriteString("## What to do\n")
+		sb.WriteString(s.Action)
+		sb.WriteString("\n\n")
+	}
+	if s.Prohibition != "" {
+		sb.WriteString("## What NOT to do\n")
+		sb.WriteString(s.Prohibition)
+		sb.WriteString("\n\n")
+	}
+	if s.Evidence != "" {
+		sb.WriteString("## Evidence\n")
+		sb.WriteString(s.Evidence)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("---\n")
+	sb.WriteString("_Auto-generated by the A3C platform agent pool at spawn time. Updates propagate on next spawn._\n")
+	return sb.String()
+}

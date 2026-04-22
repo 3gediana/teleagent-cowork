@@ -249,6 +249,39 @@ export const policyApi = {
     api.post('/policy/' + id + '/deactivate') as Promise<{ success: boolean; data: any }>,
 }
 
+// agentPoolApi drives the platform-hosted agent pool — the subsystem
+// that lets the platform spawn its own opencode subprocesses on the
+// host, auto-inject skills, and treat them like normal client
+// agents. See @platform/backend/internal/agentpool/pool.go for the
+// backend design. Only humans can spawn/shutdown/purge (server
+// enforces via IsHuman gate); List is open to any authenticated agent
+// so the dashboard can render the pool state on login.
+export type PoolInstance = {
+  id: string
+  agent_id: string
+  agent_name: string
+  role?: string
+  project_id?: string
+  port: number
+  pid: number
+  status: 'starting' | 'ready' | 'crashed' | 'stopping' | 'stopped'
+  started_at: string
+  skills_injected?: string[]
+  working_dir?: string
+  last_error?: string
+}
+
+export const agentPoolApi = {
+  list: () =>
+    api.get('/agentpool/list') as Promise<{ success: boolean; data: { instances: PoolInstance[] } }>,
+  spawn: (payload: { project_id?: string; role_hint?: string; name?: string }) =>
+    api.post('/agentpool/spawn', payload) as Promise<{ success: boolean; data: PoolInstance; error?: any }>,
+  shutdown: (instanceId: string) =>
+    api.post('/agentpool/shutdown', { instance_id: instanceId }) as Promise<{ success: boolean; data: any }>,
+  purge: (instanceId: string) =>
+    api.post('/agentpool/purge', { instance_id: instanceId }) as Promise<{ success: boolean; data: any }>,
+}
+
 export const refineryApi = {
   run: (projectId: string, lookbackHours?: number) =>
     api.post('/refinery/run', { project_id: projectId, lookback_hours: lookbackHours }) as Promise<{ success: boolean; data: { run_id: string; status: string } }>,

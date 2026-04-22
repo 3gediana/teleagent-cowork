@@ -32,6 +32,10 @@ export interface ApiAgent {
   name: string
   status: string
   current_task: string | null
+  // Set by the dashboard handler when the row has IsPlatformHosted=true
+  // — agents the platform spawned itself via the agent pool. Used by
+  // AgentsCard to render the "🏠 hosted" chip.
+  is_platform_hosted?: boolean
 }
 
 export interface ApiChange {
@@ -55,4 +59,5 @@ export interface DashboardState {
   tasks: ApiTask[]
   locks: ApiLock[]
   agents: ApiAgent[]
+  auto_mode?: boolean
 }

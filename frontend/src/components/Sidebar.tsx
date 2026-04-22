@@ -7,6 +7,7 @@ const navItems = [
   { path: '/submissions', label: 'Submissions', icon: '🚀' },
   { path: '/prs', label: 'PRs', icon: '🔀' },
   { path: '/chief', label: 'Chief', icon: '🤖' },
+  { path: '/pool', label: 'Agent Pool', icon: '🏡' },
   { path: '/knowledge', label: 'Knowledge', icon: '🧠' },
   { path: '/tags', label: 'Tag Review', icon: '🏷️' },
   { path: '/activity', label: 'Activity', icon: '📊' },

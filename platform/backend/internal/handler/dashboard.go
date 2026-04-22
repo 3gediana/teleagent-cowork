@@ -74,10 +74,11 @@ func (h *DashboardHandler) GetState(c *gin.Context) {
 			currentTask = &claimedTasks[0].ID
 		}
 		agentList = append(agentList, gin.H{
-			"id":           a.ID,
-			"name":         a.Name,
-			"status":       a.Status,
-			"current_task": currentTask,
+			"id":                 a.ID,
+			"name":               a.Name,
+			"status":             a.Status,
+			"current_task":       currentTask,
+			"is_platform_hosted": a.IsPlatformHosted,
 		})
 	}
 
@@ -111,10 +112,11 @@ func (h *DashboardHandler) GetState(c *gin.Context) {
 	}
 
 	data := gin.H{
-		"version": "v1.0",
-		"tasks":   taskList,
-		"locks":   lockList,
-		"agents":  agentList,
+		"version":   "v1.0",
+		"tasks":     taskList,
+		"locks":     lockList,
+		"agents":    agentList,
+		"auto_mode": project.AutoMode,
 	}
 	if direction != nil {
 		data["direction"] = direction.Content

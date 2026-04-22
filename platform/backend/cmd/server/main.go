@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agent"
+	"github.com/a3c/platform/internal/agentpool"
 	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/handler"
 	"github.com/a3c/platform/internal/llm"
@@ -121,6 +122,19 @@ func main() {
 	skillHandler := handler.NewSkillHandler()
 	policyHandler := handler.NewPolicyHandler()
 	refineryHandler := handler.NewRefineryHandler()
+	agentPoolHandler := handler.NewAgentPoolHandler()
+
+	// Platform-hosted agent pool — spawns opencode subprocesses on
+	// the same host, auto-injects skills from the DB + baseline
+	// client/skill/using-a3c-platform, and treats them like normal
+	// client agents. See internal/agentpool/pool.go. The pool is
+	// opt-in: if no handler ever calls Spawn, zero subprocesses
+	// are created.
+	poolManager := agentpool.NewManager(agentpool.ManagerConfig{
+		Root:        fmt.Sprintf("%s/pool", cfg.DataDir),
+		PlatformURL: fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+	}, nil)
+	agentpool.SetDefault(poolManager)
 
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
@@ -243,6 +257,14 @@ func main() {
 		auth.GET("/refinery/artifacts", refineryHandler.Artifacts)
 		auth.GET("/refinery/growth", refineryHandler.Growth)
 		auth.PUT("/refinery/artifacts/:id/status", refineryHandler.UpdateArtifactStatus)
+
+		// Platform-hosted agent pool (spawn opencode subprocesses on
+		// the same host). Human-gated — only the dashboard operator
+		// can bring pool agents up / tear them down.
+		auth.GET("/agentpool/list", agentPoolHandler.List)
+		auth.POST("/agentpool/spawn", agentPoolHandler.Spawn)
+		auth.POST("/agentpool/shutdown", agentPoolHandler.Shutdown)
+		auth.POST("/agentpool/purge", agentPoolHandler.Purge)
 	}
 
 	internal := v1.Group("/internal")
