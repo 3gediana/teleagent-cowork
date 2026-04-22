@@ -201,18 +201,21 @@ func main() {
 	check(sess.Status == "completed", fmt.Sprintf("session.Status == completed (got %q)", sess.Status))
 
 	// L0 audit outcome: service.approveChange flips Status to "approved"
-	// and auto-completes the linked task. AuditLevel is set by
-	// ProcessAuditOutput itself after approveChange returns, but only
-	// persists when the ambient BroadcastEvent -> Redis call doesn't
-	// panic — which it does in this smoke because Redis isn't wired.
-	// We accept that by asserting Status alone; the audit-level
-	// persistence is covered in service's own unit tests.
+	// and auto-completes the linked task. ProcessAuditOutput sets
+	// AuditLevel after approveChange returns — both persist cleanly
+	// now that service/broadcast.go nil-guards Redis (previously
+	// the absent RDB panicked partway through and lost AuditLevel).
 	var postChange model.Change
 	db.Where("id = ?", changeID).First(&postChange)
 	check(postChange.Status == "approved",
 		fmt.Sprintf("change.Status == approved (got %q)", postChange.Status))
 	check(postChange.ReviewedAt != nil,
 		"change.ReviewedAt was populated by the audit")
+	gotLvl := ""
+	if postChange.AuditLevel != nil {
+		gotLvl = *postChange.AuditLevel
+	}
+	check(gotLvl == "L0", fmt.Sprintf("change.AuditLevel == L0 (got %q)", gotLvl))
 
 	var traces []model.ToolCallTrace
 	db.Where("session_id = ?", sessionID).Find(&traces)

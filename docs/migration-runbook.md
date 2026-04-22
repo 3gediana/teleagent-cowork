@@ -108,14 +108,31 @@ Leave it running for 24 hours with real traffic. During this window:
 
 ## Step 5 — Diff against opencode
 
-Pick 3–5 representative tasks the role handled in the last week. Run
-each task on both runtimes (e.g. flip the override back to opencode
-for one project, keep native on another). Eyeball:
+Use the bundled `shadowdiff` CLI to compare populations of sessions
+across runtimes without hand-eyeballing the DB:
 
-- **Audit roles**: does the verdict (L0/L1/L2) and issue list match?
-  If native is more strict/lenient, decide if that's desirable.
+```sh
+# Compare the last 20 audit_1 sessions on this project
+cd platform/backend
+go run ./cmd/shadowdiff --project $PROJECT_ID --role audit_1 --limit 20
+
+# Full-fidelity pair diff between one native session and one opencode
+go run ./cmd/shadowdiff --session-a sess_native_abc --session-b sess_legacy_xyz --show-output
+```
+
+Population mode prints:
+- Per-side session table (id, status, model, duration, first 200 chars of Output).
+- Aggregate completion rate + avg `duration_ms`.
+- A `⚠` line when native's completion rate is >10pp below opencode's
+  (the runbook's red-flag signal). A `✓` when native beats it.
+
+Pair mode surfaces every differing field with a `*` marker, then
+prints both `Output` fields and any `InjectedArtifacts` JSON
+side-by-side. Use it to diagnose one-off regressions.
+
+Eyeballing that shadowdiff can't do:
 - **Write roles (fix/maintain)**: are the resulting edits functionally
-  equivalent? Use `git diff` to compare.
+  equivalent? Use `git diff` between the two runtime's branches.
 - **Tool call shape**: in the dashboard's Activity feed, does the
   native session emit the same TOOL_CALL events opencode did?
 

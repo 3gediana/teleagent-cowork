@@ -41,12 +41,29 @@ type PlatformTool struct {
 
 func (p *PlatformTool) Name() string { return p.Def.Name }
 
-func (p *PlatformTool) Description() string { return p.Def.Description }
+// Description returns the full tool description the LLM sees.
+// Concatenates the base description with an optional ErrorGuidance
+// paragraph — keeping them separate in the struct lets the dashboard
+// render them as distinct sections while still presenting a single
+// blob to the model (which is what Anthropic and OpenAI both
+// consume).
+func (p *PlatformTool) Description() string {
+	if p.Def.ErrorGuidance == "" {
+		return p.Def.Description
+	}
+	return p.Def.Description + "\n\nError handling: " + p.Def.ErrorGuidance
+}
 
 // InputSchema synthesises a JSON Schema from agent.ToolParam list.
 // We deliberately translate every platform param to a "type: string"
 // (for string) or the declared type (array, object, boolean,
 // integer). Required fields land in the schema's `required` array.
+//
+// Top-level `examples` surface the ToolDefinition.Examples list to
+// providers that read the field (Anthropic Messages API reads it;
+// OpenAI-compat providers generally ignore unknown schema keys, which
+// is fine — the examples still live in the body and don't harm
+// validation).
 func (p *PlatformTool) InputSchema() map[string]any {
 	props := map[string]any{}
 	required := make([]string, 0, len(p.Def.Parameters))
@@ -56,9 +73,9 @@ func (p *PlatformTool) InputSchema() map[string]any {
 			"description": param.Description,
 		}
 		// Arrays need an `items` schema or most providers will reject
-		// the tool def. We default to string items since the existing
-		// platform tools (e.g. audit_output.issues) are JSON arrays
-		// that the model can freely shape — the handler does the
+		// the tool def. We default to object items since the existing
+		// platform tools (e.g. audit_output.issues) are arrays of
+		// structured records; the handler does the per-field
 		// validation.
 		if param.Type == "array" {
 			prop["items"] = map[string]any{"type": "object"}
@@ -74,6 +91,13 @@ func (p *PlatformTool) InputSchema() map[string]any {
 	}
 	if len(required) > 0 {
 		schema["required"] = required
+	}
+	if len(p.Def.Examples) > 0 {
+		// Clone so the schema consumer can't mutate the shared
+		// PlatformTools table by accident.
+		examples := make([]map[string]any, len(p.Def.Examples))
+		copy(examples, p.Def.Examples)
+		schema["examples"] = examples
 	}
 	return schema
 }

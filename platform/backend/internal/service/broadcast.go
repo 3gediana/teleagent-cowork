@@ -86,18 +86,25 @@ func (m *SSEManagerStruct) BroadcastToProject(projectID string, eventType string
 	jsonData, _ := json.Marshal(msg)
 	msgKey := "a3c:broadcast:" + projectID
 
-	ctx := context.Background()
-	model.RDB.LPush(ctx, msgKey, string(jsonData))
-	model.RDB.LTrim(ctx, msgKey, 0, 99)
-	model.RDB.Expire(ctx, msgKey, 24*time.Hour)
+	// Redis is used for cross-process replay (resume-from-last-id,
+	// multi-replica broadcast). When RDB is nil — dev boxes without
+	// Redis, unit / e2e tests, offline tools — skip the persistence
+	// path and fall through to the in-memory fanout so SSE still
+	// works locally. Production deployments always have RDB wired.
+	if model.RDB != nil {
+		ctx := context.Background()
+		model.RDB.LPush(ctx, msgKey, string(jsonData))
+		model.RDB.LTrim(ctx, msgKey, 0, 99)
+		model.RDB.Expire(ctx, msgKey, 24*time.Hour)
 
-	// Ack key TTL: the actual key is created later by SAdd in GetUnackedBroadcasts
-	// or AckAllBroadcasts; each SAdd call resets the TTL so the set eventually
-	// expires when no more agents acknowledge. The Expire here is harmless if
-	// the key doesn't exist yet.
-	ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
-	model.RDB.Expire(ctx, ackKey, 24*time.Hour)
-	_ = ackKey
+		// Ack key TTL: the actual key is created later by SAdd in GetUnackedBroadcasts
+		// or AckAllBroadcasts; each SAdd call resets the TTL so the set eventually
+		// expires when no more agents acknowledge. The Expire here is harmless if
+		// the key doesn't exist yet.
+		ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
+		model.RDB.Expire(ctx, ackKey, 24*time.Hour)
+		_ = ackKey
+	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -112,6 +119,9 @@ func (m *SSEManagerStruct) BroadcastToProject(projectID string, eventType string
 }
 
 func (m *SSEManagerStruct) GetRecentBroadcasts(projectID string, limit int64) []SSEMessage {
+	if model.RDB == nil {
+		return nil
+	}
 	key := "a3c:broadcast:" + projectID
 	ctx := context.Background()
 	data, err := model.RDB.LRange(ctx, key, 0, limit-1).Result()
@@ -133,6 +143,9 @@ func (m *SSEManagerStruct) GetRecentBroadcasts(projectID string, limit int64) []
 // returns the last few messages as a cold-start snapshot. Caller can use
 // this for SSE resume-from-id semantics.
 func (m *SSEManagerStruct) GetRecentSince(projectID string, lastEventID string) []SSEMessage {
+	if model.RDB == nil {
+		return nil
+	}
 	key := "a3c:broadcast:" + projectID
 	ctx := context.Background()
 	data, err := model.RDB.LRange(ctx, key, 0, 99).Result()
@@ -177,6 +190,9 @@ func (m *SSEManagerStruct) GetRecentSince(projectID string, lastEventID string) 
 }
 
 func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string) []SSEMessage {
+	if model.RDB == nil {
+		return nil
+	}
 	key := "a3c:broadcast:" + projectID
 	ctx := context.Background()
 	data, err := model.RDB.LRange(ctx, key, 0, 49).Result()
@@ -239,6 +255,11 @@ func BroadcastEvent(projectID string, eventType string, payload gin.H, targetAge
 // BroadcastDirected sends a message directly to a specific agent's Redis queue
 // The MCP poller for that agent will pick it up and inject it into the OpenCode session
 func BroadcastDirected(agentID string, eventType string, payload gin.H) {
+	if model.RDB == nil {
+		// Directed queues are Redis-only — no in-memory fallback. In test
+		// contexts without Redis we silently drop.
+		return
+	}
 	ctx := context.Background()
 	key := fmt.Sprintf("a3c:directed:%s", agentID)
 
@@ -261,6 +282,9 @@ func BroadcastDirected(agentID string, eventType string, payload gin.H) {
 
 // GetDirectedMessages retrieves and removes all directed messages for a specific agent
 func GetDirectedMessages(agentID interface{}) []gin.H {
+	if model.RDB == nil {
+		return nil
+	}
 	ctx := context.Background()
 	idStr := fmt.Sprintf("%v", agentID)
 	key := fmt.Sprintf("a3c:directed:%s", idStr)
@@ -286,6 +310,9 @@ func GetDirectedMessages(agentID interface{}) []gin.H {
 }
 
 func (m *SSEManagerStruct) AckAllBroadcasts(projectID string, agentID string) {
+	if model.RDB == nil {
+		return
+	}
 	key := "a3c:broadcast:" + projectID
 	ctx := context.Background()
 	data, err := model.RDB.LRange(ctx, key, 0, 49).Result()

@@ -186,3 +186,77 @@ func TestPlatformRegistryBuilder_MaintainRoleGetsWritingTools(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformTool_ExamplesLandInSchema(t *testing.T) {
+	// Every platform tool ships with >=1 example after the Phase 3
+	// schema enhancement. Regression guard: if someone adds a new
+	// tool without examples, this fails loudly.
+	for name, def := range agent.PlatformTools {
+		if len(def.Examples) == 0 {
+			t.Errorf("tool %q has no examples; add at least one for small-model reliability", name)
+			continue
+		}
+		tool := &PlatformTool{Def: def}
+		schema := tool.InputSchema()
+		got, ok := schema["examples"].([]map[string]any)
+		if !ok {
+			t.Errorf("tool %q schema.examples wrong type: %T", name, schema["examples"])
+			continue
+		}
+		if len(got) != len(def.Examples) {
+			t.Errorf("tool %q schema examples count: got %d, want %d", name, len(got), len(def.Examples))
+		}
+	}
+}
+
+func TestPlatformTool_DescriptionIncludesErrorGuidance(t *testing.T) {
+	// audit_output's ErrorGuidance tells the model what to do when
+	// the diff is unrelated. The LLM must see this content in the
+	// description it receives.
+	def := agent.PlatformTools["audit_output"]
+	if def.ErrorGuidance == "" {
+		t.Skip("audit_output has no error guidance (schema regressed?)")
+	}
+	tool := &PlatformTool{Def: def}
+	desc := tool.Description()
+	if !strings.Contains(desc, "Error handling:") {
+		t.Errorf("description missing error-handling preamble: %q", desc)
+	}
+	if !strings.Contains(desc, def.ErrorGuidance) {
+		t.Errorf("description didn't include ErrorGuidance text")
+	}
+}
+
+func TestPlatformTool_DescriptionWithoutErrorGuidance(t *testing.T) {
+	// audit2_output currently has no ErrorGuidance; description
+	// should be returned verbatim without the "Error handling:" tail.
+	def := agent.PlatformTools["audit2_output"]
+	tool := &PlatformTool{Def: def}
+	desc := tool.Description()
+	if strings.Contains(desc, "Error handling:") {
+		t.Errorf("tool with no ErrorGuidance should not emit the preamble: %q", desc)
+	}
+	if desc != def.Description {
+		t.Errorf("description should match Def.Description exactly; got %q", desc)
+	}
+}
+
+func TestPlatformTool_ExamplesAreCloned(t *testing.T) {
+	// Mutating the returned schema must not mutate the shared
+	// PlatformTools table. Defensive copy paranoia.
+	def := agent.PlatformTools["audit_output"]
+	tool := &PlatformTool{Def: def}
+	schema := tool.InputSchema()
+	examples := schema["examples"].([]map[string]any)
+	originalLen := len(def.Examples)
+
+	// Try to corrupt via the returned slice.
+	examples[0] = map[string]any{"level": "CORRUPTED"}
+
+	if len(def.Examples) != originalLen {
+		t.Errorf("PlatformTools mutated via schema slice — defensive copy failed")
+	}
+	if v, _ := def.Examples[0]["level"].(string); v == "CORRUPTED" {
+		t.Error("first example was mutated through the returned schema")
+	}
+}

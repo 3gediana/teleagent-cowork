@@ -171,6 +171,16 @@ func TestEndToEnd_AuditOneCompletesNativeRuntime(t *testing.T) {
 	if postChange.ReviewedAt == nil {
 		t.Error("change.ReviewedAt should be set")
 	}
+	// AuditLevel must persist end-to-end now that broadcast.go
+	// nil-guards Redis (pre-fix, the Redis nil-deref panic inside
+	// approveChange made the later Save skip this field).
+	if postChange.AuditLevel == nil || *postChange.AuditLevel != "L0" {
+		lvl := "(nil)"
+		if postChange.AuditLevel != nil {
+			lvl = *postChange.AuditLevel
+		}
+		t.Errorf("change.AuditLevel: got %q, want L0", lvl)
+	}
 
 	var traces []model.ToolCallTrace
 	db.Where("session_id = ?", sessionID).Find(&traces)
