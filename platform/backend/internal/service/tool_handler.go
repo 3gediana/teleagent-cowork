@@ -308,6 +308,11 @@ func HandleToolCallResult(sessionID string, changeID string, projectID string, t
 			log.Printf("[ToolHandler] create_policy error: %v", err)
 		}
 
+	case "delegate_to_maintain":
+		if err := handleDelegateToMaintain(projectID, sessionID, args); err != nil {
+			log.Printf("[ToolHandler] delegate_to_maintain error: %v", err)
+		}
+
 	case "chief_output":
 		result, _ := args["result"].(string)
 		summary, _ := args["summary"].(string)
@@ -495,6 +500,65 @@ func handleSwitchMilestone(projectID string, args map[string]interface{}) error 
 	model.DB.Save(&target)
 	log.Printf("[Chief] Switched to milestone %s: %s", milestoneID, reason)
 
+	return nil
+}
+
+// handleDelegateToMaintain processes Chief Agent's delegate_to_maintain tool call.
+//
+// Chief is explicitly forbidden from mutating the work queue directly (tasks,
+// milestones, direction) because its sessions can race with agents that are
+// actively claiming / completing those tasks. Instead, Chief hands the
+// human's instruction to Maintain, which owns the queue and can serialise
+// changes safely against in-flight work.
+//
+// This handler spins up a Maintain session whose input is the instruction
+// plus a scope hint. Maintain then picks the right tool (create_task,
+// update_milestone, write_milestone, propose_direction, delete_task) based
+// on the scope and its prompt.
+func handleDelegateToMaintain(projectID, chiefSessionID string, args map[string]interface{}) error {
+	instruction, _ := args["instruction"].(string)
+	if instruction == "" {
+		return fmt.Errorf("instruction required")
+	}
+	scope, _ := args["scope"].(string)
+	if scope == "" {
+		scope = "mixed"
+	}
+	urgency, _ := args["urgency"].(string)
+	if urgency == "" {
+		urgency = "next"
+	}
+
+	// Assemble input for Maintain. Chief's session ID is carried as a
+	// breadcrumb so Maintain's output can be correlated back to the
+	// originating human conversation.
+	input := fmt.Sprintf(
+		"## Delegated from Chief (session %s)\n\n"+
+			"**Scope**: %s\n"+
+			"**Urgency**: %s\n\n"+
+			"**Instruction**:\n%s\n\n"+
+			"Use the platform tool that matches the scope:\n"+
+			"- tasks     → create_task / delete_task\n"+
+			"- milestone → update_milestone / write_milestone\n"+
+			"- direction → propose_direction (human confirms before apply)\n"+
+			"- mixed     → pick whichever tools cover the instruction\n",
+		chiefSessionID, scope, urgency, instruction,
+	)
+
+	ctx := &agent.SessionContext{
+		InputContent:  input,
+		TriggerReason: "chief_delegation",
+	}
+
+	session := agent.DefaultManager.CreateSession(
+		agent.RoleMaintain, projectID, ctx, "chief_delegation",
+	)
+	log.Printf(
+		"[Chief] Delegated to Maintain session %s (scope=%s urgency=%s, from chief session %s)",
+		session.ID, scope, urgency, chiefSessionID,
+	)
+
+	agent.DispatchSession(session)
 	return nil
 }
 

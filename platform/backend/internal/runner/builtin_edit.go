@@ -199,7 +199,7 @@ func (EditTool) Name() string { return "edit" }
 func (EditTool) IsConcurrencySafe(_ json.RawMessage) bool { return false }
 
 func (EditTool) Description() string {
-	return "Make a targeted edit to a file. Requires old_text that appears EXACTLY ONCE in the file (for safe replacement), or leave old_text empty to create a new file with the given new_text. Returns a unified diff of the change on success."
+	return "Make a targeted edit to a file. Requires old_text that appears EXACTLY ONCE in the file (for safe replacement), or leave old_text empty to create a new file with the given new_text. PRECONDITION: you must call 'read' on the file first in this session before editing it — edits to un-read files are refused (prevents guessing at contents). New-file creation (empty old_text) is exempt."
 }
 
 func (EditTool) InputSchema() map[string]any {
@@ -268,6 +268,19 @@ func (EditTool) Execute(ctx context.Context, sess *RunnerSession, raw json.RawMe
 	}
 
 	// Modify-existing-file path.
+	//
+	// Precondition: the file must have been read in this session.
+	// Copied from Claude Code — stops the model from overwriting files
+	// based on hallucinated content. A read teaches it what's actually
+	// there; without one, an edit is a guess. New-file creation
+	// (OldText=="" above) is naturally exempt.
+	if !sess.HasRead(abs) {
+		return fmt.Sprintf(
+			"Error: cannot edit %s — you must read it first. Call the 'read' tool on %s, then retry this edit. This prevents edits based on unverified assumptions about file contents.",
+			in.Path, in.Path,
+		), true, nil
+	}
+
 	orig, err := os.ReadFile(abs)
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err), true, nil

@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,19 @@ func newSession(projectPath string) *RunnerSession {
 		AgentSession: &agent.Session{
 			Context: &agent.SessionContext{ProjectPath: projectPath},
 		},
+	}
+}
+
+// mustRead drives ReadTool on the given path and marks the session so
+// EditTool's read-before-edit precondition is satisfied. Matches the
+// real LLM flow (read, then edit) and keeps the edit tests focused on
+// edit semantics rather than on threading MarkRead manually.
+func mustRead(t *testing.T, sess *RunnerSession, path string) {
+	t.Helper()
+	payload := json.RawMessage(fmt.Sprintf(`{"path":%q}`, path))
+	_, isErr, fatal := ReadTool{}.Execute(context.Background(), sess, payload)
+	if isErr || fatal != nil {
+		t.Fatalf("prerequisite read of %s failed: isErr=%v fatal=%v", path, isErr, fatal)
 	}
 }
 
@@ -246,7 +260,9 @@ func TestEdit_SingleReplacement(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("alpha\nbeta\ngamma\n"), 0o644)
-	result, isErr, _ := EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"beta","new_text":"BETA"}`))
 	if isErr {
 		t.Fatalf("unexpected error: %s", result)
@@ -264,7 +280,9 @@ func TestEdit_RejectsAmbiguous(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("same\nsame\nsame\n"), 0o644)
-	result, isErr, _ := EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"same","new_text":"SAME"}`))
 	if !isErr {
 		t.Error("ambiguous edit should fail without replace_all")
@@ -278,7 +296,9 @@ func TestEdit_ReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("foo bar foo baz foo"), 0o644)
-	result, isErr, _ := EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"foo","new_text":"FOO","replace_all":true}`))
 	if isErr {
 		t.Fatalf("unexpected error: %s", result)
@@ -293,7 +313,9 @@ func TestEdit_RejectsMissingOldText(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("hello"), 0o644)
-	result, isErr, _ := EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"nonexistent","new_text":"x"}`))
 	if !isErr {
 		t.Error("missing old_text should fail")
@@ -339,7 +361,9 @@ func TestEdit_RejectsNoOpEdit(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("same content"), 0o644)
-	result, isErr, _ := EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"same","new_text":"same"}`))
 	if !isErr || !strings.Contains(result, "no-op") {
 		t.Errorf("no-op should fail clearly; got isErr=%v result=%q", isErr, result)
@@ -351,12 +375,126 @@ func TestEdit_AtomicWriteSurvivesCrash(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("hello"), 0o644)
-	_, _, _ = EditTool{}.Execute(context.Background(), newSession(dir),
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	_, _, _ = EditTool{}.Execute(context.Background(), sess,
 		json.RawMessage(`{"path":"f.txt","old_text":"hello","new_text":"world"}`))
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".edit-") {
 			t.Errorf("temp file left behind: %s", e.Name())
 		}
+	}
+}
+
+// ---- Read-before-edit precondition ---------------------------------
+
+// TestEdit_RequiresPriorRead asserts the core safety rule: a model
+// cannot modify an existing file it has not read in this session. This
+// stops hallucinated edits (model guesses at file contents and
+// overwrites something real). New-file creation and files read earlier
+// are handled by separate tests below.
+func TestEdit_RequiresPriorRead(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	os.WriteFile(p, []byte("original"), 0o644)
+	sess := newSession(dir) // deliberately NO read call
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
+		json.RawMessage(`{"path":"f.txt","old_text":"original","new_text":"overwrite"}`))
+	if !isErr {
+		t.Fatal("edit without prior read must be refused")
+	}
+	if !strings.Contains(result, "must read it first") {
+		t.Errorf("error message should tell the model to call read first; got %q", result)
+	}
+	// File must be untouched — the refusal happens before any write.
+	got, _ := os.ReadFile(p)
+	if string(got) != "original" {
+		t.Errorf("refused edit should leave file intact; got %q", got)
+	}
+}
+
+// TestEdit_CreateNewFileExemptFromPrecondition: creating a fresh file
+// (empty old_text) requires no prior read — you can't read something
+// that doesn't exist yet.
+func TestEdit_CreateNewFileExemptFromPrecondition(t *testing.T) {
+	dir := t.TempDir()
+	sess := newSession(dir) // no read
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
+		json.RawMessage(`{"path":"brand_new.txt","old_text":"","new_text":"hi"}`))
+	if isErr {
+		t.Fatalf("new-file creation should not require prior read: %s", result)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "brand_new.txt"))
+	if err != nil || string(data) != "hi" {
+		t.Errorf("new file not written correctly: err=%v data=%q", err, data)
+	}
+}
+
+// TestEdit_ReadThenEdit is the happy path: read registers the path,
+// then edit proceeds normally. Mirrors real LLM behaviour.
+func TestEdit_ReadThenEdit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	os.WriteFile(p, []byte("hello"), 0o644)
+	sess := newSession(dir)
+	mustRead(t, sess, "f.txt")
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess,
+		json.RawMessage(`{"path":"f.txt","old_text":"hello","new_text":"world"}`))
+	if isErr {
+		t.Fatalf("edit after read should succeed: %s", result)
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != "world" {
+		t.Errorf("edit failed to apply: got %q", got)
+	}
+}
+
+// TestEdit_ReadWithRelativeEditWithAbsolute verifies that the read
+// tracker canonicalises paths — reading via a relative path should
+// allow an edit using an absolute path to the same underlying file.
+// Without this, the LLM could be blocked on a silly path-format
+// mismatch it has no way to know about.
+func TestEdit_ReadWithRelativeEditWithAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0o755)
+	p := filepath.Join(sub, "f.txt")
+	os.WriteFile(p, []byte("hello"), 0o644)
+	sess := newSession(dir)
+	mustRead(t, sess, "sub/f.txt")
+	abs, _ := filepath.Abs(p)
+	payload, _ := json.Marshal(map[string]any{
+		"path":     abs,
+		"old_text": "hello",
+		"new_text": "world",
+	})
+	result, isErr, _ := EditTool{}.Execute(context.Background(), sess, payload)
+	if isErr {
+		t.Errorf("relative-read + absolute-edit to same file should succeed; got %q", result)
+	}
+}
+
+// TestEdit_PartialReadSatisfiesPrecondition: reading with offset/limit
+// still counts as a read. Matches Claude Code's behaviour — the
+// precondition is "has ever been read", not "has been read in full".
+// A model that can see 20 lines of a 2000-line file still has enough
+// context to edit responsibly; forcing a full read would be wasteful.
+func TestEdit_PartialReadSatisfiesPrecondition(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	os.WriteFile(p, []byte("a\nb\nc\nd\ne\n"), 0o644)
+	sess := newSession(dir)
+	// Read only lines 1-2.
+	_, isErr, _ := ReadTool{}.Execute(context.Background(), sess,
+		json.RawMessage(`{"path":"f.txt","offset":1,"limit":2}`))
+	if isErr {
+		t.Fatal("partial read failed")
+	}
+	// Edit should succeed even though the model only read part of the file.
+	_, isErr, _ = EditTool{}.Execute(context.Background(), sess,
+		json.RawMessage(`{"path":"f.txt","old_text":"a\nb","new_text":"A\nB"}`))
+	if isErr {
+		t.Error("partial read should satisfy the edit precondition")
 	}
 }

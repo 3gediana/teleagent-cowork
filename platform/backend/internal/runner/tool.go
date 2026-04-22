@@ -19,6 +19,8 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
+	"sync"
 
 	"github.com/a3c/platform/internal/agent"
 )
@@ -105,6 +107,48 @@ type RunnerSession struct {
 	// model themselves for sub-steps, but must pass this value
 	// through or they'll route to whatever the registry's fallback is.
 	Model string
+
+	// readPaths tracks every file the model has read in this session.
+	// Enforces the "read before edit" precondition borrowed from
+	// Claude Code: an edit against a file the model hasn't inspected
+	// in this conversation is refused with a guiding error, so the
+	// model can't hallucinate content and overwrite something real.
+	//
+	// Keys are canonicalised absolute paths (post-sandboxPath) so
+	// ReadTool + EditTool agree on identity regardless of whether
+	// the LLM passed a relative, absolute, or mixed-separator path.
+	//
+	// Protected by readPathsMu — safe reads run in parallel inside a
+	// single assistant turn's tool batch.
+	readPathsMu sync.Mutex
+	readPaths   map[string]bool
+}
+
+// MarkRead records that absPath was read in this session. Safe to call
+// concurrently from parallel read tools in the same turn.
+func (s *RunnerSession) MarkRead(absPath string) {
+	if absPath == "" {
+		return
+	}
+	canon := filepath.Clean(absPath)
+	s.readPathsMu.Lock()
+	defer s.readPathsMu.Unlock()
+	if s.readPaths == nil {
+		s.readPaths = make(map[string]bool)
+	}
+	s.readPaths[canon] = true
+}
+
+// HasRead reports whether absPath was read earlier in this session.
+// Enforced by EditTool as a precondition before mutating existing files.
+func (s *RunnerSession) HasRead(absPath string) bool {
+	if absPath == "" {
+		return false
+	}
+	canon := filepath.Clean(absPath)
+	s.readPathsMu.Lock()
+	defer s.readPathsMu.Unlock()
+	return s.readPaths[canon]
 }
 
 // JournalEntry is one row of the tool-call log. Flattened to flat

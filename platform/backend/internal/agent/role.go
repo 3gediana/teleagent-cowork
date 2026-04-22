@@ -96,9 +96,11 @@ var RoleConfigs = map[Role]*RoleConfig{
 	RoleChief: {
 		Role:           RoleChief,
 		Name:           "Chief Agent",
-		Description:    "Platform voice interface: reports global status, executes human instructions, makes approval decisions in AutoMode",
+		Description:    "Platform voice interface: reports global status, approves/rejects PRs in AutoMode, delegates task/milestone edits to Maintain. Never mutates the work queue directly — that would collide with agents in flight.",
 		PromptTemplate: "chief.md",
-		PlatformTools:  []string{"create_task", "delete_task", "update_milestone", "propose_direction", "write_milestone", "approve_pr", "reject_pr", "switch_milestone", "create_policy", "chief_output"},
+		// Governance only. Chief delegates task/milestone/direction edits to
+		// Maintain via delegate_to_maintain instead of touching them itself.
+		PlatformTools:  []string{"approve_pr", "reject_pr", "switch_milestone", "create_policy", "delegate_to_maintain", "chief_output"},
 		OpenCodeTools:  []string{"read", "glob"},
 	},
 	RoleAnalyze: {

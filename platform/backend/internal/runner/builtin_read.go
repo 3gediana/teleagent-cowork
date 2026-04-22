@@ -134,6 +134,13 @@ func (ReadTool) Execute(ctx context.Context, sess *RunnerSession, raw json.RawMe
 		return fmt.Sprintf("Error: %v", err), true, nil
 	}
 
+	// Register the read. EditTool checks this set before allowing a
+	// modification, so the model can't edit files it never inspected.
+	// Partial reads (offset/limit) still count — matching Claude
+	// Code's behaviour, the precondition is "has ever been read",
+	// not "has been read in full".
+	sess.MarkRead(abs)
+
 	// Apply offset/limit in line space if requested.
 	if in.Offset > 0 || in.Limit > 0 {
 		lines := strings.Split(string(data), "\n")
