@@ -156,6 +156,11 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 		// hitting the provider's context window. See compaction.go
 		// for the two-tier design (microcompact then summarize).
 		Compaction: DefaultCompactionPolicy,
+		// Tier-0 clear policy — only applied to long-lived / chat
+		// roles. Audit / fix / evaluate / merge are single-shot and
+		// short; a clear inside them would be pointless (they'll
+		// hit their terminal tool and exit anyway).
+		Clear: clearPolicyForRole(sess.Role),
 	})
 	duration := time.Since(started)
 	if err != nil {
@@ -259,5 +264,31 @@ func defaultMaxTokensForRole(role agent.Role) int {
 		return 8192
 	default:
 		return 4096
+	}
+}
+
+// clearPolicyForRole returns the tier-0 ClearPolicy appropriate for a
+// given role. Heuristic:
+//
+//   - Chat / long-lived roles (Chief, Consult) → DefaultClearPolicy.
+//     These are the sessions where topic-shift / idle-gap / terminal-
+//     output clears actually earn their keep — a human operator may
+//     Chief-chat for hours, switching topics, and we don't want every
+//     new question to come dragging 200 turns of unrelated history.
+//
+//   - Analyze / Assess → DefaultClearPolicy too (they run long
+//     transcripts over batches of experiences; topic-shift inside
+//     one batch is rare but idle-gap still matters across days).
+//
+//   - Short-lived roles (audit_1/2, fix, evaluate, merge) → disabled.
+//     These sessions have a known terminal tool; the loop exits the
+//     moment it's called. Clearing inside them is dead code that
+//     would just cost cycles running the Jaccard every iteration.
+func clearPolicyForRole(role agent.Role) ClearPolicy {
+	switch role {
+	case agent.RoleChief, agent.RoleConsult, agent.RoleAnalyze, agent.RoleAssess, agent.RoleMaintain:
+		return DefaultClearPolicy
+	default:
+		return ClearPolicy{} // disabled
 	}
 }

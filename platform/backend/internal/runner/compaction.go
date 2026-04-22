@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/a3c/platform/internal/llm"
 )
@@ -82,11 +83,29 @@ type CompactionState struct {
 	consecutiveFailures  int
 	microCompactedIDs    map[string]bool
 	summarizedUpToTurnIx int
+
+	// lastTerminalToolTurnIx: index of the assistant turn that emitted
+	// a terminal output tool (audit_output, chief_output, ...). Set
+	// when the loop detects such an emission; used by the clear
+	// policy to decide if the *work unit* is complete and the
+	// transcript can be reset when the next user turn arrives.
+	lastTerminalToolTurnIx int
+
+	// lastUserTurnAt: monotonic clock at which the last user-role
+	// message was appended. Powers the idle-clear heuristic. Zero
+	// value means "never observed a user turn in this session".
+	lastUserTurnAt time.Time
+
+	// clearsFired: how many hard clears have occurred in this
+	// session. Operator telemetry + guard against pathological
+	// clear-every-turn loops.
+	clearsFired int
 }
 
 func newCompactionState() *CompactionState {
 	return &CompactionState{
-		microCompactedIDs: map[string]bool{},
+		microCompactedIDs:      map[string]bool{},
+		lastTerminalToolTurnIx: -1,
 	}
 }
 
@@ -164,12 +183,302 @@ func maybeCompact(
 // CompactionOutcome is what the Loop prints / broadcasts so operators
 // can tell WHICH tier triggered and whether it reclaimed enough.
 type CompactionOutcome struct {
-	Action          string // disabled | below-threshold | microcompact | summarize-failed | summarized | circuit-broken
+	Action          string // disabled | below-threshold | microcompact | summarize-failed | summarized | circuit-broken | cleared
 	Tokens          int    // token count AFTER compaction (estimated)
 	Before          int    // token count before compaction
 	StrippedResults int    // how many tool_result blocks were blanked by microcompact
 	Error           string
 	SummaryUSD      float64
+	// ClearReason populated when Action == "cleared". One of
+	// "terminal-output", "topic-shift", "idle-gap", "explicit".
+	ClearReason string
+}
+
+// ---- tier 0: hard boundary clear --------------------------------------
+//
+// Summary/microcompact trim the transcript; clear REPLACES it with a
+// fresh one. Use for cases where the model genuinely doesn't need the
+// prior transcript — Claude Code's compaction was designed for the
+// "accumulating long task" case, but a lot of multi-agent platform
+// sessions are actually "one-off, unrelated task" sessions where a
+// summary is dead weight. Detecting those and clearing entirely is
+// cheaper than summarising.
+//
+// Three signals trigger a clear; any one is enough:
+//
+// 1. **Terminal output emitted**. Every role has an output tool that
+//    represents "I am done with this work unit" (chief_output,
+//    audit_output, analyze_output, ...). After such a call, if the
+//    loop happens to continue (e.g. model calls the tool then keeps
+//    yapping), we can safely reset — the committed result is on disk.
+//    Also applies across user turns: if an earlier turn produced a
+//    terminal output and a fresh user turn arrives, the prior
+//    transcript is stale history, not context.
+//
+// 2. **Topic shift**. A new user message whose content has low
+//    lexical overlap (via cheap token-set Jaccard — no embeddings
+//    needed) with the recent transcript. Threshold is deliberately
+//    conservative so we don't clear mid-task.
+//
+// 3. **Idle gap**. User came back after IdleClearAfter elapsed. Even
+//    if the topic is the same, the operator has likely re-gathered
+//    context mentally; what was useful to the model 45 minutes ago
+//    is mostly dead weight.
+
+// ClearPolicy configures when `maybeClear` fires. Zero-value means
+// "never clear" — clearing is opt-in so existing sessions that don't
+// pass a policy stay on the old behaviour.
+type ClearPolicy struct {
+	// TerminalToolNames list tools whose emission marks work-unit
+	// completion. After emitting one, the next user turn in the
+	// same session triggers a clear. Empty disables this signal.
+	TerminalToolNames []string
+
+	// IdleClearAfter: clear when the gap between consecutive user
+	// turns exceeds this duration. 0 disables.
+	IdleClearAfter time.Duration
+
+	// TopicShiftMinTurns: minimum total user turns before the topic-
+	// shift detector is even allowed to fire. Stops it from clearing
+	// a fresh conversation on the second user turn just because the
+	// first user turn was short. Default 3.
+	TopicShiftMinTurns int
+
+	// TopicShiftJaccardMax: Jaccard similarity below which the new
+	// user turn is considered "a different topic". 0.10 is empirically
+	// the sweet spot — below ~0.10 is clearly different subjects.
+	// 0 disables the detector.
+	TopicShiftJaccardMax float64
+
+	// MinMessagesBeforeClear: don't bother clearing if the transcript
+	// has fewer messages than this — clearing a 3-message chat saves
+	// nothing and just loses useful context. Default 6.
+	MinMessagesBeforeClear int
+
+	// ClearKeepSystemPrompt: if true, clearing preserves the initial
+	// system-prompt-ish user turn (some roles seed state in the
+	// first message). Most callers want this.
+	ClearKeepSystemPrompt bool
+}
+
+// DefaultClearPolicy is a reasonable starting config. Platform roles
+// that don't want clearing pass `ClearPolicy{}` (zero value disables).
+var DefaultClearPolicy = ClearPolicy{
+	TerminalToolNames: []string{
+		"audit_output", "audit2_output", "fix_output",
+		"evaluate_output", "merge_output",
+		"biz_review_output", "assess_output",
+		"analyze_output", "chief_output",
+	},
+	IdleClearAfter:         30 * time.Minute,
+	TopicShiftMinTurns:     3,
+	TopicShiftJaccardMax:   0.10,
+	MinMessagesBeforeClear: 6,
+	ClearKeepSystemPrompt:  true,
+}
+
+// maybeClear decides whether the transcript should be dropped in
+// favour of a clean-slate restart. Runs before the compact tiers; a
+// successful clear makes micro/summarize no-ops on the next iteration.
+//
+// Returns the (possibly cleared) messages + a reason string. Empty
+// reason means "didn't clear".
+func maybeClear(
+	cs *CompactionState,
+	pol ClearPolicy,
+	messages []llm.Message,
+	now time.Time,
+) ([]llm.Message, string) {
+	if len(messages) < pol.MinMessagesBeforeClear {
+		return messages, ""
+	}
+
+	// Signal 1: terminal-tool emission already in transcript and a
+	// fresh user turn arrived after it. Walk backwards finding the
+	// *last* user turn, then see if an earlier assistant turn emitted
+	// a terminal tool.
+	if len(pol.TerminalToolNames) > 0 {
+		terminalSet := make(map[string]bool, len(pol.TerminalToolNames))
+		for _, n := range pol.TerminalToolNames {
+			terminalSet[n] = true
+		}
+		lastUserIx := -1
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == llm.RoleUser {
+				lastUserIx = i
+				break
+			}
+		}
+		if lastUserIx > 0 {
+			// Look at everything BEFORE the last user turn — if a
+			// terminal-output tool was emitted in there, that
+			// work-unit is done; the new user turn starts fresh.
+			for i := 0; i < lastUserIx; i++ {
+				if messages[i].Role != llm.RoleAssistant {
+					continue
+				}
+				for _, blk := range messages[i].Content {
+					if blk.Type == llm.BlockToolUse && terminalSet[blk.ToolName] {
+						cs.clearsFired++
+						return applyClear(messages, lastUserIx, pol), "terminal-output"
+					}
+				}
+			}
+		}
+	}
+
+	// Signal 2: idle gap — dormant for a long stretch, clear on the
+	// assumption the operator has moved on between tasks.
+	if pol.IdleClearAfter > 0 && !cs.lastUserTurnAt.IsZero() {
+		if now.Sub(cs.lastUserTurnAt) > pol.IdleClearAfter {
+			lastUserIx := -1
+			for i := len(messages) - 1; i >= 0; i-- {
+				if messages[i].Role == llm.RoleUser {
+					lastUserIx = i
+					break
+				}
+			}
+			if lastUserIx > 0 {
+				cs.clearsFired++
+				return applyClear(messages, lastUserIx, pol), "idle-gap"
+			}
+		}
+	}
+
+	// Signal 3: topic-shift Jaccard on user turns.
+	if pol.TopicShiftJaccardMax > 0 {
+		userTurns := collectUserTexts(messages)
+		if len(userTurns) >= pol.TopicShiftMinTurns {
+			latest := userTurns[len(userTurns)-1]
+			// Compare latest to the union of the previous N user
+			// turns. Union compensates for short latest messages.
+			prior := strings.Join(userTurns[:len(userTurns)-1], " ")
+			j := jaccard(tokenSet(latest), tokenSet(prior))
+			if j < pol.TopicShiftJaccardMax {
+				lastUserIx := -1
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Role == llm.RoleUser {
+						lastUserIx = i
+						break
+					}
+				}
+				if lastUserIx > 0 {
+					cs.clearsFired++
+					return applyClear(messages, lastUserIx, pol), "topic-shift"
+				}
+			}
+		}
+	}
+
+	return messages, ""
+}
+
+// applyClear builds a fresh transcript: optionally the very first
+// message (as "system seed") + the latest user turn.
+//
+// Resetting microCompactedIDs is crucial — ids from the pre-clear
+// transcript are gone, and carrying them over would prevent future
+// microcompacts on a replayed id (unlikely but cheap to avoid).
+func applyClear(messages []llm.Message, lastUserIx int, pol ClearPolicy) []llm.Message {
+	out := make([]llm.Message, 0, 2)
+	if pol.ClearKeepSystemPrompt && len(messages) > 0 {
+		// Keep the original user seed only if it was a user-role
+		// text-only turn (the convention for seeded "here's your
+		// task" intros). Skip if the first message is an assistant
+		// turn from a previously-clear session.
+		first := messages[0]
+		if first.Role == llm.RoleUser && len(first.Content) == 1 && first.Content[0].Type == llm.BlockText {
+			out = append(out, first)
+		}
+	}
+	out = append(out, messages[lastUserIx])
+	return out
+}
+
+// ClearStats exposes consumed telemetry so the loop can log + emit.
+func (cs *CompactionState) ClearStats() int { return cs.clearsFired }
+
+// MarkUserTurn is called by the loop whenever a new user-role message
+// is appended so the idle detector has a timestamp to compare against.
+func (cs *CompactionState) MarkUserTurn(t time.Time) {
+	cs.lastUserTurnAt = t
+}
+
+// collectUserTexts pulls all user-role text blocks in order so the
+// topic-shift detector can diff them.
+func collectUserTexts(messages []llm.Message) []string {
+	var out []string
+	for _, m := range messages {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		var sb strings.Builder
+		for _, blk := range m.Content {
+			if blk.Type == llm.BlockText {
+				sb.WriteString(blk.Text)
+				sb.WriteByte(' ')
+			}
+		}
+		s := strings.TrimSpace(sb.String())
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// tokenSet is a cheap lowercase word-set for Jaccard. Strips
+// punctuation, drops tokens shorter than 2 chars (the / a / is / of /
+// …) — otherwise every sentence has huge overlap through stopwords.
+func tokenSet(s string) map[string]struct{} {
+	set := make(map[string]struct{})
+	var cur strings.Builder
+	flush := func() {
+		t := strings.ToLower(strings.TrimSpace(cur.String()))
+		cur.Reset()
+		if len(t) < 3 {
+			return
+		}
+		// Dead-simple stopword list — covers the big offenders in
+		// English + Chinese romanisation. Empirically enough for the
+		// Jaccard threshold to behave.
+		switch t {
+		case "the", "and", "for", "with", "that", "this", "you", "are", "not",
+			"will", "from", "have", "was", "were", "but", "has", "its",
+			"can", "i'm", "i've", "don't", "one", "two", "all", "any",
+			"我要", "我是", "你是", "那个", "就是", "然后", "因为",
+			"什么", "怎么", "可以", "这个", "我们", "他们", "就要":
+			return
+		}
+		set[t] = struct{}{}
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r >= 0x4e00 {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return set
+}
+
+func jaccard(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for k := range a {
+		if _, ok := b[k]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
 
 // ---- thresholds ---------------------------------------------------------

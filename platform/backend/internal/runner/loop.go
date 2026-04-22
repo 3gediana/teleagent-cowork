@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/llm"
@@ -87,6 +88,14 @@ type RunOptions struct {
 	// auto-compact behaviour. DefaultCompactionPolicy is a reasonable
 	// starting point for a 200k-window model.
 	Compaction CompactionPolicy
+
+	// Clear controls tier-0 hard clears at semantic boundaries —
+	// terminal-tool emission, topic shifts, idle gaps. Zero value
+	// disables (back-compat). DefaultClearPolicy is the recommended
+	// config for Chief / chat-like sessions; audit/fix roles can
+	// leave this disabled since their sessions are single-shot and
+	// short-lived.
+	Clear ClearPolicy
 }
 
 // RunResult captures everything a caller might want to inspect after
@@ -177,15 +186,44 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 	compactState := newCompactionState()
 	var lastTurnTokens int
 
+	// Seed the idle-clear detector with the initial user turn.
+	// Tier-0 needs *some* anchor timestamp to avoid firing on every
+	// cold-started session.
+	compactState.MarkUserTurn(time.Now())
+
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if err := ctx.Err(); err != nil {
 			return nil, emitErr(fmt.Errorf("runner: cancelled at iteration %d: %w", iter, err))
 		}
 
-		// Compact if needed BEFORE building the next request. This
-		// way a summarize LLM call can fail without aborting the
-		// parent run — we just proceed with whatever transcript we
-		// have and let the next iteration try again.
+		// Tier-0: hard clear at semantic boundaries (terminal-output
+		// emitted, topic shift, idle gap). Runs BEFORE compact —
+		// clearing is cheaper than a summary and makes it moot.
+		if opts.Clear.MinMessagesBeforeClear > 0 || len(opts.Clear.TerminalToolNames) > 0 || opts.Clear.IdleClearAfter > 0 {
+			cleared, reason := maybeClear(compactState, opts.Clear, messages, time.Now())
+			if reason != "" {
+				log.Printf("[Compaction] iter=%d clear (%s): %d→%d messages",
+					iter, reason, len(messages), len(cleared))
+				emit(projectID, EventAgentTurn, map[string]interface{}{
+					"session_id":   sessionID,
+					"iteration":    iter,
+					"compaction":   "cleared",
+					"clear_reason": reason,
+					"before_msgs":  len(messages),
+					"after_msgs":   len(cleared),
+				})
+				messages = cleared
+				// A clear invalidates micro/summarize tracking.
+				compactState = newCompactionState()
+				compactState.MarkUserTurn(time.Now())
+				lastTurnTokens = 0
+			}
+		}
+
+		// Tier-1/2 compact if needed BEFORE building the next
+		// request. This way a summarize LLM call can fail without
+		// aborting the parent run — we just proceed with whatever
+		// transcript we have and let the next iteration try again.
 		if opts.Compaction.ContextWindow > 0 {
 			compacted, outcome := maybeCompact(ctx, compactState, opts.Compaction,
 				opts.EndpointID, opts.Model, messages, lastTurnTokens)
@@ -350,6 +388,7 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 			Role:    llm.RoleUser,
 			Content: resultBlocks,
 		})
+		compactState.MarkUserTurn(time.Now())
 	}
 
 	return nil, emitErr(fmt.Errorf("runner: exceeded MaxIterations=%d without a terminal turn (likely model loop)", opts.MaxIterations))
