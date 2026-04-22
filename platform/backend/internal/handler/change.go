@@ -2,10 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -71,6 +73,14 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "NO_FILES", "message": "No files to submit"}})
 		return
 	}
+
+	// Soft nudge: if the change touches structural source files without
+	// also updating OVERVIEW.md, tell the agent. The audit still runs —
+	// this is a hint for future-agent-friendliness, not a block.
+	// Built once here and echoed on every response path below so a client
+	// that ignores it on the manual-confirm path still sees it when the
+	// audit eventually finishes.
+	overviewReminder := checkOverviewStale(req.Writes, req.Deletes)
 
 	var task model.Task
 	if err := model.DB.Where("id = ? AND status = 'claimed'", req.TaskID).First(&task).Error; err != nil {
@@ -243,13 +253,17 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 			"description": req.Description,
 		})
 
+		manualData := gin.H{
+			"change_id": changeID,
+			"status":    "pending_human_confirm",
+			"message":   "Waiting for human confirmation before audit",
+		}
+		if overviewReminder != "" {
+			manualData["overview_reminder"] = overviewReminder
+		}
 		c.JSON(200, gin.H{
 			"success": true,
-			"data": gin.H{
-				"change_id": changeID,
-				"status":    "pending_human_confirm",
-				"message":   "Waiting for human confirmation before audit",
-			},
+			"data":    manualData,
 		})
 		return
 	}
@@ -257,15 +271,19 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	// Auto mode: trigger audit workflow and wait for result (blocking)
 	result, err := service.StartAuditWorkflowAndWait(changeID, 120*time.Second)
 	if err != nil {
+		timeoutData := gin.H{
+			"change_id":     changeID,
+			"status":        "pending",
+			"next_action":   "poll_change_status",
+			"poll_endpoint": "GET /api/v1/change/status?change_id=" + changeID,
+			"message":       "Audit did not finish within 120s. Poll the endpoint above for the final result. Do NOT resubmit.",
+		}
+		if overviewReminder != "" {
+			timeoutData["overview_reminder"] = overviewReminder
+		}
 		c.JSON(200, gin.H{
 			"success": true,
-			"data": gin.H{
-				"change_id":        changeID,
-				"status":           "pending",
-				"next_action":      "poll_change_status",
-				"poll_endpoint":    "GET /api/v1/change/status?change_id=" + changeID,
-				"message":          "Audit did not finish within 120s. Poll the endpoint above for the final result. Do NOT resubmit.",
-			},
+			"data":    timeoutData,
 		})
 		return
 	}
@@ -286,16 +304,20 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		message = "Audit rejected your change (L2). Read audit_reason, revise your approach, and submit a new change. Your task is still claimed."
 	}
 
+	resultData := gin.H{
+		"change_id":    changeID,
+		"status":       result.Status,
+		"audit_level":  result.AuditLevel,
+		"audit_reason": result.AuditReason,
+		"next_action":  nextAction,
+		"message":      message,
+	}
+	if overviewReminder != "" {
+		resultData["overview_reminder"] = overviewReminder
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data": gin.H{
-			"change_id":    changeID,
-			"status":       result.Status,
-			"audit_level":  result.AuditLevel,
-			"audit_reason": result.AuditReason,
-			"next_action":  nextAction,
-			"message":      message,
-		},
+		"data":    resultData,
 	})
 }
 
@@ -538,6 +560,12 @@ func (h *ChangeHandler) submitOnBranch(c *gin.Context, agentID string, branchID 
 		return
 	}
 
+	// Same soft nudge as the main-branch Submit: remind agents to keep
+	// OVERVIEW.md current when they touch structural code. Branch flow
+	// accumulates many commits before PR audit, so surfacing the hint
+	// per-commit gives agents a chance to correct before pr_submit.
+	branchOverviewReminder := checkOverviewStale(req.Writes, req.Deletes)
+
 	// Write files to branch worktree
 	if err := service.WriteBranchFiles(branchID, req.Writes, req.Deletes); err != nil {
 		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "WRITE_FAILED", "message": err.Error()}})
@@ -554,13 +582,127 @@ func (h *ChangeHandler) submitOnBranch(c *gin.Context, agentID string, branchID 
 		return
 	}
 
+	branchData := gin.H{
+		"branch_id":     branchID,
+		"writes_count":  len(req.Writes),
+		"deletes_count": len(req.Deletes),
+		"message":       "Changes written to branch",
+	}
+	if branchOverviewReminder != "" {
+		branchData["overview_reminder"] = branchOverviewReminder
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data": gin.H{
-			"branch_id":     branchID,
-			"writes_count":  len(req.Writes),
-			"deletes_count": len(req.Deletes),
-			"message":       "Changes written to branch",
-		},
+		"data":    branchData,
 	})
+}
+
+// checkOverviewStale returns a reminder string when a change touches
+// structural source files without also updating OVERVIEW.md. Returns
+// empty string when the change is either (a) non-structural or (b)
+// already includes an OVERVIEW edit. Deterministic — no LLM or DB.
+//
+// The threshold of 3 structural files is conservative: single-file
+// bug fixes rarely warrant an overview update and we don't want to
+// nag agents about trivial changes, but a 3+ file change usually
+// carries enough structural intent that OVERVIEW needs a line.
+//
+// Detection is path-suffix-based (no AST parse) because we want this
+// check to stay cheap and deterministic. "Structural" here means
+// production source in a language the platform commonly hosts —
+// tests, fixtures, generated code and docs are filtered out so they
+// don't trip the nag.
+func checkOverviewStale(writes []model.ChangeFileEntry, deletes []string) string {
+	touchedOverview := false
+	structuralCount := 0
+	sampleNames := make([]string, 0, 3)
+
+	for _, w := range writes {
+		if isOverviewPath(w.Path) {
+			touchedOverview = true
+			continue
+		}
+		if isStructuralSourceFile(w.Path) {
+			structuralCount++
+			if len(sampleNames) < 3 {
+				sampleNames = append(sampleNames, filepath.Base(w.Path))
+			}
+		}
+	}
+	for _, d := range deletes {
+		if isOverviewPath(d) {
+			// Deleting OVERVIEW.md is a structural change in itself, but
+			// treat it as a special case — don't complain, the agent is
+			// explicitly rearranging project docs.
+			touchedOverview = true
+			continue
+		}
+		if isStructuralSourceFile(d) {
+			structuralCount++
+			if len(sampleNames) < 3 {
+				sampleNames = append(sampleNames, filepath.Base(d)+" (deleted)")
+			}
+		}
+	}
+	if touchedOverview || structuralCount < 3 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"This change modifies %d source files (%s) but OVERVIEW.md wasn't updated. Consider editing OVERVIEW.md in the same change to reflect new or renamed modules/files — future agents rely on it as their project map.",
+		structuralCount, strings.Join(sampleNames, ", "),
+	)
+}
+
+// isOverviewPath matches OVERVIEW.md at the repo root — and nothing
+// else. Case-insensitive to tolerate Windows/macOS case folding but
+// we insist on the file living at the root: nested overviews (e.g.
+// docs/OVERVIEW.md) serve a different purpose and don't satisfy the
+// agent-facing map protocol.
+func isOverviewPath(path string) bool {
+	clean := strings.TrimLeft(filepath.ToSlash(path), "./")
+	return strings.EqualFold(clean, "OVERVIEW.md")
+}
+
+// isStructuralSourceFile returns true when the path looks like
+// production source in a language the platform commonly hosts. Tests
+// and generated code are filtered out so routine test-only changes
+// don't trigger the OVERVIEW nag.
+func isStructuralSourceFile(path string) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+
+	// Exclude common test / fixture / generated patterns first.
+	switch {
+	case strings.HasSuffix(lower, "_test.go"):
+		return false
+	case strings.HasSuffix(lower, ".test.ts"), strings.HasSuffix(lower, ".test.tsx"),
+		strings.HasSuffix(lower, ".test.js"), strings.HasSuffix(lower, ".test.jsx"):
+		return false
+	case strings.HasSuffix(lower, ".spec.ts"), strings.HasSuffix(lower, ".spec.tsx"),
+		strings.HasSuffix(lower, ".spec.js"), strings.HasSuffix(lower, ".spec.jsx"):
+		return false
+	case strings.HasSuffix(lower, "_test.py"), strings.HasPrefix(filepath.Base(lower), "test_"):
+		return false
+	case strings.Contains(lower, "/testdata/"), strings.Contains(lower, "/fixtures/"),
+		strings.Contains(lower, "/__tests__/"), strings.Contains(lower, "/tests/"):
+		return false
+	case strings.HasSuffix(lower, ".pb.go"), strings.HasSuffix(lower, ".gen.go"),
+		strings.HasSuffix(lower, "_generated.go"):
+		return false
+	}
+
+	// Accept the usual production-source extensions. Purposely not
+	// exhaustive — this is a heuristic, false negatives just mean no
+	// nag, which is the safe side.
+	structuralExts := []string{
+		".go", ".rs", ".py", ".rb", ".java", ".kt", ".swift",
+		".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte",
+		".c", ".cc", ".cpp", ".cxx", ".h", ".hpp",
+		".cs", ".fs", ".scala", ".ex", ".exs",
+	}
+	for _, ext := range structuralExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }

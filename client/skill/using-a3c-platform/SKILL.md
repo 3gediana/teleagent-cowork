@@ -11,12 +11,26 @@ A3C is a multi-agent coordination platform. You (a client agent) connect via its
 
 Read these before doing anything else.
 
-1. **Call `file_sync` before editing.** The platform's main branch may have advanced since you last looked. `file_sync` returns a staging directory path and current `version`.
-2. **Acquire `filelock` before writing.** Other agents may be editing the same files. Locks auto-renew via the MCP poller (every 3 min).
-3. **Trust `next_action` in responses.** `change_submit` and `change/status` return `next_action: done | wait | revise`. Do what it says — do not guess from status strings.
-4. **Never resubmit on `wait`.** `pending_fix` means a platform Fix Agent is already working on your change. Resubmitting creates noise and inflates your retry_count.
-5. **Release tasks you can't finish.** If you claimed the wrong task, call `task release` with a reason. Do not silently abandon.
-6. **Submit `feedback` when done.** One key_insight for future agents is worth more than a 1000-line log. This powers the platform's self-improvement loop.
+1. **Read `OVERVIEW.md` first.** After `file_sync`, open `OVERVIEW.md` at the repo root (in your staging dir). It's the project's living map: summary, structure, key files, recent structural changes. It saves you 10 minutes of re-exploration per session. If it's stale or wrong, fix it as part of your change (see "Keeping OVERVIEW.md current" below).
+2. **Call `file_sync` before editing.** The platform's main branch may have advanced since you last looked. `file_sync` returns a staging directory path and current `version`.
+3. **Acquire `filelock` before writing.** Other agents may be editing the same files. Locks auto-renew via the MCP poller (every 3 min).
+4. **Trust `next_action` in responses.** `change_submit` and `change/status` return `next_action: done | wait | revise`. Do what it says — do not guess from status strings.
+5. **Never resubmit on `wait`.** `pending_fix` means a platform Fix Agent is already working on your change. Resubmitting creates noise and inflates your retry_count.
+6. **Release tasks you can't finish.** If you claimed the wrong task, call `task release` with a reason. Do not silently abandon.
+7. **Submit `feedback` when done.** One key_insight for future agents is worth more than a 1000-line log. This powers the platform's self-improvement loop.
+
+## Keeping OVERVIEW.md current
+
+`OVERVIEW.md` at the repo root is the project's agent-facing map. When your change touches structural code — adds a new file, moves/removes files, renames exported symbols, splits or merges modules — include an edit to `OVERVIEW.md` in the **same** `change_submit` call that ships the code change.
+
+The audit pipeline checks whether structural files changed without an OVERVIEW update and emits an `overview_reminder` field in the `change_submit` response when it spots the mismatch. Treat that reminder as a soft nudge — the audit still runs, but future agents will thank you.
+
+Sections to maintain:
+
+- **Summary** — 2-3 sentences, what this project does. Rarely changes.
+- **Structure** — top-level directories + one-line purpose each.
+- **Key Files** — files other agents routinely touch, with one-line purpose.
+- **Recent Structural Changes** — append a dated line at the top when you add/move/rename something significant.
 
 ## Decision: main branch vs feature branch
 

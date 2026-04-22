@@ -46,10 +46,20 @@ func GitInit(projectID string) error {
 		cmd.Dir = repoPath
 		cmd.Run()
 
-		// Create initial commit so HEAD exists (required for worktree/branch creation)
+		// Create initial commit so HEAD exists (required for worktree/branch creation).
+		// README.md is the human entry point; OVERVIEW.md is the agent-facing
+		// project map — every agent reads it on session start via the
+		// project-overview-read skill, and change_submit nudges agents to
+		// update it alongside structural code changes.
 		readmePath := filepath.Join(repoPath, "README.md")
-		os.WriteFile(readmePath, []byte("# Project\n"), 0644)
-		cmd = exec.Command("git", "add", "README.md")
+		if _, err := os.Stat(readmePath); os.IsNotExist(err) {
+			os.WriteFile(readmePath, []byte("# Project\n"), 0644)
+		}
+		overviewPath := filepath.Join(repoPath, "OVERVIEW.md")
+		if _, err := os.Stat(overviewPath); os.IsNotExist(err) {
+			os.WriteFile(overviewPath, []byte(initialOverviewTemplate()), 0644)
+		}
+		cmd = exec.Command("git", "add", "-A")
 		cmd.Dir = repoPath
 		cmd.Run()
 		cmd = exec.Command("git", "commit", "-m", "Initial commit")
@@ -61,6 +71,48 @@ func GitInit(projectID string) error {
 		log.Printf("[Git] Initialized repo for project %s", projectID)
 	}
 	return nil
+}
+
+// initialOverviewTemplate returns the stub OVERVIEW.md shipped with every
+// newly-initialised project repo. It is intentionally short and prescriptive:
+// the first Maintain pass fills in Summary/Structure, and every change_submit
+// that touches structural code is expected to append to Recent Structural
+// Changes. Agents read this file at session start (project-overview-read
+// skill), so its shape is also part of the agent protocol — keep field
+// headings stable when editing.
+func initialOverviewTemplate() string {
+	return `# Project Overview
+
+> Living map of this codebase. Every agent reads this file at session start.
+> When you change structure (add/move/remove files, refactor modules, rename
+> exported symbols), update this file in the **same** ` + "`change_submit`" + ` call that
+> ships the code change. The audit pipeline emits an ` + "`overview_reminder`" + ` when
+> structural code changes without an OVERVIEW update.
+
+## Summary
+
+_Pending first Maintain agent pass. Describe the project's purpose in 2-3
+sentences._
+
+## Structure
+
+_Top-level directories and their purpose. Example format:_
+
+- ` + "`src/`" + ` — source code
+- ` + "`tests/`" + ` — test suite
+- ` + "`docs/`" + ` — documentation
+
+## Key Files
+
+_Files other agents routinely touch, with their purpose. Example format:_
+
+- ` + "`src/main.go`" + ` — entry point, wires config + server
+- ` + "`src/config.go`" + ` — configuration loading from env + yaml
+
+## Recent Structural Changes
+
+_Newest first. Append one line per significant structural update._
+`
 }
 
 func GitAddAndCommit(projectID string, taskName string, taskDesc string) error {
