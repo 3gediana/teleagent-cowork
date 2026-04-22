@@ -7,9 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
 	"github.com/a3c/platform/internal/service"
 )
@@ -192,45 +190,15 @@ func deletePendingInput(id string) {
 	pendingInputsMu.Unlock()
 }
 
-// dashboardSession tracks the active OpenCode serve session per project for multi-round dialogue
-type dashboardSessionInfo struct {
-	OpenCodeSessionID string
-	TargetBlock       string
-	AgentSessionID    string
-	Model             string
-}
-
-var (
-	dashboardSessions   = make(map[string]*dashboardSessionInfo) // projectID -> session info
-	dashboardSessionsMu sync.RWMutex
-)
-
-func getDashboardSession(projectID string) *dashboardSessionInfo {
-	dashboardSessionsMu.RLock()
-	defer dashboardSessionsMu.RUnlock()
-	return dashboardSessions[projectID]
-}
-
-func setDashboardSession(projectID string, info *dashboardSessionInfo) {
-	dashboardSessionsMu.Lock()
-	defer dashboardSessionsMu.Unlock()
-	dashboardSessions[projectID] = info
-}
-
-func clearDashboardSession(projectID string) {
-	dashboardSessionsMu.Lock()
-	defer dashboardSessionsMu.Unlock()
-	delete(dashboardSessions, projectID)
-}
-
-// SetDashboardSessionForProject exports the ability to register a dashboard session from the service layer
-func SetDashboardSessionForProject(projectID, ocSessionID, agentSessionID, model string) {
-	setDashboardSession(projectID, &dashboardSessionInfo{
-		OpenCodeSessionID: ocSessionID,
-		AgentSessionID:    agentSessionID,
-		Model:             model,
-	})
-}
+// Multi-round dashboard dialogue is now stored in
+// model.DialogueMessage (see @platform/backend/internal/service/dialogue.go).
+// The old dashboardSessionInfo / dashboardSessions map cached an
+// opencode serve session id per project; with the native runner that
+// cache is unnecessary — every Input dispatches a fresh agent session
+// and the conversation is rehydrated from the DB on the next turn.
+//
+// `sync` import is still needed for pendingInputsMu declared below.
+var _ sync.RWMutex // keep the import to avoid a churn in go vet output
 
 func (h *DashboardHandler) Input(c *gin.Context) {
 	// Dashboard is the human's channel to direct the Maintain Agent. Non-human
@@ -269,68 +237,24 @@ func (h *DashboardHandler) Input(c *gin.Context) {
 		AgentID:     agentID,
 	}
 
-	// Check for existing active dashboard session (multi-round dialogue)
-	existingSession := getDashboardSession(projectID)
-
-	if existingSession != nil && existingSession.OpenCodeSessionID != "" {
-		// Multi-round: send follow-up message to existing serve session
-		scheduler := opencode.DefaultScheduler
-		if scheduler != nil {
-			msgResp, err := scheduler.SendToExistingSession(
-				existingSession.OpenCodeSessionID,
-				req.Content,
-				"maintain",
-				existingSession.Model,
-			)
-			if err != nil {
-				log.Printf("[Dashboard] Failed to send follow-up message: %v", err)
-				c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to send message to agent"}})
-				return
-			}
-
-			// Extract text response from agent
-			var agentText string
-			for _, part := range msgResp.Parts {
-				if part.Type == "text" {
-					agentText += part.Text
-				}
-			}
-
-			storePendingInput(input)
-
-			// Broadcast chat update to frontend via SSE
-			service.BroadcastEvent(projectID, "CHAT_UPDATE", gin.H{
-				"role":    "agent",
-				"content": agentText,
-			})
-
-			c.JSON(200, gin.H{
-				"success": true,
-				"data": gin.H{
-					"input_id":          inputID,
-					"block_type":        req.TargetBlock,
-					"status":            "processing",
-					"session_active":    true,
-					"agent_response":    agentText,
-					"opencode_session_id": existingSession.OpenCodeSessionID,
-				},
-			})
-			return
-		}
-	}
-
-	// No active session: trigger maintain agent (creates new serve session)
+	// Task inputs route to the Maintain agent. Multi-round context
+	// is handled inside TriggerMaintainAgent: it persists this turn
+	// to DialogueMessage, reads prior turns, and prefixes them into
+	// the prompt. Reply delivery is asynchronous — the frontend
+	// listens for CHAT_UPDATE on SSE.
 	if req.TargetBlock == "task" {
 		go func() {
-			service.TriggerMaintainAgent(projectID, "dashboard_task_input", req.Content)
+			if err := service.TriggerMaintainAgent(projectID, "dashboard_task_input", req.Content); err != nil {
+				log.Printf("[Dashboard] TriggerMaintainAgent failed: %v", err)
+			}
 		}()
 		storePendingInput(input)
 		c.JSON(200, gin.H{
 			"success": true,
 			"data": gin.H{
-				"input_id":    inputID,
-				"block_type":  req.TargetBlock,
-				"status":      "processing",
+				"input_id":       inputID,
+				"block_type":     req.TargetBlock,
+				"status":         "processing",
 				"session_active": true,
 			},
 		})
@@ -431,44 +355,34 @@ func (h *DashboardHandler) Confirm(c *gin.Context) {
 		"reason":     "dashboard confirm",
 	})
 
-	// Auto-clear the dashboard session context after confirmation
-	existingSession := getDashboardSession(projectID)
-	if existingSession != nil && existingSession.OpenCodeSessionID != "" {
-		scheduler := opencode.DefaultScheduler
-		if scheduler != nil {
-			if err := scheduler.DeleteServeSession(existingSession.OpenCodeSessionID); err != nil {
-				log.Printf("[Dashboard] Failed to delete serve session after confirm: %v", err)
-			}
-		}
-		// Cleanup maintain agent serve session mapping
-		var maintainAgent model.Agent
-		if model.DB.Where("current_project_id = ? AND status != 'offline' AND name LIKE ?", projectID, "maintain%").First(&maintainAgent).Error == nil {
-			if sid := opencode.GetAgentServeSession(maintainAgent.ID); sid == existingSession.OpenCodeSessionID {
-				opencode.UnregisterAgentServeSession(maintainAgent.ID)
-			}
-		}
-		clearDashboardSession(projectID)
-		agent.DefaultManager.ClearSession(existingSession.AgentSessionID)
-		log.Printf("[Dashboard] Auto-cleared session context for project %s after confirm", projectID)
-
-		// Notify frontend that context was cleared
+	// Auto-clear the Maintain dialogue transcript so the next user
+	// message starts fresh. The native runner is stateless per
+	// session anyway — only the persisted history would leak stale
+	// context if left behind.
+	cleared := service.ClearDialogue(projectID, service.DialogueChannelMaintain)
+	if cleared > 0 {
 		service.BroadcastEvent(projectID, "CONTEXT_CLEARED", gin.H{
-			"reason": "confirmed",
+			"reason":        "confirmed",
+			"channel":       service.DialogueChannelMaintain,
+			"rows_affected": cleared,
 		})
 	}
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"input_id":    req.InputID,
-			"block_type":  input.TargetBlock,
-			"version":     cb.Version,
-			"confirmed":   true,
-			"context_cleared": existingSession != nil,
+			"input_id":        req.InputID,
+			"block_type":      input.TargetBlock,
+			"version":         cb.Version,
+			"confirmed":       true,
+			"context_cleared": cleared > 0,
 		},
 	})
 }
 
+// ClearContext wipes the dialogue transcript for a given channel on
+// a project. ?channel defaults to "maintain" (the main dashboard tab);
+// pass ?channel=chief to clear the Chief chat instead.
 func (h *DashboardHandler) ClearContext(c *gin.Context) {
 	if !callerIsHuman(c) {
 		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "Dashboard clear is reserved for human users"}})
@@ -479,58 +393,57 @@ func (h *DashboardHandler) ClearContext(c *gin.Context) {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})
 		return
 	}
-
-	existingSession := getDashboardSession(projectID)
-	if existingSession != nil && existingSession.OpenCodeSessionID != "" {
-		scheduler := opencode.DefaultScheduler
-		if scheduler != nil {
-			scheduler.DeleteServeSession(existingSession.OpenCodeSessionID)
-		}
-		// Cleanup maintain agent serve session mapping
-		var maintainAgent model.Agent
-		if model.DB.Where("current_project_id = ? AND status != 'offline' AND name LIKE ?", projectID, "maintain%").First(&maintainAgent).Error == nil {
-			if sid := opencode.GetAgentServeSession(maintainAgent.ID); sid == existingSession.OpenCodeSessionID {
-				opencode.UnregisterAgentServeSession(maintainAgent.ID)
-			}
-		}
-		agent.DefaultManager.ClearSession(existingSession.AgentSessionID)
-		clearDashboardSession(projectID)
+	channel := c.Query("channel")
+	if channel == "" {
+		channel = service.DialogueChannelMaintain
 	}
 
-	// Broadcast context cleared event
+	cleared := service.ClearDialogue(projectID, channel)
+
 	service.BroadcastEvent(projectID, "CONTEXT_CLEARED", gin.H{
-		"reason": "manual",
+		"reason":        "manual",
+		"channel":       channel,
+		"rows_affected": cleared,
 	})
 
-	c.JSON(200, gin.H{"success": true, "data": gin.H{"project_id": projectID, "cleared": true}})
+	c.JSON(200, gin.H{"success": true, "data": gin.H{
+		"project_id":    projectID,
+		"channel":       channel,
+		"rows_affected": cleared,
+		"cleared":       true,
+	}})
 }
 
-// GetMessages returns the dialogue history for the current dashboard session
+// GetMessages returns the dialogue history for a project + channel.
+// Shape is { role, content, created_at, session_id } entries in
+// chronological order — the frontend renders them directly.
+//
+// ?channel defaults to "maintain" for backwards compatibility with
+// the old /dashboard/messages callers; pass ?channel=chief to fetch
+// the Chief chat transcript.
 func (h *DashboardHandler) GetMessages(c *gin.Context) {
 	projectID := c.Query("project_id")
 	if projectID == "" {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "project_id is required"}})
 		return
 	}
-
-	existingSession := getDashboardSession(projectID)
-	if existingSession == nil || existingSession.OpenCodeSessionID == "" {
-		c.JSON(200, gin.H{"success": true, "data": gin.H{"messages": []interface{}{}}})
-		return
+	channel := c.Query("channel")
+	if channel == "" {
+		channel = service.DialogueChannelMaintain
 	}
-
-	scheduler := opencode.DefaultScheduler
-	if scheduler == nil {
-		c.JSON(200, gin.H{"success": true, "data": gin.H{"messages": []interface{}{}}})
-		return
+	rows := service.LoadRecentDialogue(projectID, channel, 100)
+	messages := make([]gin.H, 0, len(rows))
+	for _, m := range rows {
+		messages = append(messages, gin.H{
+			"id":         m.ID,
+			"role":       m.Role,
+			"content":    m.Content,
+			"session_id": m.SessionID,
+			"created_at": m.CreatedAt,
+		})
 	}
-
-	messages, err := scheduler.GetSessionMessages(existingSession.OpenCodeSessionID)
-	if err != nil {
-		log.Printf("[Dashboard] Failed to get messages: %v", err)
-		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to get messages"}})
-		return
-	}
-
-	c.JSON(200, gin.H{"success": true, "data": gin.H{"messages": messages}})
+	c.JSON(200, gin.H{"success": true, "data": gin.H{
+		"channel":  channel,
+		"messages": messages,
+	}})
 }

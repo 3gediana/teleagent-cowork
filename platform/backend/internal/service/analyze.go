@@ -10,7 +10,6 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"gorm.io/gorm"
 )
 
@@ -87,11 +86,6 @@ func buildAnalyzeQueryText(exps []model.Experience) string {
 
 // TriggerAnalyzeAgent creates and dispatches an Analyze Agent session for a project.
 func TriggerAnalyzeAgent(projectID string) {
-	if opencode.DefaultScheduler == nil {
-		log.Printf("[Analyze] Scheduler not initialized, skipping")
-		return
-	}
-
 	// Gather raw experiences for context
 	var rawExperiences []model.Experience
 	model.DB.Where("project_id = ? AND status = ?", projectID, "raw").

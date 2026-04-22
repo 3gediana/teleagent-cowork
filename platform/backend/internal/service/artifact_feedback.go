@@ -26,6 +26,18 @@ func HandleSessionCompletion(sessionID, projectID, role, status string) {
 		}
 	}()
 
+	// Capture assistant output for dialogue roles. Must happen on
+	// "completed" only — failed/rejected runs would pollute chat
+	// history with error stubs the model didn't actually author.
+	if status == "completed" {
+		if channel := DialogueChannelForRole(role); channel != "" {
+			var outSess model.AgentSession
+			if err := model.DB.Select("output").Where("id = ?", sessionID).First(&outSess).Error; err == nil {
+				AppendDialogueMessage(projectID, channel, sessionID, DialogueRoleAssistant, outSess.Output)
+			}
+		}
+	}
+
 	var sess model.AgentSession
 	if err := model.DB.Select("injected_artifacts").Where("id = ?", sessionID).First(&sess).Error; err != nil {
 		return

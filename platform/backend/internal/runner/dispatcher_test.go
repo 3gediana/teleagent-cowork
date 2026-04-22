@@ -1,34 +1,111 @@
 package runner
 
 // Dispatcher tests. Only cover the pure-function pieces
-// (routesToNative, DefaultRegistryBuilder, DefaultPromptBuilder) to
-// avoid pulling in a DB + full session lifecycle into the unit tests.
+// (resolveEndpointForRole, DefaultRegistryBuilder, DefaultPromptBuilder)
+// to avoid pulling in a DB + full session lifecycle into the unit tests.
 // End-to-end dispatch is exercised by e2erun.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/a3c/platform/internal/agent"
+	"github.com/a3c/platform/internal/llm"
 )
 
-func TestRoutesToNative(t *testing.T) {
-	cases := []struct {
-		name     string
-		provider string
-		want     bool
-	}{
-		{"empty (default opencode)", "", false},
-		{"legacy opencode provider", "anthropic", false},
-		{"legacy minimax id", "minimax-coding-plan", false},
-		{"user-registered LLM endpoint", "llm_abc123", true},
-		{"malformed llm-ish prefix", "llmabc", false},
+// withIsolatedRegistry swaps llm.DefaultRegistry with a fresh one for
+// the duration of a test so entries we install here don't leak into
+// sibling tests (the registry is a process-wide singleton).
+func withIsolatedRegistry(t *testing.T) {
+	t.Helper()
+	prev := llm.DefaultRegistry
+	llm.DefaultRegistry = llm.NewRegistry()
+	t.Cleanup(func() { llm.DefaultRegistry = prev })
+}
+
+func TestResolveEndpointForRole_EmptyRegistry(t *testing.T) {
+	withIsolatedRegistry(t)
+
+	cfg := &agent.RoleConfig{Role: agent.RoleAudit1}
+	_, err := resolveEndpointForRole(cfg)
+	if err == nil || !strings.Contains(err.Error(), "no LLM endpoints") {
+		t.Errorf("expected clear empty-registry error, got %v", err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := routesToNative(c.provider); got != c.want {
-				t.Errorf("routesToNative(%q) = %v; want %v", c.provider, got, c.want)
-			}
-		})
+}
+
+func TestResolveEndpointForRole_ConfiguredOverride(t *testing.T) {
+	withIsolatedRegistry(t)
+
+	llm.DefaultRegistry.Register(&llm.Entry{
+		EndpointID:   "llm_fake",
+		EndpointName: "Fake",
+		DefaultModel: "fake-model-default",
+	})
+
+	cfg := &agent.RoleConfig{
+		Role:          agent.RoleAudit1,
+		ModelProvider: "llm_fake",
+		ModelID:       "fake-model-explicit",
+	}
+	route, err := resolveEndpointForRole(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if route.endpointID != "llm_fake" || route.modelID != "fake-model-explicit" {
+		t.Errorf("unexpected route: %+v", route)
+	}
+}
+
+func TestResolveEndpointForRole_OverrideFallsBackToDefaultModel(t *testing.T) {
+	withIsolatedRegistry(t)
+	llm.DefaultRegistry.Register(&llm.Entry{
+		EndpointID:   "llm_fake",
+		EndpointName: "Fake",
+		DefaultModel: "fake-model-default",
+	})
+
+	cfg := &agent.RoleConfig{
+		Role:          agent.RoleAudit1,
+		ModelProvider: "llm_fake", // ModelID empty
+	}
+	route, err := resolveEndpointForRole(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if route.modelID != "fake-model-default" {
+		t.Errorf("expected fallback to endpoint default model, got %s", route.modelID)
+	}
+}
+
+func TestResolveEndpointForRole_NoOverride_PicksFirstRegistered(t *testing.T) {
+	withIsolatedRegistry(t)
+	llm.DefaultRegistry.Register(&llm.Entry{
+		EndpointID:   "llm_fake",
+		EndpointName: "Fake",
+		DefaultModel: "fake-model-default",
+	})
+
+	cfg := &agent.RoleConfig{Role: agent.RoleAudit1}
+	route, err := resolveEndpointForRole(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if route.endpointID != "llm_fake" || route.modelID != "fake-model-default" {
+		t.Errorf("unexpected route for empty override: %+v", route)
+	}
+}
+
+func TestResolveEndpointForRole_MissingEndpointIsClearError(t *testing.T) {
+	withIsolatedRegistry(t)
+
+	cfg := &agent.RoleConfig{
+		Role:          agent.RoleAudit1,
+		ModelProvider: "llm_ghost",
+		ModelID:       "whatever",
+	}
+	_, err := resolveEndpointForRole(cfg)
+	if err == nil || !strings.Contains(err.Error(), "llm_ghost") {
+		t.Errorf("expected error naming the missing endpoint, got %v", err)
 	}
 }
 

@@ -12,7 +12,6 @@ import (
 	"github.com/a3c/platform/internal/llm"
 	"github.com/a3c/platform/internal/middleware"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/runner"
 	"github.com/a3c/platform/internal/service"
 )
@@ -29,8 +28,6 @@ func main() {
 		log.Fatalf("Redis init failed: %v", err)
 	}
 
-	opencode.InitScheduler(cfg.OpenCode)
-
 	// LLM endpoint registry — load every user-registered endpoint
 	// from the DB before any agent dispatches, so the runtime has
 	// models available as soon as it comes up. Empty registry is
@@ -39,48 +36,17 @@ func main() {
 
 	service.InitDataPath(cfg.DataDir)
 
-	// Register dispatcher. The runner package routes by RoleOverride:
-	//   * ModelProvider starts with "llm_" → native runner (our code)
-	//   * anything else                    → opencode (legacy path)
-	// Keeping opencode behind a fallback lets operators migrate
-	// roles one at a time by re-assigning models in the dashboard.
-	runner.OpencodeFallback = func(session *agent.Session) error {
-		return opencode.DefaultScheduler.Dispatch(session)
-	}
-	// Upgrade from DefaultRegistryBuilder (builtin-only) to the
-	// production builder that also exposes platform tools per role.
+	// Register the single native-runner dispatcher. Every platform
+	// agent role (audit / fix / evaluate / merge / maintain / chief /
+	// analyze / consult / assess) routes through this path; the
+	// legacy opencode scheduler has been removed.
 	runner.NativeRegistryBuilder = runner.PlatformRegistryBuilder
-	// Route platform tool calls (audit_output, create_task, ...)
-	// into the same service handler opencode uses, so both runtimes
-	// produce identical side effects on the DB + change pipeline.
 	runner.PlatformToolSink = service.HandleToolCallResult
-	// Stream runner events (CHAT_UPDATE / TOOL_CALL / AGENT_DONE / ...)
-	// to every SSE client subscribed to the session's project so the
-	// dashboard lights up the same way it does for opencode sessions.
 	runner.StreamEmitter = func(projectID, eventType string, payload map[string]interface{}) {
 		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
 	}
-	// Session-completion hook: closes the refinery feedback loop by
-	// bumping success/failure counters on KnowledgeArtifacts injected
-	// into the finished session. Opencode gets this via its parallel
-	// hook (line below); we route native runs through the same
-	// service function so both runtimes feed the same counters.
 	runner.SessionCompletionHandler = service.HandleSessionCompletion
 	agent.RegisterDispatcher(runner.Dispatch)
-
-	// Wire dashboard session callback to bridge service → handler without import cycle
-	service.DashboardSessionCallback = handler.SetDashboardSessionForProject
-
-	// Wire tool call handler to bridge opencode → service without import cycle
-	opencode.ToolCallHandler = service.HandleToolCallResult
-
-	// Wire session completion handler for refinery artifact feedback loop
-	opencode.SessionCompletionHandler = service.HandleSessionCompletion
-
-	// Wire broadcast handler for real-time SSE push from scheduler to frontend
-	opencode.BroadcastHandler = func(projectID, eventType string, payload map[string]interface{}) {
-		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
-	}
 
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()

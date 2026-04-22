@@ -2,19 +2,13 @@ package runner
 
 // Dispatcher — the binding layer between agent.DispatchSession (the
 // thing the platform calls when a session is ready to run) and the
-// native runner Loop. Also provides the opencode fallback path so
-// existing roles that still rely on opencode keep working unmodified.
+// native runner Loop.
 //
-// Routing rule (Phase 1 migration):
-//
-//   * RoleOverride.ModelProvider starts with "llm_"  →  native runner
-//   * Anything else (empty or legacy provider id)    →  opencode
-//
-// The "llm_" prefix is guaranteed by model.GenerateID("llm") — every
-// user-registered endpoint row has it. This lets operators migrate a
-// role to the native path by swapping its model assignment in the UI
-// (and back again if something goes wrong), without a code change or
-// restart.
+// The old dual-runtime routing (native vs opencode fallback) is gone:
+// every platform agent now runs through the native runner. The only
+// dispatch decision left is "which endpoint + model does this role
+// use?" — resolved via RoleOverride, falling back to the first
+// registered llm.Entry when the override is empty.
 
 import (
 	"context"
@@ -27,12 +21,6 @@ import (
 	"github.com/a3c/platform/internal/llm"
 	"github.com/a3c/platform/internal/model"
 )
-
-// OpencodeFallback is the opencode dispatcher function. Wired in from
-// cmd/server/main.go at startup to avoid a hard import dependency
-// between `runner` and `opencode` — keeping opencode optional means
-// we can eventually delete it without touching runner.
-var OpencodeFallback agent.SessionDispatcher
 
 // SessionCompletionHandler is invoked after a native-runtime session
 // finishes (regardless of success). Wired at startup to
@@ -93,39 +81,80 @@ func DefaultPromptBuilder(sess *agent.Session) (string, string, error) {
 }
 
 // Dispatch is the entry point registered with agent.RegisterDispatcher
-// at server startup. It picks between native and opencode based on
-// the role's persisted ModelProvider.
+// at server startup. Every session routes through the native runner;
+// the only remaining work is resolving which LLM endpoint + model to
+// use.
+//
+// Resolution order:
+//   1. RoleOverride with both provider + model set → use both
+//   2. RoleOverride with provider only            → use endpoint's default model
+//   3. No override                                 → use the first registered
+//      llm.Entry (fresh-install ergonomics; stops agents from silently
+//      failing before the operator has configured roles explicitly)
+//
+// When the registry is empty we fail loudly: there's literally no way
+// to run an LLM agent without at least one endpoint.
 func Dispatch(sess *agent.Session) error {
 	cfg := agent.GetRoleConfigWithOverride(sess.Role)
 	if cfg == nil {
 		return fmt.Errorf("dispatcher: unknown role %q", sess.Role)
 	}
 
-	if !routesToNative(cfg.ModelProvider) {
-		if OpencodeFallback == nil {
-			return fmt.Errorf("dispatcher: role %q needs opencode but fallback is not wired", sess.Role)
-		}
-		log.Printf("[Dispatcher] session=%s role=%s → opencode (provider=%s)",
-			sess.ID, sess.Role, cfg.ModelProvider)
-		return OpencodeFallback(sess)
+	resolved, err := resolveEndpointForRole(cfg)
+	if err != nil {
+		return fmt.Errorf("dispatcher: role %q: %w", sess.Role, err)
 	}
 
 	log.Printf("[Dispatcher] session=%s role=%s → native runner (endpoint=%s model=%s)",
-		sess.ID, sess.Role, cfg.ModelProvider, cfg.ModelID)
-	return runNative(sess, cfg)
+		sess.ID, sess.Role, resolved.endpointID, resolved.modelID)
+	return runNative(sess, resolved)
 }
 
-// routesToNative is the one-line routing decision. Isolated as a
-// named helper so tests can assert on it directly.
-func routesToNative(modelProvider string) bool {
-	return strings.HasPrefix(modelProvider, "llm_")
+// resolvedRoute packages the outcome of role → endpoint resolution so
+// runNative doesn't need to re-do the work.
+type resolvedRoute struct {
+	endpointID string
+	modelID    string
+}
+
+// resolveEndpointForRole walks the resolution order documented on
+// Dispatch. Exported as lowercase so tests in the same package can
+// assert on specific fallback paths without going through runNative.
+func resolveEndpointForRole(cfg *agent.RoleConfig) (resolvedRoute, error) {
+	// Explicit override — just validate the endpoint exists.
+	if cfg.ModelProvider != "" {
+		entry, err := llm.DefaultRegistry.Get(cfg.ModelProvider)
+		if err != nil {
+			return resolvedRoute{}, fmt.Errorf("configured endpoint %q not registered: %w", cfg.ModelProvider, err)
+		}
+		modelID := cfg.ModelID
+		if modelID == "" {
+			modelID = entry.DefaultModel
+		}
+		if modelID == "" {
+			return resolvedRoute{}, fmt.Errorf("endpoint %q has no default model and no explicit model_id on the role", cfg.ModelProvider)
+		}
+		return resolvedRoute{endpointID: cfg.ModelProvider, modelID: modelID}, nil
+	}
+
+	// No override — pick the first registered endpoint with a default
+	// model. Ordering is non-deterministic but stable within a single
+	// process run, which is good enough for fresh-install ergonomics;
+	// operators set an explicit override as soon as they have a
+	// preference.
+	for _, e := range llm.DefaultRegistry.List() {
+		if e.DefaultModel != "" {
+			return resolvedRoute{endpointID: e.EndpointID, modelID: e.DefaultModel}, nil
+		}
+	}
+	return resolvedRoute{}, fmt.Errorf("no LLM endpoints registered — add one via the dashboard first")
 }
 
 // runNative wires a ready-to-run session through the native Loop.
 // Errors are recorded onto the session (Status=failed) before
 // returning so the dispatcher's caller doesn't need to duplicate
 // that bookkeeping.
-func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
+func runNative(sess *agent.Session, route resolvedRoute) error {
 	// Mark running right away. On failure we flip to failed below;
 	// on success the caller updates to completed once output has
 	// been ingested by the platform.
@@ -146,8 +175,8 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 
 	started := time.Now()
 	res, err := Run(ctx, sess, reg, RunOptions{
-		EndpointID:    cfg.ModelProvider,
-		Model:         cfg.ModelID,
+		EndpointID:    route.endpointID,
+		Model:         route.modelID,
 		SystemPrompt:  systemPrompt,
 		UserInput:     userInput,
 		MaxTokens:     defaultMaxTokensForRole(sess.Role),
@@ -173,7 +202,7 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 	// so downstream consumers (change audit, PR gate, dashboard)
 	// see it the same way they always have.
 	sess.Output = res.FinalText
-	persistRunMetadata(sess, cfg, res, duration)
+	persistRunMetadata(sess, route, res, duration)
 	markSession(sess, "completed", "")
 	fireSessionCompletion(sess, "completed")
 	return nil
@@ -222,14 +251,14 @@ func markSession(sess *agent.Session, status, errMsg string) {
 // don't track per-session token counts in the DB yet (no columns for
 // it on AgentSession); the cost line is logged so operators can see
 // it in the server journal while the schema catches up.
-func persistRunMetadata(sess *agent.Session, cfg *agent.RoleConfig, res *RunResult, duration time.Duration) {
+func persistRunMetadata(sess *agent.Session, route resolvedRoute, res *RunResult, duration time.Duration) {
 	// Best-effort pricing: registry's model catalogue may have rates
 	// the endpoint didn't list explicitly.
 	u := res.Usage
 	if u.USD == 0 {
-		if entry, err := llm.DefaultRegistry.Get(cfg.ModelProvider); err == nil {
+		if entry, err := llm.DefaultRegistry.Get(route.endpointID); err == nil {
 			for _, m := range entry.Provider.Models() {
-				if m.ID == cfg.ModelID {
+				if m.ID == route.modelID {
 					u = llm.AttachCost(u, llm.MergePricing(m))
 					break
 				}

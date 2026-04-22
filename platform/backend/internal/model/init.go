@@ -51,6 +51,9 @@ func InitDB(cfg *config.DatabaseConfig) error {
 		// LLM endpoint registry — user-registered model connections
 		// (see @platform/backend/internal/model/llm_endpoint.go).
 		&LLMEndpoint{},
+		// Dialogue history — replaces opencode serve sessions for
+		// multi-round Chief chat + Maintain dashboard input.
+		&DialogueMessage{},
 	); err != nil {
 		log.Printf("[DB] AutoMigrate warning: %v (attempting retry)", err)
 		// Retry once - GORM sometimes fails on first pass with index issues

@@ -92,7 +92,14 @@ type Registry struct {
 // DefaultRegistry is the process-wide singleton. Other packages
 // (handler, agent runner) use it directly — matches the convention
 // used by model.DB, agent.DefaultManager elsewhere in the codebase.
-var DefaultRegistry = &Registry{entries: map[string]*Entry{}}
+var DefaultRegistry = NewRegistry()
+
+// NewRegistry returns an empty, usable Registry. Exposed so tests can
+// swap in an isolated instance without reaching into unexported map
+// internals (dispatcher_test.go uses this pattern).
+func NewRegistry() *Registry {
+	return &Registry{entries: map[string]*Entry{}}
+}
 
 // Register installs or overwrites an entry. Overwrite is the intended
 // behaviour when an operator edits an endpoint in the dashboard: the

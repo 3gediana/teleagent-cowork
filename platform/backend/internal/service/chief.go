@@ -10,7 +10,6 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
 	"gorm.io/gorm"
 )
@@ -47,6 +46,12 @@ func buildChiefQueryText(milestoneContent string, tasks []model.Task) string {
 // TriggerChiefDecision triggers the Chief Agent to make a decision.
 // decisionType: "pr_review", "pr_merge", "milestone_switch", etc.
 // targetID: the ID of the entity being decided on (PR ID, milestone ID, etc.)
+//
+// Decision sessions don't feed DialogueMessage history — they're
+// platform-initiated (AutoMode, policy-triggered), not human chat.
+// If you want the decision to appear in the Chief chat transcript, the
+// caller should also invoke AppendDialogueMessage with a synthetic
+// user-role preamble describing the context.
 func TriggerChiefDecision(projectID string, decisionType string, targetID string) {
 	ctx := buildChiefContext(projectID, decisionType, targetID)
 	session := agent.DefaultManager.CreateSession(agent.RoleChief, projectID, ctx, "chief_decision_"+decisionType)
@@ -55,49 +60,41 @@ func TriggerChiefDecision(projectID string, decisionType string, targetID string
 	log.Printf("[Chief] Created decision session %s for project %s, type=%s, target=%s", session.ID, projectID, decisionType, targetID)
 
 	agent.DispatchSession(session)
-
-	// Register serve session for multi-round dialogue when available
-	go registerChiefServeSession(session.ID, projectID)
 }
 
 // TriggerChiefChat triggers the Chief Agent for a human conversation.
+// The user's input is persisted into DialogueMessage before dispatch;
+// the assistant's reply is appended automatically by
+// HandleSessionCompletion when the session finishes. Prior history is
+// prepended to the prompt so the model sees multi-round context.
 func TriggerChiefChat(projectID string, inputContent string) {
+	// Persist the user turn first so the history the agent is about
+	// to read includes this very message (the agent won't see it in
+	// the "Conversation history" prefix — it lands as InputContent —
+	// but subsequent turns will see it).
+	AppendDialogueMessage(projectID, DialogueChannelChief, "", DialogueRoleUser, inputContent)
+
 	ctx := buildChiefContext(projectID, "chat", "")
-	ctx.InputContent = inputContent
+	// Prefix the conversation history (last ~20 turns) so the model
+	// has continuity. The current turn goes in as-is below.
+	history := BuildDialogueHistoryForPrompt(projectID, DialogueChannelChief)
+	if history != "" {
+		ctx.InputContent = history + "\n---\n" + inputContent
+	} else {
+		ctx.InputContent = inputContent
+	}
 
 	session := agent.DefaultManager.CreateSession(agent.RoleChief, projectID, ctx, "chief_request")
-	log.Printf("[Chief] Created chat session %s for project %s", session.ID, projectID)
+	log.Printf("[Chief] Created chat session %s for project %s (history turns=%d)", session.ID, projectID, countHistoryTurns(history))
 
 	agent.DispatchSession(session)
-
-	// Register serve session for multi-round dialogue when available
-	go registerChiefServeSession(session.ID, projectID)
 }
 
-// ChiefSessionReady is called when a Chief agent session's OpenCode serve session is available
-var ChiefSessionReady func(projectID, ocSessionID, agentSessionID, model string)
-
-func registerChiefServeSession(sessionID, projectID string) {
-	scheduler := opencode.DefaultScheduler
-	for i := 0; i < 30; i++ {
-		updated := agent.DefaultManager.GetSession(sessionID)
-		if updated != nil && updated.OpenCodeSessionID != "" {
-			modelStr := "minimax-coding-plan/MiniMax-M2.7"
-			if scheduler != nil {
-				modelStr = scheduler.GetModelString()
-			}
-			if ChiefSessionReady != nil {
-				ChiefSessionReady(projectID, updated.OpenCodeSessionID, sessionID, modelStr)
-			}
-			log.Printf("[Chief] Registered serve session for project %s: ocSession=%s", projectID, updated.OpenCodeSessionID)
-			return
-		}
-		if updated != nil && (updated.Status == "completed" || updated.Status == "failed") {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	log.Printf("[Chief] Timeout waiting for OpenCodeSessionID for project %s", projectID)
+// countHistoryTurns is a tiny helper for the log line above — just
+// counts "**Human:**" / "**You:**" markers so operators can eyeball
+// whether multi-round context is flowing. Not used elsewhere.
+func countHistoryTurns(history string) int {
+	return strings.Count(history, "**Human:**") + strings.Count(history, "**You:**")
 }
 
 // buildChiefContext assembles the full platform state snapshot for the Chief Agent.

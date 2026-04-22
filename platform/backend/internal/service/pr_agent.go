@@ -9,16 +9,11 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/repo"
 )
 
 // TriggerEvaluateAgent starts the evaluate agent for a PR
 func TriggerEvaluateAgent(pr *model.PullRequest) error {
-	if opencode.DefaultScheduler == nil {
-		return fmt.Errorf("scheduler not initialized")
-	}
-
 	// Get project context
 	direction, _ := repo.GetContentBlock(pr.ProjectID, "direction")
 	milestone, _ := repo.GetCurrentMilestone(pr.ProjectID)
@@ -90,9 +85,7 @@ func TriggerEvaluateAgent(pr *model.PullRequest) error {
 
 	agent.DefaultManager.RegisterSession(session)
 
-	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
-		return fmt.Errorf("failed to dispatch evaluate agent: %w", err)
-	}
+	agent.DispatchSession(session)
 
 	log.Printf("[PR] Evaluate agent dispatched for PR %s (session %s)", pr.ID, sessionID)
 	return nil
@@ -100,10 +93,6 @@ func TriggerEvaluateAgent(pr *model.PullRequest) error {
 
 // TriggerMergeAgent starts the merge agent for a PR
 func TriggerMergeAgent(pr *model.PullRequest) error {
-	if opencode.DefaultScheduler == nil {
-		return fmt.Errorf("scheduler not initialized")
-	}
-
 	// Get branch info
 	var branch model.Branch
 	branchName := "unknown"
@@ -146,9 +135,7 @@ func TriggerMergeAgent(pr *model.PullRequest) error {
 
 	agent.DefaultManager.RegisterSession(session)
 
-	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
-		return fmt.Errorf("failed to dispatch merge agent: %w", err)
-	}
+	agent.DispatchSession(session)
 
 	log.Printf("[PR] Merge agent dispatched for PR %s (session %s)", pr.ID, sessionID)
 	return nil
@@ -156,10 +143,6 @@ func TriggerMergeAgent(pr *model.PullRequest) error {
 
 // TriggerMaintainBizReview starts the maintain agent for PR business evaluation
 func TriggerMaintainBizReview(pr *model.PullRequest) error {
-	if opencode.DefaultScheduler == nil {
-		return fmt.Errorf("scheduler not initialized")
-	}
-
 	// Get project context
 	direction, _ := repo.GetContentBlock(pr.ProjectID, "direction")
 	milestone, _ := repo.GetCurrentMilestone(pr.ProjectID)
@@ -200,9 +183,7 @@ func TriggerMaintainBizReview(pr *model.PullRequest) error {
 
 	agent.DefaultManager.RegisterSession(session)
 
-	if err := opencode.DefaultScheduler.Dispatch(session); err != nil {
-		return fmt.Errorf("failed to dispatch maintain agent for biz review: %w", err)
-	}
+	agent.DispatchSession(session)
 
 	log.Printf("[PR] Maintain agent (biz review) dispatched for PR %s (session %s)", pr.ID, sessionID)
 	return nil

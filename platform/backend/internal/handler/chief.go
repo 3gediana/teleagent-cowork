@@ -1,12 +1,8 @@
 package handler
 
 import (
-	"log"
-
 	"github.com/gin-gonic/gin"
-	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/model"
-	"github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/service"
 )
 
@@ -16,7 +12,12 @@ func NewChiefHandler() *ChiefHandler {
 	return &ChiefHandler{}
 }
 
-// Chat handles human-to-Chief conversation requests.
+// Chat handles human-to-Chief conversation requests. Every message
+// spawns a fresh Chief agent session; prior turns are replayed as
+// prompt prefix inside service.TriggerChiefChat so the model still
+// sees multi-round context. Reply delivery is asynchronous — the
+// frontend listens for CHIEF_CHAT_UPDATE on SSE.
+//
 // POST /chief/chat?project_id=xxx
 func (h *ChiefHandler) Chat(c *gin.Context) {
 	if !callerIsHuman(c) {
@@ -38,70 +39,18 @@ func (h *ChiefHandler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Check for existing Chief session with active OpenCode session
-	existingSession := findActiveChiefSession(projectID)
-	if existingSession != nil && existingSession.OpenCodeSessionID != "" {
-		// Multi-round: send follow-up message to existing serve session
-		scheduler := opencode.DefaultScheduler
-		if scheduler != nil {
-			modelStr := "minimax-coding-plan/MiniMax-M2.7"
-			roleConfig := agent.GetRoleConfigWithOverride(agent.RoleChief)
-			if roleConfig != nil && roleConfig.ModelProvider != "" {
-				modelStr = roleConfig.ModelProvider + "/" + roleConfig.ModelID
-			}
-
-			msgResp, err := scheduler.SendToExistingSession(
-				existingSession.OpenCodeSessionID,
-				req.Message,
-				"chief",
-				modelStr,
-			)
-			if err != nil {
-				log.Printf("[Chief] Failed to send follow-up message: %v", err)
-				c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to send message"}})
-				return
-			}
-
-			// Extract text response
-			var agentText string
-			for _, part := range msgResp.Parts {
-				if part.Type == "text" {
-					agentText += part.Text
-				}
-			}
-
-			// Broadcast chat update
-			service.BroadcastEvent(projectID, "CHIEF_CHAT_UPDATE", gin.H{
-				"role":    "chief",
-				"content": agentText,
-			})
-
-			c.JSON(200, gin.H{
-				"success": true,
-				"data": gin.H{
-					"session_id":            existingSession.ID,
-					"status":               "active",
-					"agent_response":        agentText,
-					"opencode_session_id":   existingSession.OpenCodeSessionID,
-				},
-			})
-			return
-		}
-	}
-
-	// No active session: create new Chief chat session. Response shape matches
-	// the multi-round case: { session_id, status, agent_response } — agent_response
-	// is empty for async starts; the caller should poll /chief/sessions or listen
-	// for CHIEF_CHAT_UPDATE broadcasts to get the reply.
+	// Kick off async Chief session. TriggerChiefChat persists the
+	// user turn to DialogueMessage before dispatch; the assistant
+	// turn is written when the session completes via
+	// service.HandleSessionCompletion.
 	go service.TriggerChiefChat(projectID, req.Message)
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"status":              "started",
-			"agent_response":      "",
-			"opencode_session_id": "",
-			"message":             "Chief Agent session started. Listen for CHIEF_CHAT_UPDATE on SSE, or poll /chief/sessions for the session row.",
+			"status":         "started",
+			"agent_response": "",
+			"message":        "Chief Agent session started. Listen for CHIEF_CHAT_UPDATE on SSE, or call /dashboard/messages?channel=chief for the rendered transcript.",
 		},
 	})
 }
@@ -174,12 +123,3 @@ func (h *ChiefHandler) Policies(c *gin.Context) {
 	})
 }
 
-// findActiveChiefSession finds an active Chief session for a project.
-func findActiveChiefSession(projectID string) *agent.Session {
-	for _, s := range agent.DefaultManager.Sessions() {
-		if s.ProjectID == projectID && s.Role == agent.RoleChief && s.Status == "running" {
-			return s
-		}
-	}
-	return nil
-}

@@ -235,3 +235,36 @@ type RoleOverride struct {
 }
 
 func (RoleOverride) TableName() string { return "role_override" }
+
+// DialogueMessage stores one turn of a human↔agent multi-round
+// conversation on the dashboard. Replaces the opencode serve session
+// that previously held dialogue history in-process. Each project has
+// per-channel history (channel = "chief" for the Chief chat tab,
+// "maintain" for the main dashboard input talking to Maintain).
+//
+// The native runner is stateless per session, so every new user turn
+// spawns a fresh agent session. This table is how we feed prior turns
+// back into the new session's prompt — see
+// @platform/backend/internal/service/dialogue.go for the loader used
+// by TriggerChiefChat / TriggerMaintainAgent.
+type DialogueMessage struct {
+	ID        string    `gorm:"primaryKey;size:64" json:"id"`
+	ProjectID string    `gorm:"size:64;not null;index:idx_dialogue_project_channel,priority:1" json:"project_id"`
+	// Channel is the conversation lane. "chief" for Chief chat,
+	// "maintain" for dashboard input → Maintain agent. Additional
+	// channels can be added without migration (column is a string).
+	Channel string `gorm:"size:32;not null;index:idx_dialogue_project_channel,priority:2" json:"channel"`
+	// SessionID is the AgentSession that produced this message
+	// (empty for user-origin rows until a session runs in response).
+	SessionID string `gorm:"size:64;index" json:"session_id"`
+	// Role is who spoke this turn. "user" means a human typed it;
+	// "assistant" means the agent emitted it. We deliberately don't
+	// reuse llm.Role here — the values stored are dashboard-facing
+	// and we don't want callers coupled to the llm package just to
+	// append a message.
+	Role      string    `gorm:"size:16;not null" json:"role"`
+	Content   string    `gorm:"type:text;not null" json:"content"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+func (DialogueMessage) TableName() string { return "dialogue_message" }
