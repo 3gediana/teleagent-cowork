@@ -212,8 +212,14 @@ func runNative(sess *agent.Session, route resolvedRoute) error {
 		sess.Output = res.FinalText
 	}
 	persistRunMetadata(sess, route, res, duration)
-	markSession(sess, "completed", "")
+	// Order matters: run the completion hook BEFORE flipping the
+	// session to status=completed. Test harnesses (and the dashboard
+	// UI) poll for the completed status and assume side-effects like
+	// dialogue append + artifact-feedback are already persisted once
+	// that flip lands. If we mark completed first, callers can race
+	// in and observe a partially-written state.
 	fireSessionCompletion(sess, "completed")
+	markSession(sess, "completed", "")
 	return nil
 }
 

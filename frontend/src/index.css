@@ -2,172 +2,425 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════════════════
+   A3C DESIGN SYSTEM — "Dark Felt Board + Cream Index Card"
+   Inspired by Linear / Height / Plane. All tokens live in :root.
+   ═══════════════════════════════════════════════════════════════════ */
+
 :root {
-  --bg-primary: #f8fafc;
-  --bg-secondary: #ffffff;
-  --accent-blue: #2563eb;
-  --accent-purple: #7c3aed;
+  /* dark UI */
+  --bg: #09090b;
+  --surface-0: #121214;
+  --surface-1: #18181b;
+  --surface-2: #1f1f23;
+  --border: #27272a;
+  --border-hover: #3f3f46;
+  --text-0: #fafafa;
+  --text-1: #a1a1aa;
+  --text-2: #71717a;
+  --accent: #6366f1;
+
+  /* paper (cards / panels) */
+  --paper-0: #f5f1e8;
+  --paper-1: #eae6dc;
+  --paper-ink: #3b3a34;
+  --paper-ink-soft: #57564f;
+  --paper-ink-mute: #85847c;
 }
 
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
-}
-
-*::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-*::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-*::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 3px;
-}
-
-*::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
-}
-
-/* Custom scrollbar for inner containers */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(0,0,0,0.1);
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #8b4513;
-  border-radius: 10px;
-  border: 2px solid rgba(255,255,255,0.1);
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #5d2e0a;
-}
-
-body {
+html, body {
   margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text-0);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-feature-settings: "cv11", "ss01", "cv02";
+  letter-spacing: -0.011em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: linear-gradient(rgba(0,0,0,0.5), rgba(0,0,0,0.5)), var(--cabin-bg);
-  background-size: cover;
-  background-attachment: fixed;
-  color: #3e2723;
 }
 
-/* Wood Board Utility */
+/* ───── Scrollbars ───── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+.custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   LEGACY CLASSES — kept for pages not yet migrated. Restyled to be
+   visually consistent with the new design system (light cream paper
+   on dark background) but without the heavy textures/shadows.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.parchment {
+  background-color: var(--paper-0);
+  color: var(--paper-ink);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.15),
+    0 4px 8px -2px rgba(0, 0, 0, 0.15);
+}
+
 .wood-board {
-  background: linear-gradient(rgba(0,0,0,0.2), rgba(0,0,0,0.2)), var(--wood-bg);
-  background-size: cover;
-  box-shadow: inset 0 0 100px rgba(0,0,0,0.5);
+  background:
+    repeating-linear-gradient(90deg,
+      rgba(255, 255, 255, 0.004) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      rgba(0, 0, 0, 0.02) 2px,
+      rgba(255, 255, 255, 0.004) 3px),
+    repeating-linear-gradient(0deg,
+      rgba(255, 255, 255, 0.004) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      rgba(0, 0, 0, 0.02) 2px,
+      rgba(255, 255, 255, 0.004) 3px),
+    radial-gradient(ellipse at top, #1e1e24 0%, #141418 70%);
   position: relative;
 }
 
-.wood-board::after {
-  content: "";
+.sticky-note {
+  position: relative;
+  background: linear-gradient(180deg, #faf6ed 0%, var(--paper-0) 100%);
+  color: var(--paper-ink);
+  border-radius: 6px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.8) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 4px 8px -2px rgba(0, 0, 0, 0.25),
+    0 12px 24px -8px rgba(0, 0, 0, 0.3);
+  transition: transform 0.22s cubic-bezier(0.25, 0.8, 0.35, 1), box-shadow 0.22s;
+}
+.sticky-note:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 8px 16px -3px rgba(0, 0, 0, 0.35),
+    0 20px 40px -12px rgba(0, 0, 0, 0.45);
+}
+
+/* Handwritten fonts are remapped to Inter so legacy pages look professional,
+   not cartoonish, while still rendering without a font swap blink. */
+.font-marker { font-family: 'Inter', sans-serif; font-weight: 600; letter-spacing: -0.02em; }
+.font-hand   { font-family: 'Inter', sans-serif; font-weight: 400; }
+.font-type   { font-family: 'Inter', sans-serif; font-weight: 500; letter-spacing: 0; }
+
+.btn-cabin {
+  background: var(--paper-ink);
+  color: white;
+  border: 1px solid var(--paper-ink);
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+.btn-cabin:hover { background: #000; transform: translateY(-1px); }
+.btn-cabin:active { transform: translateY(0); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   NEW DESIGN SYSTEM — use these classes in all new/refactored code
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ───── Felt board (dark textile background for the kanban) ───── */
+.felt-board {
+  background:
+    repeating-linear-gradient(90deg,
+      rgba(255, 255, 255, 0.004) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      rgba(0, 0, 0, 0.02) 2px,
+      rgba(255, 255, 255, 0.004) 3px),
+    repeating-linear-gradient(0deg,
+      rgba(255, 255, 255, 0.004) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      rgba(0, 0, 0, 0.02) 2px,
+      rgba(255, 255, 255, 0.004) 3px),
+    radial-gradient(ellipse at top, #1e1e24 0%, #141418 70%);
+  position: relative;
+}
+.felt-board::before {
+  content: '';
   position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: url('https://www.transparenttextures.com/patterns/wood-pattern.png');
-  opacity: 0.2;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+.felt-board::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 40% at 50% 0%, rgba(99, 102, 241, 0.05), transparent 60%),
+    radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.4) 100%);
   pointer-events: none;
 }
 
-/* Parchment / Old Paper Style */
-.parchment {
-  background-color: #f4ece1;
-  background-image: var(--parchment);
-  box-shadow: 2px 2px 10px rgba(0,0,0,0.2), inset 0 0 30px rgba(139, 69, 19, 0.1);
-  border: 1px solid #dcd0c0;
+.board-frame {
+  padding: 1px;
+  background: linear-gradient(180deg, #2d2d32 0%, #18181b 100%);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+    0 40px 80px -30px rgba(0, 0, 0, 0.7),
+    0 20px 40px -20px rgba(0, 0, 0, 0.5);
 }
 
-/* Handwritten / Typewriter Utility */
-.font-marker { font-family: 'Permanent Marker', cursive; }
-.font-hand { font-family: 'Kalam', cursive; }
-.font-type { font-family: 'Special Elite', cursive; }
-
-/* Sticky Note Styles */
-.sticky-note {
+/* ───── Paper card (the "new sticky note") ───── */
+.card-paper {
+  --stripe: transparent;
   position: relative;
-  box-shadow: 5px 5px 15px rgba(0,0,0,0.3);
-  transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  background: linear-gradient(180deg, #faf6ed 0%, var(--paper-0) 100%);
+  color: var(--paper-ink);
+  border-radius: 6px;
+  padding: 14px 16px 14px 19px;
+  transition: transform 0.22s cubic-bezier(0.25, 0.8, 0.35, 1), box-shadow 0.22s;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.8) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 4px 8px -2px rgba(0, 0, 0, 0.25),
+    0 12px 24px -8px rgba(0, 0, 0, 0.35);
+}
+.card-paper::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 3px;
+  background: var(--stripe);
+  border-radius: 6px 0 0 6px;
+  z-index: 1;
+}
+.card-paper::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='1' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.4 0 0 0 0 0.35 0 0 0 0 0.25 0 0 0 0.25 0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23p)'/%3E%3C/svg%3E");
+  mix-blend-mode: multiply;
+  opacity: 0.35;
+  pointer-events: none;
+  border-radius: inherit;
+}
+.card-paper:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 8px 16px -3px rgba(0, 0, 0, 0.35),
+    0 20px 40px -12px rgba(0, 0, 0, 0.5);
 }
 
-.sticky-note:hover {
-  transform: scale(1.04) rotate(0deg) !important;
-  z-index: 10;
-  box-shadow: 10px 10px 25px rgba(0,0,0,0.45);
+.stripe-high   { --stripe: linear-gradient(180deg, #ef4444 0%, #dc2626 100%); }
+.stripe-med    { --stripe: linear-gradient(180deg, #f59e0b 0%, #d97706 100%); }
+.stripe-low    { --stripe: linear-gradient(180deg, #10b981 0%, #059669 100%); }
+.stripe-active { --stripe: linear-gradient(180deg, #6366f1 0%, #4f46e5 100%); }
+.stripe-done   { --stripe: linear-gradient(180deg, #6b7280 0%, #4b5563 100%); }
+
+/* ───── Brass / silver pushpin (micro, refined) ───── */
+.pin {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,
+    #fde68a 0%, #d4a94a 30%, #a87b2b 70%, #5a3e10 100%);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.3),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 2px 6px rgba(0, 0, 0, 0.4);
+  z-index: 11;
+}
+.pin-silver {
+  background: radial-gradient(circle at 30% 30%,
+    #f4f4f5 0%, #d4d4d8 30%, #71717a 70%, #27272a 100%);
 }
 
-/* Cabin Button Style */
-.btn-cabin {
-  background: #5d4037;
-  color: #efebe9;
-  border-bottom: 3px solid #3e2723;
-  transition: all 0.2s;
+/* ───── Priority labels (on paper) ───── */
+.prio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--paper-ink-soft);
+}
+.prio-high { color: #b91c1c; background: rgba(239, 68, 68, 0.08); }
+.prio-med  { color: #b45309; background: rgba(245, 158, 11, 0.08); }
+.prio-low  { color: #047857; background: rgba(16, 185, 129, 0.08); }
+.prio-done { color: #047857; background: rgba(16, 185, 129, 0.10); }
+
+/* ───── Chips (on dark surfaces) ───── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.chip:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--border-hover); color: var(--text-0); }
+.chip-green { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.22); color: #6ee7b7; }
+.chip-blue  { background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.22); color: #a5b4fc; }
+.chip-rose  { background: rgba(244, 63, 94, 0.08); border-color: rgba(244, 63, 94, 0.22); color: #fda4af; }
+.chip-amber { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.22); color: #fcd34d; }
+
+/* ───── Stat cards ───── */
+.stat-card {
+  background: linear-gradient(180deg, var(--surface-1) 0%, var(--surface-0) 100%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.stat-card:hover { border-color: var(--border-hover); }
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 10%; right: 10%; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
 }
 
-.btn-cabin:hover {
-  background: #6d4c41;
-  transform: translateY(-1px);
+/* ───── Column header (kanban) ───── */
+.col-header {
+  background: rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.btn-cabin:active {
-  transform: translateY(1px);
-  border-bottom-width: 0;
+/* ───── Sidebar navigation ───── */
+.sidebar-nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s;
+  color: var(--text-1);
+  text-decoration: none;
 }
+.sidebar-nav a.active {
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.04));
+  color: #c7c9f4;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.sidebar-nav a:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-0);
+}
+
+/* ───── Status dot ───── */
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+  animation: status-pulse 2s ease-in-out infinite;
+}
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px #10b981; }
+  50% { opacity: 0.7; box-shadow: 0 0 10px #10b981; }
+}
+
+/* ───── Surface utilities ───── */
+.surface {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.surface-1 {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.surface-2 {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/* ───── Avatar ───── */
+.avatar {
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  color: white;
+  font-family: 'Inter', sans-serif;
+  letter-spacing: -0.02em;
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+/* ───── Ambient grain (subtle overlay, optional) ───── */
+.grain-overlay::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23g)' opacity='0.04'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  z-index: 10000;
+}
+
+/* ───── Mono font helper ───── */
+.font-mono-jb { font-family: 'JetBrains Mono', ui-monospace, monospace; font-feature-settings: "zero", "cv08"; }
 
 @layer utilities {
-  .line-clamp-2 {
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .line-clamp-3 {
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .animate-fade-in {
-    animation: fadeIn 0.3s ease-out;
-  }
-
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .animate-slide-up {
-    animation: slideUp 0.3s ease-out;
-  }
-
-  @keyframes slideUp {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+  .animate-slide-up { animation: slideUp 0.3s ease-out; }
 }
 
-/* Glass effect light mode */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Glass effect — updated to dark */
 .glass {
-  background: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(226, 232, 240, 0.8);
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-/* Gradient text */
+/* Gradient text — updated accent */
 .gradient-text {
-  background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+  background: linear-gradient(135deg, #6366f1 0%, #22d3ee 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

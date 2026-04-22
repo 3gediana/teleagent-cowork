@@ -292,6 +292,10 @@ func buildChiefContext(projectID string, decisionType string, targetID string) *
 		GlobalState:         globalState,
 		AutoMode:            autoMode,
 		InjectedArtifactIDs: injectedIDs,
+		// Chief may want to glance at source or platform meta files
+		// when responding to a human. Rooting at the project dir
+		// surfaces both without opening the whole filesystem.
+		ProjectPath: GetProjectPath(projectID),
 	}
 }
 

@@ -195,28 +195,33 @@ func (m *AgentManager) GetSession(id string) *Session {
 	return s
 }
 
+// UpdateSessionOutput stores the structured output a terminal tool
+// (chief_output, audit_output, evaluate_output, merge_output, ...)
+// produced for this session. It ONLY touches `output` — the status
+// transition to "completed" happens in runner/dispatcher.go:runNative
+// AFTER the post-loop feedback hook has fired. Flipping status here
+// would race the dispatcher: callers polling for "completed" would
+// observe the session as done BEFORE HandleSessionCompletion has
+// written the assistant turn to DialogueMessage (because the chief
+// agent emits its tool call mid-loop, not as the final message).
+//
+// Previously this method also set status=completed + completed_at,
+// which caused a classic multi-round dialogue bug: the second Chief
+// chat turn would see status=completed on the first turn too early,
+// send its own user message, and we'd end up with 2 user messages
+// queued back-to-back before either assistant reply landed. The
+// transcript would then show only one assistant reply for both
+// user turns.
 func (m *AgentManager) UpdateSessionOutput(id string, output string) {
 	m.mu.RLock()
 	session, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if ok {
 		session.Output = output
-		session.Status = "completed"
-
-		now := time.Now()
-		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"status":       "completed",
-			"output":       output,
-			"completed_at": now,
-		})
-	} else {
-		// Session not in memory, update DB directly
-		now := time.Now()
-		model.DB.Model(&model.AgentSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"status":       "completed",
-			"output":       output,
-			"completed_at": now,
-		})
+	}
+	if err := model.DB.Model(&model.AgentSession{}).Where("id = ?", id).
+		Update("output", output).Error; err != nil {
+		log.Printf("[Agent] UpdateSessionOutput persist failed for %s: %v", id, err)
 	}
 }
 

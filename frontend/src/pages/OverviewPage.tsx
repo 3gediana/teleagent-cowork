@@ -9,6 +9,32 @@ import { Modal, SuccessResult, Select, Textarea, Button, useModal } from '../com
 import { versionApi, milestoneApi, taskApi } from '../api/endpoints'
 import { TaskKanban } from '../components/TaskKanban'
 
+/**
+ * OverviewPage — the flagship screen.
+ *
+ * Layout: three columns inside the dark shell.
+ *   · Left  (280px): stacked project-context cards — Direction,
+ *                    Milestone, Version, Agents, Locks, Chief queue.
+ *   · Center (flex): the dark felt board framed by a 1px metallic
+ *                    bevel, holding the TaskKanban.
+ *   · Right (420px): the Maintain Agent chat surface.
+ */
+
+function IconTarget() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+    </svg>
+  )
+}
+function IconFlag() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M4 4v17"/><path d="M4 4h13l-3 5 3 5H4"/>
+    </svg>
+  )
+}
+
 function RollbackModal({ onClose, projectId }: { onClose: () => void; projectId: string }) {
   const [versions, setVersions] = useState<string[]>([])
   const [selected, setSelected] = useState('')
@@ -96,7 +122,7 @@ function MilestoneSwitchModal({ onClose, projectId }: { onClose: () => void; pro
 export default function OverviewPage() {
   const { project, selectedProjectId } = useAppStore()
   const { refreshState, isConnected } = useSSE(selectedProjectId)
-  
+
   const rollbackModal = useModal()
   const milestoneSwitchModal = useModal()
 
@@ -119,62 +145,61 @@ export default function OverviewPage() {
   }
 
   return (
-    <div className="flex gap-8 h-[calc(100vh-10rem)] overflow-hidden">
-      {/* ... Left Column ... */}
-      <div className="w-[300px] flex flex-col gap-6 shrink-0 overflow-y-auto custom-scrollbar pr-2 pb-4">
-        {/* ... Direction, Milestone, Version, Agents, Locks ... */}
-        <div className="p-1">
-          <InfoCard
-            title="Direction"
-            icon="🎯"
-            value={project?.direction ?? null}
-            accentColor="blue"
-          />
-        </div>
-        <div className="p-1">
-          <InfoCard
-            title="Milestone"
-            icon="🏁"
-            value={project?.milestone ?? null}
-            onEdit={() => milestoneSwitchModal.openModal()}
-            accentColor="amber"
-          />
-        </div>
-        <div className="px-1">
-          <VersionCard version={project?.version || 'v1.0'} onRollback={() => rollbackModal.openModal()} />
-        </div>
-        <div className="px-1">
-          <AgentsCard />
-        </div>
-        <div className="px-1">
-          <LocksCard />
-        </div>
-        <div className="px-1">
-          <ChiefQueueCompact />
-        </div>
+    <div className="flex gap-5 h-[calc(100vh-3.5rem)] overflow-hidden p-5">
+      {/* ═══ LEFT — project context ═══ */}
+      <div className="w-[280px] flex flex-col gap-3 shrink-0 overflow-y-auto custom-scrollbar pr-1 pb-2">
+        <InfoCard
+          title="Direction"
+          icon={<IconTarget />}
+          value={project?.direction ?? null}
+          accentColor="blue"
+        />
+        <InfoCard
+          title="Milestone"
+          icon={<IconFlag />}
+          value={project?.milestone ?? null}
+          onEdit={() => milestoneSwitchModal.openModal()}
+          accentColor="amber"
+        />
+        <VersionCard version={project?.version || 'v1.0'} onRollback={() => rollbackModal.openModal()} />
+        <AgentsCard />
+        <LocksCard />
+        <ChiefQueueCompact />
       </div>
 
-      {/* Center: The Board */}
+      {/* ═══ CENTER — the felt board ═══ */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="flex-1 min-h-0 wood-board rounded-[40px] border-[10px] border-[#2d1b0f] shadow-2xl p-6 overflow-hidden">
-          <TaskKanban onClaim={handleClaim} onComplete={handleComplete} />
+        <div className="board-frame h-full">
+          <div className="felt-board h-full rounded-[13px] overflow-hidden">
+            <TaskKanban onClaim={handleClaim} onComplete={handleComplete} />
+          </div>
         </div>
       </div>
 
-      {/* Right: The Brain (Chat) */}
-      <div className="w-[450px] parchment rounded-[32px] border border-[#8b4513]/20 shadow-2xl p-6 flex flex-col shrink-0 overflow-hidden">
-        <div className="flex items-center justify-between mb-6 shrink-0 px-2">
-          <h2 className="text-xl font-marker text-[#5d4037] flex items-center gap-2 -rotate-1">
-            💬 Maintain Agent
-          </h2>
+      {/* ═══ RIGHT — Maintain chat ═══ */}
+      <div className="w-[420px] surface-1 flex flex-col shrink-0 overflow-hidden">
+        <div className="px-4 py-3 flex items-center justify-between shrink-0 border-b border-[#27272a]">
           <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-600 animate-pulse' : 'bg-rose-500'} shadow-[0_0_8px_rgba(16,185,129,0.5)]`} />
-            <span className={`text-[10px] font-bold ${isConnected ? 'text-[#8b4513]/40' : 'text-rose-500'} uppercase tracking-widest`}>
-              {isConnected ? 'Active' : 'Offline'}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" strokeWidth="1.8">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <h2 className="text-[13px] font-semibold text-white tracking-tight">Maintain Agent</h2>
+          </div>
+          <div className={`chip ${isConnected ? 'chip-green' : 'chip-rose'}`}>
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{
+                background: isConnected ? '#10b981' : '#f43f5e',
+                boxShadow: isConnected ? '0 0 6px #10b981' : '0 0 6px #f43f5e',
+                animation: isConnected ? 'status-pulse 2s ease-in-out infinite' : undefined,
+              }}
+            />
+            <span className="text-[10.5px] font-medium uppercase tracking-[0.08em]">
+              {isConnected ? 'Live' : 'Offline'}
             </span>
           </div>
         </div>
-        <div className="flex-1 min-h-0">
+        <div className="flex-1 min-h-0 p-3">
           <ChatPanel />
         </div>
       </div>

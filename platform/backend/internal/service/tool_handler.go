@@ -25,6 +25,14 @@ func GetProjectPath(projectID string) string {
 	return filepath.Join(DataPath, projectID)
 }
 
+// GetProjectRepoPath returns the path to the project's source repo
+// (the subdir that holds user code, not platform meta files like
+// MILESTONE.md). Used as ProjectPath on agent sessions that only
+// need to inspect / edit source (audit, fix, evaluate, merge).
+func GetProjectRepoPath(projectID string) string {
+	return filepath.Join(DataPath, projectID, "repo")
+}
+
 func HandleMaintainToolCall(projectID string, toolName string, args map[string]interface{}) error {
 	projectPath := GetProjectPath(projectID)
 

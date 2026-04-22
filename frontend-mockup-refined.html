@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A3C Studio · Mission Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+
+        :root {
+            --bg: #09090b;
+            --surface-0: #121214;
+            --surface-1: #18181b;
+            --surface-2: #1f1f23;
+            --border: #27272a;
+            --border-hover: #3f3f46;
+            --text-0: #fafafa;
+            --text-1: #a1a1aa;
+            --text-2: #71717a;
+            --accent: #6366f1;
+
+            /* paper */
+            --paper-0: #f5f1e8;
+            --paper-1: #eae6dc;
+            --paper-ink: #3b3a34;
+            --paper-ink-soft: #57564f;
+            --paper-ink-mute: #85847c;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-feature-settings: "cv11","ss01","cv02";
+            background: var(--bg);
+            color: var(--text-0);
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
+            letter-spacing: -0.011em;
+        }
+
+        .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-feature-settings: "zero","cv08"; }
+
+        /* ═══════════════════ DARK FELT BOARD ═══════════════════ */
+        /* Premium matte felt — think Montblanc desk pad, not cork */
+        .felt-board {
+            background:
+                /* subtle fabric weave */
+                repeating-linear-gradient(90deg,
+                    rgba(255, 255, 255, 0.004) 0px,
+                    rgba(255, 255, 255, 0.012) 1px,
+                    rgba(0, 0, 0, 0.02) 2px,
+                    rgba(255, 255, 255, 0.004) 3px),
+                repeating-linear-gradient(0deg,
+                    rgba(255, 255, 255, 0.004) 0px,
+                    rgba(255, 255, 255, 0.012) 1px,
+                    rgba(0, 0, 0, 0.02) 2px,
+                    rgba(255, 255, 255, 0.004) 3px),
+                radial-gradient(ellipse at top, #1e1e24 0%, #141418 70%);
+            position: relative;
+        }
+
+        .felt-board::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            /* fibre noise on top of weave */
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23n)'/%3E%3C/svg%3E");
+            mix-blend-mode: overlay;
+            pointer-events: none;
+        }
+
+        .felt-board::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse 80% 40% at 50% 0%, rgba(99, 102, 241, 0.05), transparent 60%),
+                radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.4) 100%);
+            pointer-events: none;
+        }
+
+        /* thin metal frame around board */
+        .board-frame {
+            padding: 1px;
+            background: linear-gradient(180deg, #2d2d32 0%, #18181b 100%);
+            border-radius: 14px;
+            box-shadow:
+                0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+                0 40px 80px -30px rgba(0, 0, 0, 0.7),
+                0 20px 40px -20px rgba(0, 0, 0, 0.5);
+        }
+
+        .board-inner {
+            border-radius: 13px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* ═══════════════════ INDEX CARD (replaces sticky note) ═══════════════════ */
+        /* Cream paper card with refined typographic hierarchy.
+           No handwritten font, no saturated pastel background.
+           Priority conveyed via 3px left color strip (Linear/Height pattern). */
+        .card {
+            --stripe: transparent;
+            position: relative;
+            background:
+                linear-gradient(180deg, #faf6ed 0%, var(--paper-0) 100%);
+            border-radius: 6px;
+            padding: 14px 16px 14px 19px;
+            color: var(--paper-ink);
+            cursor: grab;
+            transition: transform 0.22s cubic-bezier(0.25,0.8,0.35,1), box-shadow 0.22s;
+            box-shadow:
+                /* inner highlight + inner shade for paper thickness */
+                0 1px 0 rgba(255, 255, 255, 0.8) inset,
+                0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+                /* drop */
+                0 1px 2px rgba(0, 0, 0, 0.2),
+                0 4px 8px -2px rgba(0, 0, 0, 0.25),
+                0 12px 24px -8px rgba(0, 0, 0, 0.35);
+        }
+
+        /* colored left stripe — THE key Linear detail */
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 3px;
+            background: var(--stripe);
+            border-radius: 6px 0 0 6px;
+        }
+
+        /* paper grain */
+        .card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='1' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.4 0 0 0 0 0.35 0 0 0 0 0.25 0 0 0 0.25 0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23p)'/%3E%3C/svg%3E");
+            mix-blend-mode: multiply;
+            opacity: 0.35;
+            pointer-events: none;
+            border-radius: inherit;
+        }
+
+        .card:hover {
+            transform: translateY(-3px) !important;
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.9) inset,
+                0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+                0 1px 2px rgba(0, 0, 0, 0.2),
+                0 8px 16px -3px rgba(0, 0, 0, 0.35),
+                0 20px 40px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        /* priority stripe colors */
+        .stripe-high { --stripe: linear-gradient(180deg, #ef4444 0%, #dc2626 100%); }
+        .stripe-med  { --stripe: linear-gradient(180deg, #f59e0b 0%, #d97706 100%); }
+        .stripe-low  { --stripe: linear-gradient(180deg, #10b981 0%, #059669 100%); }
+        .stripe-active { --stripe: linear-gradient(180deg, #6366f1 0%, #4f46e5 100%); }
+        .stripe-done { --stripe: linear-gradient(180deg, #6b7280 0%, #4b5563 100%); }
+
+        /* ═══════════════════ BRASS PUSHPIN (<8px, refined) ═══════════════════ */
+        .pin {
+            position: absolute;
+            top: -4px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at 30% 30%,
+                    #fde68a 0%,
+                    #d4a94a 30%,
+                    #a87b2b 70%,
+                    #5a3e10 100%);
+            box-shadow:
+                0 0 0 1px rgba(0, 0, 0, 0.3),
+                0 1px 2px rgba(0, 0, 0, 0.5),
+                0 2px 6px rgba(0, 0, 0, 0.4);
+            z-index: 10;
+        }
+
+        .pin-silver {
+            background:
+                radial-gradient(circle at 30% 30%,
+                    #f4f4f5 0%,
+                    #d4d4d8 30%,
+                    #71717a 70%,
+                    #27272a 100%);
+        }
+
+        /* priority label — micro, uppercase, no emoji */
+        .prio-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            background: rgba(0, 0, 0, 0.05);
+            color: var(--paper-ink-soft);
+        }
+
+        .prio-high { color: #b91c1c; background: rgba(239, 68, 68, 0.08); }
+        .prio-med { color: #b45309; background: rgba(245, 158, 11, 0.08); }
+        .prio-low { color: #047857; background: rgba(16, 185, 129, 0.08); }
+
+        /* assignee row on card */
+        .assignee {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 8px;
+            background: rgba(0, 0, 0, 0.04);
+            border-radius: 4px;
+            border: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        /* pipeline row (tiny step indicator) */
+        .step {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex: 1;
+        }
+        .step-dot {
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .step-line {
+            height: 1px;
+            flex: 1;
+            background: rgba(0, 0, 0, 0.1);
+        }
+        .step-line.done { background: #10b981; }
+
+        /* ═══════════════════ SIDEBAR ═══════════════════ */
+        .sidebar-nav a {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            transition: background 0.12s, color 0.12s;
+            color: var(--text-1);
+        }
+        .sidebar-nav a.active {
+            background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.04));
+            color: #c7c9f4;
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+        .sidebar-nav a:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.04);
+            color: var(--text-0);
+        }
+
+        /* ═══════════════════ CHIPS & STATUS ═══════════════════ */
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            color: var(--text-1);
+            transition: background 0.15s;
+        }
+        .chip:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--border-hover); }
+        .chip-green { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
+        .chip-blue  { background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.22); color: #a5b4fc; }
+
+        .status-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 6px #10b981;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 6px #10b981; }
+            50% { opacity: 0.7; box-shadow: 0 0 10px #10b981; }
+        }
+
+        /* ═══════════════════ STAT CARDS ═══════════════════ */
+        .stat {
+            background: linear-gradient(180deg, var(--surface-1) 0%, var(--surface-0) 100%);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px 16px;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.15s;
+        }
+        .stat:hover { border-color: var(--border-hover); }
+        .stat::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 10%; right: 10%; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+        }
+
+        /* ═══════════════════ COLUMN HEADER ═══════════════════ */
+        .col-header {
+            background: rgba(255, 255, 255, 0.025);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        /* ═══════════════════ AVATAR ═══════════════════ */
+        .avatar {
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            letter-spacing: -0.02em;
+            box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+
+        /* ═══════════════════ SCROLLBAR ═══════════════════ */
+        *::-webkit-scrollbar { width: 5px; height: 5px; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        *::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+        *::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.15); }
+
+        .spark { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+
+        /* subtle grain over whole app */
+        .grain::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23g)' opacity='0.05'/%3E%3C/svg%3E");
+            mix-blend-mode: overlay;
+            pointer-events: none;
+            z-index: 10000;
+        }
+
+        /* ambient blobs */
+        .ambient-blob {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body class="grain">
+<div class="flex h-screen">
+
+    <!-- ═══════════════════ SIDEBAR ═══════════════════ -->
+    <aside class="w-60 bg-[#0d0d0f] border-r border-[#1e1e22] flex flex-col shrink-0 relative">
+        <div class="absolute inset-x-0 top-0 h-40 pointer-events-none" style="background: radial-gradient(ellipse 80% 40% at 50% 0%, rgba(99, 102, 241, 0.08), transparent 60%);"></div>
+
+        <div class="px-5 pt-5 pb-4 relative z-10">
+            <div class="flex items-center gap-2.5">
+                <div class="w-7 h-7 rounded-[8px] bg-gradient-to-br from-[#7b82e6] to-[#4338ca] flex items-center justify-center shadow-lg shadow-indigo-900/40 ring-1 ring-white/10">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M6 3 L6 21 M6 12 L18 12 M18 3 L18 21"/></svg>
+                </div>
+                <div class="leading-tight">
+                    <div class="text-[13px] font-semibold text-white tracking-tight">A3C Studio</div>
+                    <div class="text-[11px] text-[#71717a]">Mission Control</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="px-3 pb-3 relative z-10">
+            <button class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-colors text-left">
+                <div class="w-5 h-5 rounded bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-[10px] font-bold text-amber-950 shadow">P</div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-[12.5px] font-medium text-[#e8e8ea] truncate">Planner-1776865388</div>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#3f3f46]"><polyline points="8 9 12 5 16 9"/><polyline points="16 15 12 19 8 15"/></svg>
+            </button>
+        </div>
+
+        <nav class="sidebar-nav flex-1 px-3 space-y-0.5 overflow-y-auto">
+            <div class="px-2 pt-2 pb-1.5 text-[11px] font-medium text-[#71717a] uppercase tracking-wider">Workspace</div>
+
+            <a class="active">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+                Overview
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                Tasks
+                <span class="ml-auto font-mono text-[11px] text-[#71717a]">3</span>
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 10h7l-1 10 9-10h-7z"/></svg>
+                Submissions
+                <span class="ml-auto font-mono text-[11px] text-[#71717a]">1</span>
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 10l5-5 5 5M7 14l5 5 5-5"/></svg>
+                Pull Requests
+                <span class="ml-auto font-mono text-[11px] text-emerald-400">●1</span>
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                Chief Chat
+            </a>
+
+            <div class="px-2 pt-5 pb-1.5 text-[11px] font-medium text-[#71717a] uppercase tracking-wider">Fleet</div>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
+                Agent Pool
+                <span class="ml-auto flex items-center gap-1 text-[11px] text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>2</span>
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+                LLM Endpoints
+            </a>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                Knowledge
+            </a>
+
+            <div class="px-2 pt-5 pb-1.5 text-[11px] font-medium text-[#71717a] uppercase tracking-wider">System</div>
+            <a>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                Settings
+            </a>
+        </nav>
+
+        <div class="px-3 py-3 border-t border-[#1e1e22]">
+            <div class="flex items-center gap-2.5">
+                <div class="avatar" style="width:28px;height:28px;font-size:11px;background: linear-gradient(135deg, #ec4899, #f43f5e);">YU</div>
+                <div class="flex-1 min-w-0 leading-tight">
+                    <div class="text-[12px] text-white truncate font-medium">operator</div>
+                    <div class="text-[11px] text-[#71717a] truncate">Human operator</div>
+                </div>
+                <button class="text-[#71717a] hover:text-white">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ═══════════════════ MAIN ═══════════════════ -->
+    <main class="flex-1 flex flex-col min-w-0 relative bg-[#09090b]">
+
+        <div class="ambient-blob top-0 right-[15%] w-[600px] h-[400px]" style="background: rgba(99, 102, 241, 0.08);"></div>
+        <div class="ambient-blob bottom-0 left-[5%] w-[500px] h-[350px]" style="background: rgba(34, 211, 238, 0.04);"></div>
+
+        <!-- header -->
+        <header class="relative z-20 px-7 h-14 flex items-center justify-between border-b border-[#1e1e22] bg-[#09090b]/80 backdrop-blur-xl">
+            <div class="flex items-center gap-2 text-[13px]">
+                <span class="text-[#71717a]">Workspace</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#3f3f46]"><polyline points="9 18 15 12 9 6"/></svg>
+                <span class="text-[#a1a1aa]">Planner-1776865388</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#3f3f46]"><polyline points="9 18 15 12 9 6"/></svg>
+                <span class="text-white font-medium">Overview</span>
+                <span class="ml-3 chip chip-blue font-mono text-[11px]">M1 · core-scheduler</span>
+                <span class="chip font-mono text-[11px]">v1.1.1</span>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <button class="chip gap-2 pl-2.5 pr-1.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <span>Quick find…</span>
+                    <kbd class="ml-2 px-1.5 py-0.5 rounded bg-white/5 text-[10px] font-mono border border-[#2a2a2e]">⌘K</kbd>
+                </button>
+                <div class="chip gap-2">
+                    <span>Auto Mode</span>
+                    <div class="w-7 h-4 bg-emerald-500/80 rounded-full relative shadow-inner">
+                        <div class="absolute right-0.5 top-0.5 w-3 h-3 bg-white rounded-full shadow"></div>
+                    </div>
+                </div>
+                <div class="chip chip-green">
+                    <span class="status-dot"></span>
+                    <span>2 agents online</span>
+                </div>
+                <button class="chip relative gap-1.5 px-2">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+                    <span class="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- stats -->
+        <div class="relative z-10 px-7 py-4 grid grid-cols-4 gap-3">
+            <div class="stat">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <div class="text-[11px] text-[#71717a] uppercase tracking-wider font-medium">Tasks</div>
+                        <div class="mt-1 flex items-baseline gap-1.5">
+                            <div class="text-[24px] font-semibold tracking-tight">3</div>
+                            <span class="text-[11px] text-[#71717a]">/ 3 total</span>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-emerald-400 flex items-center gap-0.5 bg-emerald-400/10 px-1.5 py-0.5 rounded">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M7 14l5-5 5 5z"/></svg>33%
+                    </div>
+                </div>
+                <div class="mt-3 flex items-center gap-1.5">
+                    <div class="flex-1 h-1 rounded-full bg-white/5 overflow-hidden">
+                        <div class="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full" style="width: 33%"></div>
+                    </div>
+                    <span class="text-[11px] text-[#71717a] font-mono">1 done</span>
+                </div>
+            </div>
+
+            <div class="stat">
+                <div class="text-[11px] text-[#71717a] uppercase tracking-wider font-medium">Active Agents</div>
+                <div class="mt-1 flex items-center gap-2">
+                    <div class="flex -space-x-1.5">
+                        <div class="avatar" style="width:22px;height:22px;font-size:10px;background: linear-gradient(135deg, #f59e0b, #d97706);">OP</div>
+                        <div class="avatar" style="width:22px;height:22px;font-size:10px;background: linear-gradient(135deg, #10b981, #059669);">W1</div>
+                    </div>
+                    <span class="text-[24px] font-semibold tracking-tight">2</span>
+                </div>
+                <div class="mt-3 text-[11px] text-[#71717a]">
+                    <span class="text-emerald-400">●</span> 1 human · 1 worker
+                </div>
+            </div>
+
+            <div class="stat">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <div class="text-[11px] text-[#71717a] uppercase tracking-wider font-medium">Tokens (24h)</div>
+                        <div class="mt-1 text-[24px] font-semibold tracking-tight">127.3K</div>
+                    </div>
+                    <svg width="62" height="30" viewBox="0 0 62 30">
+                        <path class="spark" d="M0,22 L8,18 L16,20 L24,14 L32,16 L40,10 L48,12 L54,6 L62,8"/>
+                    </svg>
+                </div>
+                <div class="mt-3 text-[11px] text-[#71717a]">
+                    <span class="text-rose-400">↑</span> $0.0625 spent
+                </div>
+            </div>
+
+            <div class="stat">
+                <div class="text-[11px] text-[#71717a] uppercase tracking-wider font-medium">PR Pipeline</div>
+                <div class="mt-1 flex items-center gap-3">
+                    <div class="text-[24px] font-semibold tracking-tight">1</div>
+                    <div class="flex-1 flex flex-col gap-0.5">
+                        <div class="flex items-center gap-1 text-[11px] text-emerald-400">
+                            <span class="w-1 h-1 rounded-full bg-emerald-400"></span>
+                            <span>1 merged today</span>
+                        </div>
+                        <div class="text-[11px] text-[#71717a] font-mono">avg 47s audit</div>
+                    </div>
+                </div>
+                <div class="mt-3 flex gap-0.5">
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/40"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-white/5"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-white/5"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════ FELT BOARD ═══════════════════ -->
+        <div class="flex-1 px-7 pb-7 overflow-hidden">
+            <div class="board-frame h-full">
+                <div class="board-inner felt-board h-full flex flex-col">
+
+                    <div class="relative z-10 p-5 grid grid-cols-3 gap-5">
+                        <div class="col-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-[#71717a]"></span>
+                                <span class="text-[12px] font-semibold text-white">Backlog</span>
+                                <span class="text-[11px] text-[#71717a] font-mono bg-white/5 px-1.5 rounded">3</span>
+                            </div>
+                            <button class="text-[#71717a] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
+                        </div>
+                        <div class="col-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_6px_#6366f1]"></span>
+                                <span class="text-[12px] font-semibold text-white">In Progress</span>
+                                <span class="text-[11px] text-indigo-300 font-mono bg-indigo-500/15 px-1.5 rounded">1</span>
+                            </div>
+                            <button class="text-[#71717a] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
+                        </div>
+                        <div class="col-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]"></span>
+                                <span class="text-[12px] font-semibold text-white">Done</span>
+                                <span class="text-[11px] text-emerald-300 font-mono bg-emerald-500/15 px-1.5 rounded">1</span>
+                            </div>
+                            <button class="text-[#71717a] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
+                        </div>
+                    </div>
+
+                    <div class="flex-1 grid grid-cols-3 gap-5 px-5 pb-5 min-h-0 relative z-10">
+
+                        <!-- ═══ BACKLOG ═══ -->
+                        <div class="overflow-y-auto space-y-4 px-1 pt-1 pb-4 pr-2">
+
+                            <div class="card stripe-high" style="transform: rotate(-0.3deg);">
+                                <div class="pin"></div>
+                                <div class="flex items-start justify-between gap-2 mb-2">
+                                    <span class="prio-label prio-high">High</span>
+                                    <span class="font-mono text-[10.5px] text-[var(--paper-ink-mute)]">task_0d26</span>
+                                </div>
+                                <h3 class="text-[14px] font-semibold leading-snug text-[var(--paper-ink)] tracking-tight">实现任务列表查询接口</h3>
+                                <p class="text-[12px] mt-1.5 leading-relaxed text-[var(--paper-ink-soft)]">支持按状态和截止时间范围过滤任务。返回符合条件的列表，按截止时间升序。</p>
+                                <div class="mt-3 pt-2.5 flex items-center justify-between border-t border-black/8">
+                                    <div class="flex items-center gap-3 text-[11px] text-[var(--paper-ink-mute)] font-mono">
+                                        <span class="flex items-center gap-1">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                                            2d
+                                        </span>
+                                        <span class="flex items-center gap-1">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                            0
+                                        </span>
+                                    </div>
+                                    <button class="text-[11px] font-medium bg-[var(--paper-ink)] hover:bg-black text-white px-2.5 py-1 rounded transition-colors">Claim</button>
+                                </div>
+                            </div>
+
+                            <div class="card stripe-low" style="transform: rotate(0.4deg);">
+                                <div class="pin pin-silver"></div>
+                                <div class="flex items-start justify-between gap-2 mb-2">
+                                    <span class="prio-label prio-low">Low</span>
+                                    <span class="font-mono text-[10.5px] text-[var(--paper-ink-mute)]">task_491</span>
+                                </div>
+                                <h3 class="text-[14px] font-semibold leading-snug text-[var(--paper-ink)] tracking-tight">实现任务删除接口</h3>
+                                <p class="text-[12px] mt-1.5 leading-relaxed text-[var(--paper-ink-soft)]">根据 TaskID 删除已存在的任务。如果任务不存在，返回 ErrTaskNotFound。</p>
+                                <div class="mt-3 pt-2.5 flex items-center justify-between border-t border-black/8">
+                                    <div class="flex items-center gap-3 text-[11px] text-[var(--paper-ink-mute)] font-mono">
+                                        <span>unassigned</span>
+                                    </div>
+                                    <button class="text-[11px] font-medium bg-[var(--paper-ink)] hover:bg-black text-white px-2.5 py-1 rounded transition-colors">Claim</button>
+                                </div>
+                            </div>
+
+                            <div class="card stripe-med" style="transform: rotate(-0.2deg);">
+                                <div class="flex items-start justify-between gap-2 mb-2">
+                                    <span class="prio-label prio-med">Medium</span>
+                                    <span class="font-mono text-[10.5px] text-[var(--paper-ink-mute)]">task_883</span>
+                                </div>
+                                <h3 class="text-[14px] font-semibold leading-snug text-[var(--paper-ink)] tracking-tight">优化调度器启动与停止</h3>
+                                <p class="text-[12px] mt-1.5 leading-relaxed text-[var(--paper-ink-soft)]">NewScheduler 创建实例，Start 启动循环，Stop 停止。</p>
+                                <div class="mt-3 pt-2.5 flex items-center justify-between border-t border-black/8">
+                                    <span class="text-[11px] text-[var(--paper-ink-mute)] font-mono">unassigned</span>
+                                    <button class="text-[11px] font-medium bg-[var(--paper-ink)] hover:bg-black text-white px-2.5 py-1 rounded transition-colors">Claim</button>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <!-- ═══ IN PROGRESS ═══ -->
+                        <div class="overflow-y-auto space-y-4 px-1 pt-1 pb-4 pr-2">
+
+                            <div class="relative">
+                                <!-- active glow -->
+                                <div class="absolute -inset-1 rounded-[10px] opacity-50" style="background: linear-gradient(135deg, #6366f1, #22d3ee); filter: blur(16px); z-index: 0;"></div>
+
+                                <div class="card stripe-active relative" style="transform: rotate(-0.2deg); z-index: 1;">
+                                    <div class="pin"></div>
+                                    <div class="flex items-start justify-between gap-2 mb-2">
+                                        <span class="prio-label prio-high">High</span>
+                                        <span class="font-mono text-[10.5px] text-[var(--paper-ink-mute)]">task_20e6</span>
+                                    </div>
+                                    <h3 class="text-[14px] font-semibold leading-snug text-[var(--paper-ink)] tracking-tight">AddTask 截止时间校验</h3>
+
+                                    <!-- assignee block -->
+                                    <div class="assignee mt-3">
+                                        <div class="avatar" style="width:22px;height:22px;font-size:9.5px;background: linear-gradient(135deg, #10b981, #059669);">W1</div>
+                                        <div class="flex-1 min-w-0 leading-tight">
+                                            <div class="text-[11.5px] font-semibold text-[var(--paper-ink)] truncate">worker-1776865447</div>
+                                            <div class="text-[10.5px] text-[var(--paper-ink-soft)] font-mono">audit_1 · iter 6/25 · 28s</div>
+                                        </div>
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--paper-ink-soft)" stroke-width="2.5" class="animate-spin" style="animation-duration: 1.5s"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                                    </div>
+
+                                    <p class="text-[12px] mt-2.5 leading-relaxed text-[var(--paper-ink-soft)]">校验规则：截止时间必须晚于当前时间。错误定义在 errors.go 中。</p>
+
+                                    <!-- pipeline -->
+                                    <div class="mt-3 pt-2.5 border-t border-black/8">
+                                        <div class="flex items-center justify-between mb-1.5">
+                                            <span class="text-[10px] font-semibold uppercase tracking-wider text-[var(--paper-ink-mute)]">Pipeline</span>
+                                            <span class="font-mono text-[10px] text-[var(--paper-ink-mute)]">28s elapsed</span>
+                                        </div>
+                                        <div class="flex items-center gap-1.5">
+                                            <div class="step">
+                                                <div class="step-dot bg-emerald-500">
+                                                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                </div>
+                                                <span class="text-[10px] font-mono text-[var(--paper-ink-soft)]">claim</span>
+                                            </div>
+                                            <div class="step-line done"></div>
+                                            <div class="step">
+                                                <div class="step-dot bg-indigo-500 ring-2 ring-indigo-300/60">
+                                                    <div class="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></div>
+                                                </div>
+                                                <span class="text-[10px] font-mono text-[var(--paper-ink)] font-semibold">audit</span>
+                                            </div>
+                                            <div class="step-line"></div>
+                                            <div class="step">
+                                                <div class="step-dot bg-black/15"></div>
+                                                <span class="text-[10px] font-mono text-[var(--paper-ink-mute)]">pr</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <!-- ═══ DONE ═══ -->
+                        <div class="overflow-y-auto space-y-4 px-1 pt-1 pb-4 pr-2">
+
+                            <div class="card stripe-done" style="transform: rotate(0.3deg); opacity: 0.92;">
+                                <div class="pin pin-silver"></div>
+                                <div class="flex items-start justify-between gap-2 mb-2">
+                                    <span class="prio-label" style="color: #047857; background: rgba(16, 185, 129, 0.1);">
+                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                        Merged
+                                    </span>
+                                    <span class="font-mono text-[10.5px] text-[var(--paper-ink-mute)]">pr_5dba</span>
+                                </div>
+                                <h3 class="text-[14px] font-semibold leading-snug text-[var(--paper-ink-soft)] tracking-tight line-through decoration-[var(--paper-ink-mute)] decoration-1">初始化项目结构 + 回归测试</h3>
+                                <p class="text-[12px] mt-1.5 leading-relaxed text-[var(--paper-ink-mute)]">建立基础目录，引入必要依赖。Schedule.AddTask 的截止时间校验回归测试。</p>
+
+                                <div class="assignee mt-3">
+                                    <div class="avatar" style="width:22px;height:22px;font-size:9.5px;background: linear-gradient(135deg, #f59e0b, #d97706);">OP</div>
+                                    <div class="flex-1 min-w-0 leading-tight">
+                                        <div class="text-[11.5px] font-semibold text-[var(--paper-ink)] truncate">operator · approved merge</div>
+                                    </div>
+                                    <span class="font-mono text-[10.5px] text-[var(--paper-ink-soft)]">v1.1.1</span>
+                                </div>
+
+                                <div class="mt-3 pt-2.5 flex items-center justify-between border-t border-black/8">
+                                    <div class="flex items-center gap-3 text-[11px] text-[var(--paper-ink-mute)] font-mono">
+                                        <span class="text-emerald-700">+16</span>
+                                        <span>−0</span>
+                                    </div>
+                                    <span class="text-[11px] text-[var(--paper-ink-mute)] font-mono">2m ago</span>
+                                </div>
+                            </div>
+
+                            <!-- dropzone placeholder -->
+                            <div class="border-2 border-dashed border-white/8 rounded-md h-16 flex items-center justify-center">
+                                <span class="text-white/20 text-[12px]">drop to mark done</span>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+</div>
+</body>
+</html>

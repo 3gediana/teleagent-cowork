@@ -1,6 +1,33 @@
 import { useAppStore } from '../stores/appStore'
 import { dashboardApi, changeApi, projectApi } from '../api/endpoints'
 
+/**
+ * ChatPanel — the right-column conversation surface with the Maintain
+ * agent (Overview page).
+ *
+ * Visual: dark surface, bubbles use the same cream paper-card look as
+ * the kanban, so the conversation reads like "notes the agent sent
+ * across the desk".  Human messages are an indigo-tinted dark pill on
+ * the right, system messages are muted inline chips.
+ */
+
+function IconPen() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9"/>
+      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+    </svg>
+  )
+}
+
+function IconSend() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m22 2-7 20-4-9-9-4 20-7z"/>
+    </svg>
+  )
+}
+
 export function ChatPanel() {
   const {
     chatMessages, inputText, targetBlock, setInputText, addChatMessage, setTargetBlock,
@@ -32,7 +59,6 @@ export function ChatPanel() {
             requires_confirm: data.requires_confirm || false,
           })
         } else if (data.agent_response) {
-          // Multi-round dialogue: agent responded directly
           addChatMessage({
             id: (Date.now() + 1).toString(),
             role: 'agent',
@@ -76,7 +102,6 @@ export function ChatPanel() {
           content: `${pendingInput.target_block} block updated and confirmed.`,
           timestamp: Date.now(),
         })
-        // Backend auto-clears context after confirm; reflect in UI
         if (res.data?.context_cleared) {
           addChatMessage({
             id: (Date.now() + 1).toString(),
@@ -148,19 +173,30 @@ export function ChatPanel() {
     const newMode = !autoMode
     try {
       const res = await projectApi.setAutoMode(selectedProjectId, newMode)
-      if (res.success) {
-        setAutoMode(newMode)
-      }
+      if (res.success) setAutoMode(newMode)
     } catch {}
+  }
+
+  const inputClass = 'flex-1 rounded-lg px-3 py-2 text-[13px] outline-none transition-colors'
+  const inputStyle: React.CSSProperties = {
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    color: 'var(--text-0)',
   }
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-3 mb-6 px-1 shrink-0">
+      {/* toolbar */}
+      <div className="flex items-center gap-2 mb-3 shrink-0">
         <select
           value={targetBlock}
           onChange={(e) => setTargetBlock(e.target.value as any)}
-          className="bg-[#f4ece1] border border-[#8b4513]/30 rounded-lg px-3 py-1.5 text-sm font-marker text-[#5d4037] shadow-sm focus:ring-2 focus:ring-[#8b4513] outline-none"
+          className="chip pr-7 appearance-none bg-no-repeat bg-right"
+          style={{
+            backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")",
+            backgroundPosition: 'right 6px center',
+            paddingRight: 24,
+          }}
         >
           <option value="direction">Direction</option>
           <option value="milestone">Milestone</option>
@@ -168,69 +204,102 @@ export function ChatPanel() {
         </select>
         <button
           onClick={handleToggleAutoMode}
-          className={`text-xs font-marker px-3 py-1.5 rounded-lg transition-colors border ${
-            autoMode
-              ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
-              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-          }`}
+          className={`chip ${autoMode ? 'chip-green' : 'chip-amber'}`}
           title={autoMode ? 'Auto mode: changes auto-sent to audit' : 'Manual mode: changes require your approval before audit'}
         >
           {autoMode ? 'Auto' : 'Manual'}
         </button>
         <button
           onClick={handleClearChat}
-          className="text-xs font-marker text-[#8b4513]/60 hover:text-rose-700 transition-colors bg-[#f4ece1]/50 border border-[#8b4513]/10 px-3 py-1.5 rounded-lg"
+          className="chip ml-auto"
+          title="Clear conversation"
         >
-          Clear Desk
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          Clear
         </button>
-        <span className="ml-auto text-[10px] font-bold text-[#8b4513]/40 uppercase tracking-widest">
-          {chatMessages.length} Messages
-        </span>
+        <span className="chip font-mono-jb text-[10.5px]">{chatMessages.length}</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto mb-6 space-y-4 custom-scrollbar pr-2">
-        {chatMessages.map((m) => (
-          <div key={m.id} className={`${m.role === 'human' ? 'text-right' : m.role === 'system' ? 'text-center' : 'text-left'}`}>
-            <span
-              className={`inline-block max-w-[90%] px-5 py-3 text-sm shadow-md transition-all hover:scale-[1.02] ${
-                m.role === 'human'
-                  ? 'bg-[#5d4037] text-[#efebe9] rounded-2xl rounded-br-sm font-type'
-                  : m.role === 'system'
-                  ? 'bg-black/5 text-[#8b4513]/60 border border-black/5 rounded-xl px-6 font-marker italic'
-                  : 'parchment text-[#3e2723] rounded-2xl rounded-bl-sm font-hand text-base border border-[#8b4513]/20'
-              }`}
-            >
-              {m.content}
-            </span>
-          </div>
-        ))}
+      {/* messages */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1">
+        {chatMessages.map((m) => {
+          if (m.role === 'human') {
+            return (
+              <div key={m.id} className="flex justify-end">
+                <div
+                  className="max-w-[85%] px-3.5 py-2 rounded-2xl rounded-br-md text-[13px] leading-relaxed break-words"
+                  style={{
+                    background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                    color: '#fafafa',
+                    boxShadow: '0 4px 12px -4px rgba(99,102,241,0.5)',
+                  }}
+                >
+                  {m.content}
+                </div>
+              </div>
+            )
+          }
+          if (m.role === 'system') {
+            return (
+              <div key={m.id} className="flex justify-center">
+                <span className="chip font-mono-jb text-[10.5px] italic">{m.content}</span>
+              </div>
+            )
+          }
+          // agent — cream paper bubble
+          return (
+            <div key={m.id} className="flex justify-start">
+              <div
+                className="max-w-[85%] card-paper rounded-2xl rounded-bl-md text-[13px] leading-relaxed break-words"
+                style={{ padding: '10px 14px', borderRadius: '14px 14px 14px 4px' }}
+              >
+                <span className="relative z-[2] whitespace-pre-wrap">{m.content}</span>
+              </div>
+            </div>
+          )
+        })}
+
         {chatMessages.length === 0 && (
-          <div className="text-center py-12 text-[#8b4513]/30 flex flex-col items-center justify-center h-full">
-            <p className="text-5xl mb-4 opacity-40">🖋️</p>
-            <p className="font-marker text-lg text-[#8b4513]/50">Start your collaboration</p>
-            <p className="font-hand text-sm mt-1">Agent is waiting for your signal...</p>
+          <div className="h-full flex flex-col items-center justify-center py-12" style={{ color: 'var(--text-2)' }}>
+            <div className="mb-3 opacity-50"><IconPen /></div>
+            <p className="text-[13px] font-medium" style={{ color: 'var(--text-1)' }}>Start your collaboration</p>
+            <p className="text-[11.5px] mt-1">Agent is waiting for your signal…</p>
           </div>
         )}
       </div>
 
+      {/* pending input confirm */}
       {pendingInput && (
-        <div className="bg-[#8b4513]/10 border border-[#8b4513]/20 rounded-2xl p-5 mb-4 shadow-inner shrink-0 animate-in fade-in slide-in-from-bottom-4">
-          <p className="text-xs font-marker text-[#8b4513] mb-3 uppercase tracking-widest">
-            Confirm update to <strong className="bg-[#8b4513] text-white px-2 py-0.5 rounded ml-1">{pendingInput.target_block}</strong>?
-          </p>
-          <div className="font-hand text-base text-[#5d4037] mb-4 bg-white/40 p-4 rounded-xl border border-white/20 italic break-words whitespace-pre-wrap max-h-24 overflow-y-auto custom-scrollbar shadow-inner">
-            "{pendingInput.content}"
+        <div
+          className="mt-3 mb-3 p-3 rounded-lg shrink-0 animate-fade-in"
+          style={{
+            background: 'rgba(99, 102, 241, 0.06)',
+            border: '1px solid rgba(99, 102, 241, 0.2)',
+          }}
+        >
+          <div className="flex items-center gap-2 text-[10.5px] uppercase tracking-[0.08em] font-semibold mb-2" style={{ color: '#a5b4fc' }}>
+            <span>Confirm update to</span>
+            <span className="chip chip-blue font-mono-jb text-[10px]">{pendingInput.target_block}</span>
           </div>
-          <div className="flex gap-3">
+          <div
+            className="text-[12.5px] px-3 py-2 rounded-md mb-3 max-h-24 overflow-y-auto custom-scrollbar whitespace-pre-wrap break-words italic"
+            style={{ background: 'rgba(0,0,0,0.25)', color: 'var(--text-1)' }}
+          >
+            {pendingInput.content}
+          </div>
+          <div className="flex gap-2">
             <button
               onClick={handleConfirm}
-              className="flex-1 btn-cabin px-4 py-2.5 rounded-xl text-xs font-marker"
+              className="flex-1 text-[12px] font-medium px-3 py-1.5 rounded-md transition-colors"
+              style={{ background: '#6366f1', color: 'white' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = '#4f46e5' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = '#6366f1' }}
             >
               Confirm
             </button>
             <button
               onClick={handleCancel}
-              className="flex-1 bg-white/50 hover:bg-white/80 text-[#5d4037] border border-[#8b4513]/20 px-4 py-2.5 rounded-xl text-xs font-marker transition-all"
+              className="flex-1 chip justify-center"
             >
               Cancel
             </button>
@@ -238,19 +307,29 @@ export function ChatPanel() {
         </div>
       )}
 
+      {/* pending changes */}
       {pendingChanges.length > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 shadow-inner shrink-0">
-          <p className="text-xs font-marker text-amber-700 mb-3 uppercase tracking-widest">
+        <div
+          className="mt-3 mb-3 p-3 rounded-lg shrink-0"
+          style={{
+            background: 'rgba(245, 158, 11, 0.06)',
+            border: '1px solid rgba(245, 158, 11, 0.2)',
+          }}
+        >
+          <p className="text-[10.5px] uppercase tracking-[0.08em] font-semibold mb-2" style={{ color: '#fcd34d' }}>
             Pending Human Confirmation
           </p>
           {pendingChanges.map((c) => (
-            <div key={c.change_id} className="flex items-center gap-3 mb-2 last:mb-0">
-              <span className="font-hand text-sm text-[#5d4037] flex-1 truncate">
+            <div key={c.change_id} className="flex items-center gap-2 mb-1.5 last:mb-0">
+              <span className="text-[12.5px] flex-1 truncate" style={{ color: 'var(--text-0)' }}>
                 {c.description || c.change_id}
               </span>
               <button
                 onClick={() => handleApproveChange(c.change_id)}
-                className="btn-cabin px-3 py-1.5 rounded-lg text-xs font-marker whitespace-nowrap"
+                className="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
+                style={{ background: '#10b981', color: 'white' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = '#059669' }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = '#10b981' }}
               >
                 Approve
               </button>
@@ -259,23 +338,33 @@ export function ChatPanel() {
         </div>
       )}
 
-      <div className="flex gap-3 shrink-0">
+      {/* composer */}
+      <div className="mt-3 flex gap-2 shrink-0">
         <input
           type="text"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-          placeholder="Write your message..."
-          className="flex-1 bg-[#f4ece1] border border-[#8b4513]/30 rounded-2xl px-5 py-3.5 text-sm font-hand text-[#3e2723] placeholder-[#8b4513]/30 shadow-inner focus:ring-2 focus:ring-[#8b4513] outline-none transition-all"
+          placeholder="Write your message…"
+          className={inputClass}
+          style={inputStyle}
+          onFocus={(e) => (e.currentTarget.style.borderColor = 'var(--accent)')}
+          onBlur={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
         />
         <button
           onClick={handleSend}
-          className="btn-cabin px-8 py-3.5 rounded-2xl text-sm font-marker shadow-lg active:scale-95"
+          disabled={!inputText.trim()}
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{
+            background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+            color: 'white',
+            boxShadow: '0 4px 12px -4px rgba(99, 102, 241, 0.5)',
+          }}
         >
+          <IconSend />
           Send
         </button>
       </div>
     </div>
   )
 }
-

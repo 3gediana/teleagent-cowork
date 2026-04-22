@@ -358,6 +358,12 @@ func BuildChangeContext(change *model.Change) *agent.SessionContext {
 		DirectionBlock: directionContent,
 		MilestoneBlock: milestoneContent,
 		AgentName:      agentName,
+		// Point the session at the project repo root so builtin file
+		// tools (read / glob / grep / edit) can actually touch source
+		// files during audit / fix / audit_2. Without this, the
+		// sandbox short-circuits every tool call with
+		// "project path not set on session".
+		ProjectPath: GetProjectRepoPath(change.ProjectID),
 		ChangeInfo: &agent.ChangeContext{
 			ChangeID:      change.ID,
 			TaskName:      taskName,

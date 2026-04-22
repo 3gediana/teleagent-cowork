@@ -1,5 +1,4 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { useState } from 'react'
 import { useAppStore } from './stores/appStore'
 import OverviewPage from './pages/OverviewPage'
 import TaskPage from './pages/TaskPage'
@@ -12,19 +11,22 @@ import KnowledgePage from './pages/KnowledgePage'
 import TagReviewPage from './pages/TagReviewPage'
 import LLMEndpointsPage from './pages/LLMEndpointsPage'
 import AgentPoolPage from './pages/AgentPoolPage'
+import WorkspacePickerPage from './pages/WorkspacePickerPage'
 import { Layout } from './components/Layout'
-import LoginPanel from './components/LoginPanel'
 
 function AuthenticatedApp() {
-  const { selectedProjectId } = useAppStore()
-  const [loggedIn, setLoggedIn] = useState(false)
+  const selectedProjectId = useAppStore((s) => s.selectedProjectId)
 
-  if (!loggedIn) {
-    return <LoginPanel onLogin={() => setLoggedIn(true)} />
-  }
-
+  // No project selected → render the picker INSIDE the normal shell so
+  // the first-contact UI shares the same chrome (sidebar, header) as
+  // the rest of Mission Control.  The sidebar itself hides its nav in
+  // this state and the header degrades to brand-only.
   if (!selectedProjectId) {
-    return <Navigate to="/" replace />
+    return (
+      <Layout>
+        <WorkspacePickerPage />
+      </Layout>
+    )
   }
 
   return (

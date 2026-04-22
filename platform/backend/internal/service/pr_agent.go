@@ -71,6 +71,10 @@ func TriggerEvaluateAgent(pr *model.PullRequest) error {
 		DiffStat:        pr.DiffStat,
 		DiffFull:        pr.DiffFull,
 		MergeCheckResult: mergeCheckResult,
+		// File tools (read/glob/grep/edit) need ProjectPath to be set;
+		// without it every call returns "project path not set on session"
+		// and evaluate can't actually inspect the PR's diff.
+		ProjectPath: GetProjectRepoPath(pr.ProjectID),
 	}
 
 	sessionID := model.GenerateID("session")
@@ -121,6 +125,9 @@ func TriggerMergeAgent(pr *model.PullRequest) error {
 		BranchName:      branchName,
 		MergeCostRating: mergeCostRating,
 		ConflictFiles:   conflictFiles,
+		// Merge agent reads / edits repo source files as part of
+		// resolving conflicts — sandbox needs a project root.
+		ProjectPath: GetProjectRepoPath(pr.ProjectID),
 	}
 
 	sessionID := model.GenerateID("session")
@@ -169,6 +176,9 @@ func TriggerMaintainBizReview(pr *model.PullRequest) error {
 		PRDescription:    pr.Description,
 		TechReviewSummary: techReviewSummary,
 		SelfReview:       pr.SelfReview,
+		// Biz-review maintain looks at MILESTONE.md / DIRECTION.md
+		// alongside source — it needs the project root (meta + repo).
+		ProjectPath: GetProjectPath(pr.ProjectID),
 	}
 
 	sessionID := model.GenerateID("session")

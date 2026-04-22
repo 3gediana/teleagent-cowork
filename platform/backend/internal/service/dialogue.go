@@ -145,3 +145,23 @@ func DialogueChannelForRole(role string) string {
 		return ""
 	}
 }
+
+// isChatTrigger reports whether a session's (role, trigger_reason)
+// combination represents a human-facing chat turn. Non-chat sessions
+// (timer maintenance, pr_review auto-decisions, biz_review
+// bookkeeping) must NOT be echoed into DialogueMessage — otherwise
+// the transcript fills up with platform internals the human never
+// saw and multi-round prompts get polluted with stale context.
+//
+// The allow-list is deliberately small: anything new that isn't on
+// it defaults to "bookkeeping" (safer default — the transcript is a
+// sparse chat log, not a full session journal).
+func isChatTrigger(role, trigger string) bool {
+	switch role {
+	case "chief":
+		return trigger == "chief_request"
+	case "maintain":
+		return strings.HasPrefix(trigger, "dashboard_")
+	}
+	return false
+}

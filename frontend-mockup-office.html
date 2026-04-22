@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A3C Dashboard - Modern Office UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Kalam:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #334155;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Whiteboard Dot Grid Background */
+        .whiteboard {
+            background-color: #f8fafc;
+            background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+            background-size: 24px 24px;
+        }
+
+        /* Scrollbar styles */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #cbd5e1 transparent;
+        }
+        *::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        *::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        *::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        *::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* Handwriting Font */
+        .font-hand { font-family: 'Kalam', cursive; }
+
+        /* Sticky Note Base */
+        .sticky-note {
+            position: relative;
+            padding: 20px 16px 16px 16px;
+            border-radius: 2px 2px 2px 10px; /* Slight curl effect on bottom left */
+            box-shadow: 2px 4px 10px rgba(0,0,0,0.08), 1px 1px 2px rgba(0,0,0,0.05);
+            transition: all 0.2s ease;
+            color: #334155;
+        }
+
+        .sticky-note:hover {
+            transform: translateY(-2px) scale(1.02) !important; /* Overrides inline rotation on hover */
+            z-index: 20;
+            box-shadow: 4px 8px 20px rgba(0,0,0,0.12);
+        }
+
+        /* Pastel Note Colors */
+        .note-yellow { background: linear-gradient(135deg, #fef08a 0%, #fde047 100%); }
+        .note-pink   { background: linear-gradient(135deg, #fbcfe8 0%, #f472b6 100%); }
+        .note-blue   { background: linear-gradient(135deg, #bfdbfe 0%, #7dd3fc 100%); }
+        .note-green  { background: linear-gradient(135deg, #bbf7d0 0%, #86efac 100%); }
+
+        /* Masking Tape */
+        .tape {
+            position: absolute;
+            top: -8px;
+            left: 50%;
+            transform: translateX(-50%) rotate(-2deg);
+            width: 60px;
+            height: 20px;
+            background-color: rgba(255, 255, 255, 0.4);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            backdrop-filter: blur(2px);
+            border-radius: 1px;
+            z-index: 10;
+        }
+        
+        .tape-alt { transform: translateX(-50%) rotate(3deg); }
+
+        /* Column container styling to handle many tasks */
+        .kanban-column {
+            background: rgba(255, 255, 255, 0.4);
+            border: 1px solid rgba(226, 232, 240, 0.8);
+            backdrop-filter: blur(8px);
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden bg-slate-50">
+    
+    <!-- Sidebar (Modern Dark Style) -->
+    <aside class="w-64 bg-slate-900 text-slate-300 flex flex-col shrink-0 z-40 border-r border-slate-800">
+        <div class="p-6 border-b border-slate-800 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-blue-500/30">A</div>
+                <h1 class="text-xl font-bold text-white tracking-tight">A3C Studio</h1>
+            </div>
+        </div>
+        <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 px-3 mt-4">Workspace</div>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md bg-blue-600/10 text-blue-400 font-medium transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                Overview
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-800 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+                Tasks
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-800 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                Submissions
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-800 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+                Chief Chat
+            </a>
+
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 px-3 mt-8">System</div>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-800 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                Agent Pool
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-800 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+                Settings
+            </a>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col min-w-0 bg-white">
+        <!-- Header (Clean & Modern) -->
+        <header class="bg-white px-8 py-4 flex items-center justify-between border-b border-slate-200 shrink-0 z-30">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-slate-100 rounded-md text-slate-500">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                </div>
+                <span class="text-slate-400 text-lg font-light">/</span>
+                <span class="font-semibold text-lg text-slate-800">Planner-1776865388</span>
+                <span class="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-medium ml-2">core-scheduler</span>
+            </div>
+            <div class="flex items-center gap-4">
+                <!-- Status Badges -->
+                <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full">
+                    <span class="text-sm font-medium text-slate-600">Auto Mode</span>
+                    <div class="w-8 h-4 bg-emerald-500 rounded-full relative cursor-pointer">
+                        <div class="w-4 h-4 bg-white rounded-full absolute right-0 shadow-sm border border-emerald-600"></div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 px-4 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span class="text-sm font-semibold">2 Agents Online</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Whiteboard Kanban Area -->
+        <div class="flex-1 overflow-hidden relative whiteboard p-8">
+            <div class="flex gap-6 h-full relative z-10 max-w-7xl mx-auto">
+                
+                <!-- Column 1: To Do -->
+                <div class="flex-1 kanban-column p-4">
+                    <div class="flex items-center justify-between mb-4 px-2">
+                        <h2 class="font-semibold text-slate-700">To Do</h2>
+                        <span class="bg-slate-200 text-slate-600 text-xs py-0.5 px-2.5 rounded-full font-medium">2</span>
+                    </div>
+                    
+                    <!-- Scrollable tasks area -->
+                    <div class="flex-1 overflow-y-auto pr-2 pb-4 space-y-5">
+                        
+                        <!-- Task Card (Yellow) -->
+                        <div class="sticky-note note-yellow" style="transform: rotate(-1.5deg);">
+                            <div class="tape"></div>
+                            <h3 class="font-hand text-xl font-bold leading-tight mt-1 text-slate-800">实现任务列表查询接口</h3>
+                            <p class="text-sm text-slate-600 mt-2 leading-relaxed font-medium">支持按状态和截止时间范围过滤任务。返回符合条件的任务列表。</p>
+                            <div class="mt-4 pt-3 flex justify-between items-center border-t border-slate-800/10">
+                                <span class="flex items-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50 px-2 py-1 rounded">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span> High
+                                </span>
+                                <button class="text-xs bg-slate-800 text-white px-3 py-1.5 rounded hover:bg-slate-700 transition-colors shadow-sm font-medium">Claim</button>
+                            </div>
+                        </div>
+
+                        <!-- Task Card (Pink) -->
+                        <div class="sticky-note note-pink" style="transform: rotate(1deg);">
+                            <div class="tape tape-alt"></div>
+                            <h3 class="font-hand text-xl font-bold leading-tight mt-1 text-slate-800">实现任务删除功能</h3>
+                            <p class="text-sm text-slate-700 mt-2 leading-relaxed font-medium">根据任务 ID 删除任务。如果不存在返回 ErrTaskNotFound。</p>
+                            <div class="mt-4 pt-3 flex justify-between items-center border-t border-slate-800/10">
+                                <span class="flex items-center gap-1 text-xs font-semibold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Low
+                                </span>
+                                <button class="text-xs bg-slate-800 text-white px-3 py-1.5 rounded hover:bg-slate-700 transition-colors shadow-sm font-medium">Claim</button>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Column 2: In Progress -->
+                <div class="flex-1 kanban-column p-4">
+                    <div class="flex items-center justify-between mb-4 px-2">
+                        <h2 class="font-semibold text-slate-700">In Progress</h2>
+                        <span class="bg-blue-100 text-blue-700 text-xs py-0.5 px-2.5 rounded-full font-medium">1</span>
+                    </div>
+                    
+                    <div class="flex-1 overflow-y-auto pr-2 pb-4 space-y-5">
+                        <!-- Task Card (Blue) -->
+                        <div class="sticky-note note-blue" style="transform: rotate(-0.5deg);">
+                            <div class="tape"></div>
+                            <div class="flex items-start justify-between mt-1">
+                                <h3 class="font-hand text-xl font-bold leading-tight text-slate-800">AddTask 截止时间校验</h3>
+                            </div>
+                            
+                            <!-- Assignee Avatar / Badge -->
+                            <div class="flex items-center gap-2 mt-3 mb-2">
+                                <div class="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs shadow">🤖</div>
+                                <span class="text-xs font-semibold text-blue-900 bg-white/60 px-2 py-1 rounded shadow-sm border border-white/40">worker-1776</span>
+                            </div>
+
+                            <p class="text-sm text-slate-700 mt-1 leading-relaxed font-medium">校验规则：截止时间必须晚于当前时间。返回 ErrInvalidSchedule。</p>
+                            
+                            <div class="mt-4 pt-3 flex justify-between items-center border-t border-slate-800/10">
+                                <div class="flex items-center gap-1.5">
+                                    <svg class="w-4 h-4 text-blue-600 animate-spin" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span class="text-xs font-semibold text-blue-800">Working...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Column 3: Done -->
+                <div class="flex-1 kanban-column p-4">
+                    <div class="flex items-center justify-between mb-4 px-2">
+                        <h2 class="font-semibold text-slate-700">Done</h2>
+                        <span class="bg-emerald-100 text-emerald-700 text-xs py-0.5 px-2.5 rounded-full font-medium">1</span>
+                    </div>
+                    
+                    <div class="flex-1 overflow-y-auto pr-2 pb-4 space-y-5">
+                        <!-- Completed Task Card (Green) -->
+                        <div class="sticky-note note-green opacity-80 hover:opacity-100" style="transform: rotate(1.5deg);">
+                            <div class="tape tape-alt"></div>
+                            <h3 class="font-hand text-xl font-bold leading-tight mt-1 text-slate-800 line-through decoration-slate-800/30">初始化项目结构</h3>
+                            <p class="text-sm text-slate-700 mt-2 leading-relaxed font-medium">建立基础目录，引入必要的依赖，并提交初始 Commit。</p>
+                            <div class="mt-4 pt-3 flex justify-between items-center border-t border-slate-800/10">
+                                <span class="text-xs font-semibold text-emerald-700 flex items-center gap-1">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                                    Completed
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+</body>
+</html>

@@ -65,14 +65,15 @@ export function AutoModeSwitch() {
     }
   }
 
-  // The switch itself: a leather track with a brass rivet as the knob.
-  const trackBase = 'relative inline-flex items-center w-[46px] h-[22px] rounded-full transition-colors duration-200 shadow-inner border'
-  const trackOn  = 'bg-emerald-600 border-emerald-700 ring-2 ring-emerald-400/30 shadow-[0_0_12px_rgba(16,185,129,0.35)]'
-  const trackOff = 'bg-[#8b4513]/30 border-[#8b4513]/40'
+  // The switch itself: a dark toggle — flat track with a tiny glow
+  // when on, fitting the Linear-inspired chrome of the header strip.
+  const trackBase = 'relative inline-flex items-center w-9 h-[18px] rounded-full transition-colors duration-200'
+  const trackOn  = 'bg-emerald-500/80 shadow-[inset_0_1px_2px_rgba(0,0,0,0.3),0_0_8px_rgba(16,185,129,0.4)]'
+  const trackOff = 'bg-white/10 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]'
 
-  const knobBase = 'absolute top-[2px] w-[16px] h-[16px] rounded-full transition-all duration-200 shadow-md'
-  const knobOn   = 'left-[26px] bg-gradient-to-b from-[#f4ece1] to-[#d7c6a8] border border-[#efebe9]'
-  const knobOff  = 'left-[2px] bg-gradient-to-b from-[#efebe9] to-[#c8b695] border border-[#8b4513]/30'
+  const knobBase = 'absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.3)]'
+  const knobOn   = 'left-[20px] bg-white'
+  const knobOff  = 'left-[2px] bg-[#a1a1aa]'
 
   return (
     <>
@@ -83,14 +84,10 @@ export function AutoModeSwitch() {
         aria-label={`AutoMode ${autoMode ? 'on' : 'off'}`}
         onClick={openConfirm}
         disabled={!selectedProjectId}
-        className="group inline-flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-[#8b4513]/10 border border-[#8b4513]/20 hover:bg-[#8b4513]/15 transition-colors disabled:opacity-50"
+        className="chip gap-2 disabled:opacity-50"
+        title={autoMode ? 'Auto Mode: Chief decides' : 'Auto Mode off — Chief waits for approval'}
       >
-        <span className="flex flex-col items-start">
-          <span className="text-[9px] font-marker uppercase tracking-[0.2em] text-[#5d4037]/70 leading-tight">AutoMode</span>
-          <span className={`text-[10px] font-bold leading-tight ${autoMode ? 'text-emerald-700' : 'text-[#8b4513]/50'}`}>
-            {autoMode ? 'Active · Chief decides' : 'Manual · Chief waits'}
-          </span>
-        </span>
+        <span className="font-medium">Auto Mode</span>
         <span className={`${trackBase} ${autoMode ? trackOn : trackOff}`}>
           <span className={`${knobBase} ${autoMode ? knobOn : knobOff}`} />
         </span>
@@ -98,11 +95,11 @@ export function AutoModeSwitch() {
 
       {modalOpen && (
         <div
-          className="fixed inset-0 bg-[#3e2723]/50 backdrop-blur-sm z-50 flex items-center justify-center"
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={() => !busy && setModalOpen(false)}
         >
           <div
-            className="parchment w-[32rem] max-w-[90vw] rounded-3xl border border-[#8b4513]/30 shadow-2xl p-6"
+            className="parchment w-[32rem] max-w-[90vw] rounded-2xl p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="font-marker text-xl text-[#5d4037] mb-1">

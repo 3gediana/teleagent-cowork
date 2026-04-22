@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A3C Studio · Mission Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Caveat:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+
+        :root {
+            /* Linear-inspired palette */
+            --bg: #0a0a0b;
+            --surface-0: #141417;
+            --surface-1: #1a1a1d;
+            --surface-2: #222226;
+            --border: #26262a;
+            --border-hover: #35353a;
+            --text-0: #f7f7f8;
+            --text-1: #a1a1a6;
+            --text-2: #6b6b70;
+            --accent: #5e6ad2;
+            --accent-glow: rgba(94, 106, 210, 0.3);
+
+            /* Cork board warm tones */
+            --cork-base: #c9a47a;
+            --cork-deep: #8b6a4a;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-feature-settings: "cv11", "ss01";
+            background: var(--bg);
+            color: var(--text-0);
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
+            letter-spacing: -0.011em;
+        }
+
+        /* ============ CORK PIN-BOARD BACKGROUND ============ */
+        .cork-board {
+            background-color: #b58e64;
+            background-image:
+                /* subtle fiber noise */
+                url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.2 0 0 0 0 0.1 0 0 0 0.45 0'/%3E%3C/filter%3E%3Crect width='600' height='600' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E"),
+                /* cork dots */
+                radial-gradient(circle at 20% 30%, rgba(101, 74, 46, 0.4) 0.8px, transparent 1.5px),
+                radial-gradient(circle at 70% 80%, rgba(138, 98, 61, 0.35) 0.6px, transparent 1.2px),
+                radial-gradient(circle at 45% 55%, rgba(90, 62, 36, 0.3) 0.5px, transparent 1px),
+                /* warm glow */
+                radial-gradient(ellipse at top left, rgba(222, 183, 136, 0.5), transparent 60%),
+                radial-gradient(ellipse at bottom right, rgba(139, 97, 60, 0.3), transparent 55%),
+                linear-gradient(135deg, #c4956a 0%, #a37a51 50%, #8f6742 100%);
+            background-size: 600px 600px, 8px 8px, 11px 11px, 7px 7px, 100% 100%, 100% 100%, 100% 100%;
+            position: relative;
+        }
+
+        .cork-board::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background:
+                linear-gradient(180deg, rgba(0, 0, 0, 0.25) 0%, transparent 15%, transparent 85%, rgba(0, 0, 0, 0.35) 100%),
+                radial-gradient(ellipse at center, transparent 40%, rgba(70, 45, 20, 0.35) 100%);
+            pointer-events: none;
+        }
+
+        /* wood frame for cork board */
+        .cork-frame {
+            padding: 14px;
+            background:
+                linear-gradient(180deg, #3d2817 0%, #2a1a0d 100%);
+            border-radius: 8px;
+            box-shadow:
+                0 30px 80px -20px rgba(0, 0, 0, 0.7),
+                0 10px 30px -10px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.1),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.5);
+            position: relative;
+        }
+
+        .cork-frame::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 8px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.02 0.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 0.15 0 0 0 0 0.08 0 0 0 0 0.04 0 0 0 0.3 0'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23w)'/%3E%3C/svg%3E");
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        /* ============ STICKY NOTES — REAL PAPER FEEL ============ */
+        .stickynote {
+            position: relative;
+            padding: 20px 18px 16px;
+            border-radius: 2px 16px 3px 2px;
+            /* multi-layer shadow for real paper depth */
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.35) inset,
+                0 -1px 0 rgba(0, 0, 0, 0.08) inset,
+                3px 3px 0 -1px rgba(0, 0, 0, 0.05),
+                6px 10px 15px -4px rgba(0, 0, 0, 0.25),
+                10px 16px 28px -10px rgba(0, 0, 0, 0.35);
+            transition: transform 0.25s cubic-bezier(0.25, 0.8, 0.35, 1), box-shadow 0.25s;
+            cursor: grab;
+            transform-origin: top center;
+        }
+
+        .stickynote::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 2px 16px 3px 2px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.4 0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23p)' opacity='0.25'/%3E%3C/svg%3E");
+            opacity: 0.5;
+            pointer-events: none;
+            border-radius: inherit;
+            mix-blend-mode: multiply;
+        }
+
+        /* curl in lower-right corner — authentic sticky-note detail */
+        .stickynote::after {
+            content: '';
+            position: absolute;
+            bottom: 0; right: 0;
+            width: 24px; height: 24px;
+            background: linear-gradient(135deg, transparent 50%, rgba(0, 0, 0, 0.08) 52%, rgba(255, 255, 255, 0.25) 55%, transparent 70%);
+            border-radius: 0 0 3px 0;
+            pointer-events: none;
+        }
+
+        .stickynote:hover {
+            transform: translateY(-6px) scale(1.025) rotate(0deg) !important;
+            z-index: 30;
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.4) inset,
+                0 -1px 0 rgba(0, 0, 0, 0.08) inset,
+                3px 3px 0 -1px rgba(0, 0, 0, 0.08),
+                8px 14px 22px -4px rgba(0, 0, 0, 0.32),
+                18px 28px 48px -12px rgba(0, 0, 0, 0.45);
+        }
+
+        /* note colors with gradient for depth */
+        .note-yellow { background: linear-gradient(135deg, #fff8b8 0%, #fef08a 100%); color: #5c4a00; }
+        .note-peach  { background: linear-gradient(135deg, #ffd6b8 0%, #fdba95 100%); color: #6b3410; }
+        .note-pink   { background: linear-gradient(135deg, #ffd1dc 0%, #fbb4c6 100%); color: #7a2a42; }
+        .note-mint   { background: linear-gradient(135deg, #c6f5dc 0%, #a2ecc3 100%); color: #1f5a39; }
+        .note-sky    { background: linear-gradient(135deg, #c6e4fa 0%, #a1d0f5 100%); color: #1d446e; }
+        .note-lilac  { background: linear-gradient(135deg, #e3d5ff 0%, #c9b1fc 100%); color: #45307a; }
+
+        /* ============ MASKING TAPE — WITH SHEEN ============ */
+        .tape {
+            position: absolute;
+            top: -10px; left: 50%;
+            width: 72px; height: 22px;
+            transform: translateX(-50%) rotate(-3deg);
+            background:
+                linear-gradient(115deg,
+                    rgba(255, 255, 255, 0.5) 0%,
+                    rgba(255, 255, 255, 0.25) 25%,
+                    rgba(255, 255, 255, 0.6) 45%,
+                    rgba(255, 255, 255, 0.2) 55%,
+                    rgba(255, 255, 255, 0.45) 80%,
+                    rgba(255, 255, 255, 0.3) 100%),
+                linear-gradient(180deg, #fef3c7 0%, #fde68a 100%);
+            box-shadow:
+                0 2px 4px rgba(0, 0, 0, 0.15),
+                0 0 0 1px rgba(255, 255, 255, 0.3) inset;
+            z-index: 10;
+            border-radius: 1px;
+        }
+
+        .tape::before, .tape::after {
+            content: '';
+            position: absolute;
+            top: 0; bottom: 0;
+            width: 4px;
+            background-image:
+                linear-gradient(90deg,
+                    transparent 0%,
+                    rgba(0, 0, 0, 0.05) 30%,
+                    transparent 50%,
+                    rgba(0, 0, 0, 0.05) 70%,
+                    transparent 100%);
+        }
+
+        .tape::before { left: 0; }
+        .tape::after { right: 0; }
+
+        .tape-alt {
+            background:
+                linear-gradient(115deg,
+                    rgba(255, 255, 255, 0.5) 0%,
+                    rgba(255, 255, 255, 0.2) 50%,
+                    rgba(255, 255, 255, 0.4) 100%),
+                linear-gradient(180deg, rgba(186, 230, 253, 0.85) 0%, rgba(125, 211, 252, 0.9) 100%);
+        }
+
+        .font-handwritten { font-family: 'Caveat', cursive; letter-spacing: 0; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* ============ SIDEBAR (Linear-style) ============ */
+        .sidebar-nav a {
+            transition: background 0.12s, color 0.12s;
+        }
+
+        .sidebar-nav a.active {
+            background: linear-gradient(90deg, rgba(94, 106, 210, 0.15), rgba(94, 106, 210, 0.05));
+            color: #c3cafe;
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+
+        .sidebar-nav a:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.04);
+            color: #e8e8ea;
+        }
+
+        /* subtle top gradient in sidebar */
+        .sidebar-glow {
+            background:
+                radial-gradient(ellipse 80% 40% at 50% 0%, rgba(94, 106, 210, 0.1), transparent 60%);
+        }
+
+        /* ============ HEADER CARDS ============ */
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            color: var(--text-1);
+            transition: background 0.15s;
+        }
+        .chip:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--border-hover); }
+
+        .chip-green { background: rgba(34, 197, 94, 0.08); border-color: rgba(34, 197, 94, 0.2); color: #86efac; }
+        .chip-blue  { background: rgba(94, 106, 210, 0.1); border-color: rgba(94, 106, 210, 0.25); color: #a5adec; }
+
+        /* status dot with real glow */
+        .status-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #22c55e;
+            box-shadow: 0 0 8px #22c55e, 0 0 2px #22c55e;
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 8px rgba(34, 197, 94, 0.8), 0 0 2px #22c55e; }
+            50% { box-shadow: 0 0 14px rgba(34, 197, 94, 1), 0 0 4px #22c55e; }
+        }
+
+        /* ============ KANBAN COLUMN HEADERS ============ */
+        .column-header {
+            background: rgba(20, 20, 23, 0.75);
+            backdrop-filter: blur(14px) saturate(180%);
+            -webkit-backdrop-filter: blur(14px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow:
+                0 4px 12px rgba(0, 0, 0, 0.3),
+                0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+        }
+
+        /* ============ PROJECT STAT CARDS (top strip) ============ */
+        .stat-card {
+            background: linear-gradient(180deg, var(--surface-1), var(--surface-0));
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px 18px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+        }
+
+        /* sparkline animation */
+        .spark { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+
+        /* ============ PUSH PIN (for some notes instead of tape) ============ */
+        .pushpin {
+            position: absolute;
+            top: -4px; left: 50%;
+            transform: translateX(-50%);
+            width: 14px; height: 14px;
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.2) 20%, transparent 45%),
+                radial-gradient(circle at 70% 70%, rgba(0, 0, 0, 0.3) 0%, transparent 50%),
+                linear-gradient(135deg, #ef4444, #991b1b);
+            box-shadow:
+                0 2px 4px rgba(0, 0, 0, 0.4),
+                0 0 0 1px rgba(0, 0, 0, 0.2);
+            z-index: 12;
+        }
+
+        .pushpin-blue { background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.2) 20%, transparent 45%), radial-gradient(circle at 70% 70%, rgba(0, 0, 0, 0.3) 0%, transparent 50%), linear-gradient(135deg, #3b82f6, #1e40af); }
+        .pushpin-green { background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.2) 20%, transparent 45%), radial-gradient(circle at 70% 70%, rgba(0, 0, 0, 0.3) 0%, transparent 50%), linear-gradient(135deg, #10b981, #047857); }
+
+        /* ============ AVATAR ============ */
+        .avatar {
+            width: 22px; height: 22px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent) 0%, #7b82e6 100%);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 700;
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.8);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        /* ============ SCROLLBAR ============ */
+        *::-webkit-scrollbar { width: 6px; height: 6px; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        *::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+        *::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+        /* cork area scrollbar (darker for warm bg) */
+        .cork-scroll::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.2); }
+        .cork-scroll::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.35); }
+
+        /* ambient glow for AI-at-work indicator */
+        .ai-glow {
+            position: absolute;
+            inset: -1px;
+            background: linear-gradient(135deg, #5e6ad2, #22d3ee, #a855f7, #5e6ad2);
+            background-size: 400% 400%;
+            border-radius: inherit;
+            z-index: -1;
+            filter: blur(6px);
+            opacity: 0.5;
+            animation: ai-gradient 4s ease infinite;
+        }
+
+        @keyframes ai-gradient {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+
+        /* KPI trend arrow */
+        .trend-up { color: #22c55e; }
+        .trend-down { color: #ef4444; }
+
+        /* Subtle grain over whole app */
+        .app-grain::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23g)' opacity='0.08'/%3E%3C/svg%3E");
+            mix-blend-mode: overlay;
+            pointer-events: none;
+            z-index: 10000;
+        }
+    </style>
+</head>
+<body class="app-grain">
+<div class="flex h-screen">
+
+    <!-- ═════════════════════════════ SIDEBAR ═════════════════════════════ -->
+    <aside class="w-60 bg-[#0d0d0f] border-r border-[#1e1e22] flex flex-col shrink-0 relative">
+        <div class="sidebar-glow absolute inset-x-0 top-0 h-40 pointer-events-none"></div>
+
+        <!-- brand -->
+        <div class="px-5 pt-5 pb-4 relative z-10">
+            <div class="flex items-center gap-2.5">
+                <div class="relative">
+                    <div class="w-7 h-7 rounded-[8px] bg-gradient-to-br from-[#7b82e6] to-[#4a56cc] flex items-center justify-center shadow-lg shadow-indigo-900/40 ring-1 ring-white/10">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M6 3 L6 21 M6 12 L18 12 M18 3 L18 21"/></svg>
+                    </div>
+                </div>
+                <div class="leading-tight">
+                    <div class="text-[13px] font-semibold text-white tracking-tight">A3C Studio</div>
+                    <div class="text-[11px] text-[#6b6b70]">Mission Control</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- project switcher -->
+        <div class="px-3 pb-3 relative z-10">
+            <button class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-colors text-left">
+                <div class="w-5 h-5 rounded bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-[10px] font-bold text-amber-950">P</div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-[12px] font-medium text-[#e8e8ea] truncate">Planner-1776865388</div>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#6b6b70]"><polyline points="8 9 12 5 16 9"/><polyline points="16 15 12 19 8 15"/></svg>
+            </button>
+        </div>
+
+        <!-- nav -->
+        <nav class="sidebar-nav flex-1 px-3 space-y-0.5 overflow-y-auto text-[13px]">
+            <div class="px-2 pt-2 pb-1.5 text-[11px] font-medium text-[#6b6b70] uppercase tracking-wider">Workspace</div>
+
+            <a class="active flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#e8e8ea]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+                Overview
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                Tasks
+                <span class="ml-auto text-[11px] text-[#6b6b70] font-mono">3</span>
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 10h7l-1 10 9-10h-7z"/></svg>
+                Submissions
+                <span class="ml-auto text-[11px] text-[#6b6b70] font-mono">1</span>
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 10l5-5 5 5M7 14l5 5 5-5"/></svg>
+                Pull Requests
+                <span class="ml-auto text-[11px] text-emerald-400 font-mono">●1</span>
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                Chief Chat
+            </a>
+
+            <div class="px-2 pt-5 pb-1.5 text-[11px] font-medium text-[#6b6b70] uppercase tracking-wider">Fleet</div>
+
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
+                Agent Pool
+                <span class="ml-auto flex items-center gap-1 text-[11px] text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>2</span>
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+                LLM Endpoints
+            </a>
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                Knowledge
+            </a>
+
+            <div class="px-2 pt-5 pb-1.5 text-[11px] font-medium text-[#6b6b70] uppercase tracking-wider">System</div>
+
+            <a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#a1a1a6]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                Settings
+            </a>
+        </nav>
+
+        <!-- user -->
+        <div class="px-3 py-3 border-t border-[#1e1e22]">
+            <div class="flex items-center gap-2.5">
+                <div class="w-7 h-7 rounded-full bg-gradient-to-br from-fuchsia-500 to-rose-500 flex items-center justify-center text-[11px] font-bold text-white ring-2 ring-[#0d0d0f]">YU</div>
+                <div class="flex-1 min-w-0 leading-tight">
+                    <div class="text-[12px] text-white truncate font-medium">operator</div>
+                    <div class="text-[11px] text-[#6b6b70] truncate">Human operator</div>
+                </div>
+                <button class="text-[#6b6b70] hover:text-white">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ═════════════════════════════ MAIN ═════════════════════════════ -->
+    <main class="flex-1 flex flex-col min-w-0 relative bg-[#0a0a0b]">
+
+        <!-- ambient gradients -->
+        <div class="absolute top-0 right-[20%] w-[700px] h-[500px] pointer-events-none" style="background: radial-gradient(ellipse, rgba(94,106,210,0.08), transparent 70%); filter: blur(60px);"></div>
+        <div class="absolute bottom-0 left-[10%] w-[600px] h-[400px] pointer-events-none" style="background: radial-gradient(ellipse, rgba(34,211,238,0.05), transparent 70%); filter: blur(80px);"></div>
+
+        <!-- header -->
+        <header class="relative z-20 px-7 h-14 flex items-center justify-between border-b border-[#1e1e22] backdrop-blur-xl bg-[#0a0a0b]/70">
+            <div class="flex items-center gap-2 text-[13px]">
+                <span class="text-[#6b6b70]">Workspace</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#3a3a3f]"><polyline points="9 18 15 12 9 6"/></svg>
+                <span class="text-[#a1a1a6]">Planner-1776865388</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#3a3a3f]"><polyline points="9 18 15 12 9 6"/></svg>
+                <span class="text-white font-medium">Overview</span>
+                <span class="ml-3 chip chip-blue font-mono text-[11px]">M1 · core-scheduler</span>
+                <span class="chip font-mono text-[11px]">v1.1.1</span>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <!-- search -->
+                <button class="chip gap-2 pl-2.5 pr-1.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <span>Quick find…</span>
+                    <kbd class="ml-2 px-1.5 py-0.5 rounded bg-white/5 text-[10px] font-mono border border-[#2a2a2e]">⌘K</kbd>
+                </button>
+
+                <!-- auto mode switch -->
+                <div class="chip gap-2">
+                    <span>Auto Mode</span>
+                    <div class="w-7 h-4 bg-emerald-500/80 rounded-full relative shadow-inner">
+                        <div class="absolute right-0.5 top-0.5 w-3 h-3 bg-white rounded-full shadow"></div>
+                    </div>
+                </div>
+
+                <!-- online -->
+                <div class="chip chip-green">
+                    <span class="status-dot"></span>
+                    <span>2 agents online</span>
+                </div>
+
+                <!-- notifications -->
+                <button class="chip relative gap-1.5 px-2">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+                    <span class="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- stats strip -->
+        <div class="relative z-10 px-7 py-4 grid grid-cols-4 gap-3">
+            <div class="stat-card">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <div class="text-[11px] text-[#6b6b70] uppercase tracking-wider font-medium">Tasks</div>
+                        <div class="mt-1 flex items-baseline gap-1.5">
+                            <div class="text-[24px] font-semibold tracking-tight">3</div>
+                            <span class="text-[11px] text-[#6b6b70]">/ 3 total</span>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-emerald-400 flex items-center gap-0.5 bg-emerald-400/10 px-1.5 py-0.5 rounded">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M7 14l5-5 5 5z"/></svg>
+                        33%
+                    </div>
+                </div>
+                <div class="mt-3 flex items-center gap-1.5">
+                    <div class="flex-1 h-1 rounded-full bg-white/5 overflow-hidden">
+                        <div class="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full" style="width: 33%"></div>
+                    </div>
+                    <span class="text-[11px] text-[#6b6b70] font-mono">1 done</span>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="text-[11px] text-[#6b6b70] uppercase tracking-wider font-medium">Active Agents</div>
+                <div class="mt-1 flex items-center gap-2">
+                    <div class="flex -space-x-1.5">
+                        <div class="avatar" style="background: linear-gradient(135deg, #f59e0b, #d97706);">OP</div>
+                        <div class="avatar" style="background: linear-gradient(135deg, #10b981, #059669);">W1</div>
+                    </div>
+                    <span class="text-[24px] font-semibold tracking-tight">2</span>
+                </div>
+                <div class="mt-3 text-[11px] text-[#6b6b70]">
+                    <span class="text-emerald-400">●</span> 1 human · 1 worker
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <div class="text-[11px] text-[#6b6b70] uppercase tracking-wider font-medium">Tokens (24h)</div>
+                        <div class="mt-1 text-[24px] font-semibold tracking-tight">127.3K</div>
+                    </div>
+                    <svg width="62" height="30" viewBox="0 0 62 30">
+                        <path class="spark" d="M0,22 L8,18 L16,20 L24,14 L32,16 L40,10 L48,12 L54,6 L62,8" stroke="#5e6ad2"/>
+                        <path class="spark" d="M0,22 L8,18 L16,20 L24,14 L32,16 L40,10 L48,12 L54,6 L62,8" stroke="url(#sparkglow)" stroke-width="2.5" opacity="0.5"/>
+                        <defs>
+                            <linearGradient id="sparkglow" x1="0" y1="0" x2="62" y2="0">
+                                <stop offset="0%" stop-color="#5e6ad2" stop-opacity="0"/>
+                                <stop offset="100%" stop-color="#5e6ad2" stop-opacity="1"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div class="mt-3 text-[11px] text-[#6b6b70]">
+                    <span class="text-rose-400">↑</span> $0.0625 spent
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="text-[11px] text-[#6b6b70] uppercase tracking-wider font-medium">PR Pipeline</div>
+                <div class="mt-1 flex items-center gap-3">
+                    <div class="text-[24px] font-semibold tracking-tight">1</div>
+                    <div class="flex-1 flex flex-col gap-0.5">
+                        <div class="flex items-center gap-1 text-[11px] text-emerald-400">
+                            <span class="w-1 h-1 rounded-full bg-emerald-400"></span>
+                            <span>1 merged today</span>
+                        </div>
+                        <div class="text-[11px] text-[#6b6b70] font-mono">avg 47s audit</div>
+                    </div>
+                </div>
+                <div class="mt-3 flex gap-0.5">
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/80"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-emerald-500/40"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-white/5"></div>
+                    <div class="h-1 flex-1 rounded-sm bg-white/5"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CORK BOARD — kanban area -->
+        <div class="flex-1 px-7 pb-7 overflow-hidden">
+            <div class="cork-frame h-full">
+                <div class="cork-board h-full rounded-[2px] overflow-hidden flex flex-col">
+
+                    <!-- column headers strip -->
+                    <div class="relative z-10 p-5 grid grid-cols-3 gap-5">
+                        <div class="column-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-[#a1a1a6]"></span>
+                                <span class="text-[12px] font-semibold text-white">To Do</span>
+                                <span class="text-[11px] text-[#6b6b70] font-mono bg-white/5 px-1.5 rounded">2</span>
+                            </div>
+                            <button class="text-[#6b6b70] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
+                        </div>
+                        <div class="column-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-[#5e6ad2] shadow-[0_0_6px_#5e6ad2]"></span>
+                                <span class="text-[12px] font-semibold text-white">In Progress</span>
+                                <span class="text-[11px] text-[#a5adec] font-mono bg-[#5e6ad2]/15 px-1.5 rounded">1</span>
+                            </div>
+                            <button class="text-[#6b6b70] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
+                        </div>
+                        <div class="column-header">
+                            <div class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_#22c55e]"></span>
+                                <span class="text-[12px] font-semibold text-white">Done</span>
+                                <span class="text-[11px] text-emerald-300 font-mono bg-emerald-500/15 px-1.5 rounded">1</span>
+                            </div>
+                            <button class="text-[#6b6b70] hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
+                        </div>
+                    </div>
+
+                    <!-- kanban columns with sticky notes -->
+                    <div class="flex-1 grid grid-cols-3 gap-5 px-5 pb-5 min-h-0">
+
+                        <!-- ═══ COLUMN 1: TO DO ═══ -->
+                        <div class="relative overflow-y-auto cork-scroll space-y-6 px-2 pt-1 pb-4">
+
+                            <!-- task — yellow -->
+                            <div class="stickynote note-yellow" style="transform: rotate(-1.8deg);">
+                                <div class="pushpin"></div>
+                                <div class="flex items-start justify-between gap-2 mt-2 mb-2">
+                                    <div class="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-rose-800/80 bg-rose-200/50 px-1.5 py-0.5 rounded">
+                                        <span class="w-1 h-1 rounded-full bg-rose-600"></span> High
+                                    </div>
+                                    <span class="font-mono text-[10px] text-amber-950/50">#task_0d26</span>
+                                </div>
+                                <h3 class="font-handwritten text-[26px] leading-[1.1] text-amber-950 font-bold">实现任务列表查询接口</h3>
+                                <p class="text-[12.5px] mt-2 leading-relaxed text-amber-950/75">支持按状态和截止时间范围过滤任务。返回符合条件的列表，按截止时间升序。</p>
+                                <div class="mt-4 pt-2.5 flex items-center justify-between border-t border-amber-950/10">
+                                    <div class="flex items-center gap-1 text-[10.5px] text-amber-950/60 font-mono">
+                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                                        2d left
+                                    </div>
+                                    <button class="text-[11px] font-semibold bg-amber-950 hover:bg-amber-900 text-amber-50 px-3 py-1 rounded-sm shadow-sm transition-colors">Claim →</button>
+                                </div>
+                            </div>
+
+                            <!-- task — pink -->
+                            <div class="stickynote note-pink" style="transform: rotate(1.5deg);">
+                                <div class="pushpin pushpin-blue"></div>
+                                <div class="flex items-start justify-between gap-2 mt-2 mb-2">
+                                    <div class="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-emerald-900/80 bg-emerald-200/60 px-1.5 py-0.5 rounded">
+                                        <span class="w-1 h-1 rounded-full bg-emerald-700"></span> Low
+                                    </div>
+                                    <span class="font-mono text-[10px] text-rose-950/50">#task_491</span>
+                                </div>
+                                <h3 class="font-handwritten text-[26px] leading-[1.1] text-rose-950 font-bold">实现任务删除接口</h3>
+                                <p class="text-[12.5px] mt-2 leading-relaxed text-rose-950/75">根据 TaskID 删除已存在的任务。如果任务不存在，返回 ErrTaskNotFound。</p>
+                                <div class="mt-4 pt-2.5 flex items-center justify-between border-t border-rose-950/10">
+                                    <div class="flex items-center gap-1 text-[10.5px] text-rose-950/60 font-mono">
+                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                        0 comments
+                                    </div>
+                                    <button class="text-[11px] font-semibold bg-rose-950 hover:bg-rose-900 text-rose-50 px-3 py-1 rounded-sm shadow-sm transition-colors">Claim →</button>
+                                </div>
+                            </div>
+
+                            <!-- task — lilac (extra) -->
+                            <div class="stickynote note-lilac" style="transform: rotate(-1deg);">
+                                <div class="tape"></div>
+                                <div class="flex items-start justify-between gap-2 mt-2 mb-2">
+                                    <div class="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-amber-900/80 bg-amber-200/60 px-1.5 py-0.5 rounded">
+                                        <span class="w-1 h-1 rounded-full bg-amber-600"></span> Medium
+                                    </div>
+                                    <span class="font-mono text-[10px] text-violet-950/50">#task_883</span>
+                                </div>
+                                <h3 class="font-handwritten text-[24px] leading-[1.1] text-violet-950 font-bold">优化调度器启动</h3>
+                                <p class="text-[12.5px] mt-2 leading-relaxed text-violet-950/75">NewScheduler 创建实例，Start 启动循环，Stop 停止。</p>
+                                <div class="mt-4 pt-2.5 flex items-center justify-between border-t border-violet-950/10">
+                                    <span class="text-[10.5px] text-violet-950/60 font-mono">unassigned</span>
+                                    <button class="text-[11px] font-semibold bg-violet-950 hover:bg-violet-900 text-violet-50 px-3 py-1 rounded-sm shadow-sm transition-colors">Claim →</button>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <!-- ═══ COLUMN 2: IN PROGRESS ═══ -->
+                        <div class="relative overflow-y-auto cork-scroll space-y-6 px-2 pt-1 pb-4">
+
+                            <!-- task — sky (active, has AI glow) -->
+                            <div class="relative">
+                                <div class="ai-glow absolute rounded-[2px_16px_3px_2px]"></div>
+                                <div class="stickynote note-sky relative" style="transform: rotate(-0.8deg);">
+                                    <div class="tape tape-alt"></div>
+                                    <div class="flex items-start justify-between gap-2 mt-2 mb-2">
+                                        <div class="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-rose-800/80 bg-rose-200/50 px-1.5 py-0.5 rounded">
+                                            <span class="w-1 h-1 rounded-full bg-rose-600"></span> High
+                                        </div>
+                                        <span class="font-mono text-[10px] text-sky-950/50">#task_20e6</span>
+                                    </div>
+                                    <h3 class="font-handwritten text-[26px] leading-[1.1] text-sky-950 font-bold">AddTask 截止时间校验</h3>
+
+                                    <!-- assignee block -->
+                                    <div class="mt-3 flex items-center gap-2 bg-white/40 rounded-md p-1.5 pl-1.5 pr-2.5 border border-white/30 backdrop-blur-sm">
+                                        <div class="avatar" style="width:20px;height:20px;font-size:9px;background: linear-gradient(135deg, #10b981, #059669);">W1</div>
+                                        <div class="flex-1 min-w-0 leading-tight">
+                                            <div class="text-[11px] font-semibold text-sky-950 truncate">worker-1776865447</div>
+                                            <div class="text-[10px] text-sky-900/70 font-mono">audit_1 · iter 6/25</div>
+                                        </div>
+                                        <div class="flex items-center gap-1">
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0c4a6e" stroke-width="2.5" class="animate-spin" style="animation-duration:1.5s"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                                        </div>
+                                    </div>
+
+                                    <p class="text-[12.5px] mt-2.5 leading-relaxed text-sky-950/75">校验规则：截止时间必须晚于当前时间。错误定义在 errors.go 中。</p>
+
+                                    <!-- progress indicators -->
+                                    <div class="mt-3 pt-2.5 border-t border-sky-950/10">
+                                        <div class="flex items-center justify-between mb-1.5">
+                                            <span class="text-[10px] font-semibold uppercase tracking-wider text-sky-950/70">Pipeline</span>
+                                            <span class="font-mono text-[10px] text-sky-900/60">28s elapsed</span>
+                                        </div>
+                                        <div class="flex items-center gap-1.5">
+                                            <div class="flex-1 flex items-center gap-1">
+                                                <div class="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center">
+                                                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                </div>
+                                                <span class="text-[10px] font-mono text-sky-900/80">claim</span>
+                                            </div>
+                                            <div class="h-px flex-1 bg-emerald-500/50"></div>
+                                            <div class="flex-1 flex items-center gap-1">
+                                                <div class="w-4 h-4 rounded-full bg-sky-600 flex items-center justify-center ring-2 ring-sky-300/60">
+                                                    <div class="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></div>
+                                                </div>
+                                                <span class="text-[10px] font-mono text-sky-900/90 font-semibold">audit</span>
+                                            </div>
+                                            <div class="h-px flex-1 bg-sky-950/15"></div>
+                                            <div class="flex-1 flex items-center gap-1">
+                                                <div class="w-4 h-4 rounded-full bg-sky-950/15"></div>
+                                                <span class="text-[10px] font-mono text-sky-950/40">pr</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <!-- ═══ COLUMN 3: DONE ═══ -->
+                        <div class="relative overflow-y-auto cork-scroll space-y-6 px-2 pt-1 pb-4">
+
+                            <!-- task — mint, completed -->
+                            <div class="stickynote note-mint" style="transform: rotate(1.2deg); opacity: 0.92;">
+                                <div class="pushpin pushpin-green"></div>
+                                <div class="flex items-start justify-between gap-2 mt-2 mb-2">
+                                    <div class="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-emerald-900/80 bg-white/40 px-1.5 py-0.5 rounded">
+                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                        Merged
+                                    </div>
+                                    <span class="font-mono text-[10px] text-emerald-950/50">#pr_5dba</span>
+                                </div>
+                                <h3 class="font-handwritten text-[24px] leading-[1.1] text-emerald-950 font-bold line-through decoration-emerald-950/40 decoration-2">初始化项目结构 + 回归测试</h3>
+                                <p class="text-[12.5px] mt-2 leading-relaxed text-emerald-950/70">建立基础目录，引入必要依赖。Schedule.AddTask 的截止时间校验回归测试。</p>
+
+                                <div class="mt-3 flex items-center gap-2 bg-white/30 rounded-md p-1.5 border border-white/30">
+                                    <div class="avatar" style="width:18px;height:18px;font-size:8px;background: linear-gradient(135deg, #f59e0b, #d97706);">OP</div>
+                                    <div class="flex-1 min-w-0 leading-tight">
+                                        <div class="text-[10.5px] font-semibold text-emerald-950 truncate">operator · approved</div>
+                                    </div>
+                                    <span class="font-mono text-[10px] text-emerald-900/60">v1.1.1</span>
+                                </div>
+
+                                <div class="mt-3 pt-2.5 flex items-center justify-between border-t border-emerald-950/10">
+                                    <div class="flex items-center gap-2 text-[10.5px] text-emerald-900/60 font-mono">
+                                        <span class="flex items-center gap-0.5"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg> +16</span>
+                                        <span class="flex items-center gap-0.5 opacity-60"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg> -0</span>
+                                    </div>
+                                    <span class="text-[10.5px] text-emerald-900/60 font-mono">2m ago</span>
+                                </div>
+                            </div>
+
+                            <!-- ghost placeholder -->
+                            <div class="border-2 border-dashed border-black/10 rounded-lg h-20 flex items-center justify-center">
+                                <span class="font-handwritten text-black/25 text-[18px]">drop a task here</span>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+</body>
+</html>

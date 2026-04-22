@@ -3,13 +3,13 @@ import { useNavigate } from 'react-router-dom'
 import { prApi } from '../api/endpoints'
 
 /**
- * ChiefQueueCompact — the 200px "peek at Chief's desk" card that lives
- * on OverviewPage's left column. Shows the top-3 PRs waiting on a
- * decision with their recommended_action glyph, so operators don't
- * have to navigate to ChiefPage just to check if there's anything
- * waiting.
+ * ChiefQueueCompact — the "peek at Chief's desk" card that lives on
+ * OverviewPage's left column.  Shows the top-3 PRs waiting on a human
+ * decision together with each PR's recommended_action, so operators
+ * don't have to navigate to ChiefPage just to see if there's anything
+ * to triage.  Click-through lands on the full queue tab.
  *
- * Click-through lands on the full queue tab.
+ * Visual: dark surface card, colored row per action (SVG icon + label).
  */
 
 type PR = {
@@ -30,10 +30,20 @@ function parseAction(raw?: string): string | undefined {
   } catch { return undefined }
 }
 
-const actionGlyphs: Record<string, { icon: string; label: string; color: string }> = {
-  auto_advance:      { icon: '🚀', label: 'auto',    color: 'text-emerald-700' },
-  escalate_to_human: { icon: '🖐️', label: 'human',   color: 'text-amber-700' },
-  request_changes:   { icon: '↩️', label: 'changes', color: 'text-rose-600' },
+type ActionStyle = { label: string; tone: string; iconColor: string; bg: string }
+
+const actions: Record<string, ActionStyle> = {
+  auto_advance:      { label: 'auto',    tone: '#6ee7b7', iconColor: '#10b981', bg: 'rgba(16,185,129,0.08)' },
+  escalate_to_human: { label: 'human',   tone: '#fcd34d', iconColor: '#f59e0b', bg: 'rgba(245,158,11,0.08)' },
+  request_changes:   { label: 'changes', tone: '#fda4af', iconColor: '#f43f5e', bg: 'rgba(244,63,94,0.08)' },
+}
+
+function ActionIcon({ action }: { action: string }) {
+  const common = { width: 11, height: 11, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
+  if (action === 'auto_advance') return (<svg {...common}><path d="m13 2-9 10h7l-1 10 9-10h-7z"/></svg>)
+  if (action === 'escalate_to_human') return (<svg {...common}><path d="M12 8v4"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/><circle cx="12" cy="12" r="9"/></svg>)
+  if (action === 'request_changes') return (<svg {...common}><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>)
+  return (<svg {...common}><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>)
 }
 
 export function ChiefQueueCompact() {
@@ -61,49 +71,81 @@ export function ChiefQueueCompact() {
   const count = pending.length
 
   return (
-    <div
+    <button
       onClick={() => navigate('/chief')}
-      className="parchment border border-[#8b4513]/20 rounded-2xl p-4 shadow-md cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all"
+      className="surface-1 p-4 text-left w-full transition-all hover:border-[var(--border-hover)] hover:-translate-y-0.5"
     >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">🤖</span>
-          <span className="font-marker text-sm text-[#5d4037]">Chief's Desk</span>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" strokeWidth="1.8">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <h3 className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--text-2)' }}>
+            Chief&apos;s Desk
+          </h3>
         </div>
-        <span className={`inline-flex items-center gap-1 text-[10px] font-marker uppercase tracking-widest ${
-          count > 0 ? 'text-amber-700' : 'text-[#8b4513]/40'
-        }`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${count > 0 ? 'bg-amber-500 animate-pulse shadow-[0_0_6px_rgba(245,158,11,0.6)]' : 'bg-[#8b4513]/30'}`} />
+        <span
+          className="chip font-mono-jb text-[10.5px]"
+          style={count > 0
+            ? { background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.22)', color: '#fcd34d' }
+            : undefined}
+        >
+          <span
+            className="w-1.5 h-1.5 rounded-full"
+            style={{
+              background: count > 0 ? '#f59e0b' : '#3f3f46',
+              boxShadow: count > 0 ? '0 0 6px rgba(245,158,11,0.6)' : undefined,
+              animation: count > 0 ? 'status-pulse 2s ease-in-out infinite' : undefined,
+            }}
+          />
           {count} pending
         </span>
       </div>
 
       {!loaded ? (
-        <p className="font-hand text-xs text-[#8b4513]/40 italic py-2">Peeking at the desk...</p>
+        <p className="text-[12px] py-2" style={{ color: 'var(--text-2)', fontStyle: 'italic' }}>Peeking at the desk…</p>
       ) : visible.length === 0 ? (
-        <p className="font-hand text-xs text-[#8b4513]/50 italic py-2">☕ All quiet — nothing waiting.</p>
+        <p className="text-[12px] py-2" style={{ color: 'var(--text-2)', fontStyle: 'italic' }}>All quiet — nothing waiting.</p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           {visible.map((pr) => {
             const act = parseAction(pr.tech_review)
-            const g = (act && actionGlyphs[act]) || { icon: '•', label: '', color: 'text-[#8b4513]/50' }
+            const style = (act && actions[act])
             return (
-              <div key={pr.id} className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-[#8b4513]/5">
-                <span className={`text-sm ${g.color}`}>{g.icon}</span>
-                {g.label && (
-                  <span className={`text-[9px] font-marker uppercase tracking-wider ${g.color}`}>{g.label}</span>
+              <div
+                key={pr.id}
+                className="flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors"
+                style={style ? { background: style.bg } : { background: 'rgba(255,255,255,0.02)' }}
+              >
+                {style ? (
+                  <span style={{ color: style.iconColor }}><ActionIcon action={act!} /></span>
+                ) : (
+                  <span style={{ color: 'var(--text-2)' }}><ActionIcon action="" /></span>
                 )}
-                <span className="font-hand text-xs text-[#5d4037] truncate flex-1">{pr.title}</span>
+                {style && (
+                  <span
+                    className="text-[9px] font-semibold uppercase tracking-[0.08em] font-mono-jb"
+                    style={{ color: style.tone }}
+                  >
+                    {style.label}
+                  </span>
+                )}
+                <span className="text-[12px] truncate flex-1" style={{ color: 'var(--text-1)' }} title={pr.title}>
+                  {pr.title}
+                </span>
               </div>
             )
           })}
           {extra > 0 && (
-            <p className="text-[10px] font-hand text-[#8b4513]/40 italic pl-2">+ {extra} more…</p>
+            <p className="text-[10.5px] pl-2 pt-0.5" style={{ color: 'var(--text-2)' }}>+ {extra} more…</p>
           )}
         </div>
       )}
 
-      <p className="mt-3 text-[10px] font-hand text-[#8b4513]/40 text-right">Open queue →</p>
-    </div>
+      <p className="mt-3 text-[10.5px] text-right flex items-center justify-end gap-1" style={{ color: 'var(--text-2)' }}>
+        Open queue
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </p>
+    </button>
   )
 }

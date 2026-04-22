@@ -78,6 +78,11 @@ func TriggerMaintainAgent(projectID string, trigger string, inputContent string)
 		InputContent:  effectiveInput,
 		TriggerReason: trigger,
 		LockList:      lockList,
+		// Maintain reads MILESTONE.md / DIRECTION.md / source via the
+		// same builtin file tools as the other roles. Rooting at the
+		// project dir (not /repo) lets it see both meta files and the
+		// ./repo source tree.
+		ProjectPath: GetProjectPath(projectID),
 	}
 
 	session := agent.DefaultManager.CreateSession(agent.RoleMaintain, projectID, ctx, trigger)

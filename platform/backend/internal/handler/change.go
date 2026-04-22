@@ -190,7 +190,14 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	// contribute to artifact feedback for this change, matching the
 	// graceful-degradation contract for every piece of the refinery
 	// pipeline.
-	injectedArtifactsJSON := ""
+	// Default to a valid empty JSON array, not "". MySQL strict JSON
+	// mode rejects empty strings in json-typed columns, so leaving
+	// this blank blocks the audit workflow from persisting its
+	// verdict later (the Change.Save in ProcessAuditOutput fails
+	// with "Invalid JSON text: The document is empty" and the
+	// waitForChangeStatus poller in clients never sees a terminal
+	// status).
+	injectedArtifactsJSON := "[]"
 	switch {
 	case len(req.InjectedRefs) > 0:
 		if b, err := json.Marshal(req.InjectedRefs); err == nil {

@@ -29,11 +29,24 @@ func HandleSessionCompletion(sessionID, projectID, role, status string) {
 	// Capture assistant output for dialogue roles. Must happen on
 	// "completed" only — failed/rejected runs would pollute chat
 	// history with error stubs the model didn't actually author.
+	//
+	// Additionally, only chat-flavoured trigger reasons go onto the
+	// DialogueMessage table. Chief has two session kinds:
+	//   - "chief_request"            → user-facing chat (append)
+	//   - "chief_decision_<kind>"   → platform-initiated automation
+	//                                  (DO NOT append; it muddies
+	//                                  the transcript with internal
+	//                                  pr_review / pr_merge replies
+	//                                  the human never asked for)
+	// Maintain has a similar split: dashboard_* is chat, everything
+	// else (timer, milestone_complete, biz_review) is bookkeeping.
 	if status == "completed" {
 		if channel := DialogueChannelForRole(role); channel != "" {
 			var outSess model.AgentSession
-			if err := model.DB.Select("output").Where("id = ?", sessionID).First(&outSess).Error; err == nil {
-				AppendDialogueMessage(projectID, channel, sessionID, DialogueRoleAssistant, outSess.Output)
+			if err := model.DB.Select("output", "trigger_reason").Where("id = ?", sessionID).First(&outSess).Error; err == nil {
+				if isChatTrigger(role, outSess.TriggerReason) {
+					AppendDialogueMessage(projectID, channel, sessionID, DialogueRoleAssistant, outSess.Output)
+				}
 			}
 		}
 	}
