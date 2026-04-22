@@ -54,3 +54,6 @@ platform/backend/cmd/dbquery/
 .omc/
 .windsurf/
 .opencode/
+# Real API keys live here locally; never commit.
+configs/config.yaml
+

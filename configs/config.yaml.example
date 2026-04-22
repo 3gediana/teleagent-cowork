@@ -1,0 +1,49 @@
+server:
+  port: 3003
+  mode: debug
+
+data_dir: "D:/claude-code/coai/platform/data"
+
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: ""
+  dbname: a3c
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  prefix: "a3c:"
+
+git:
+  repo_path: "./data/repos"
+
+opencode:
+  serve_url: "http://127.0.0.1:4096"
+  project_path: "D:\\claude-code\\coai"
+  default_model_provider: "minimax-coding-plan"
+  default_model_id: "MiniMax-M2.7"
+
+# Native-runtime provider credentials.
+# Copy this file to configs/config.yaml and paste real keys in.
+# configs/config.yaml is gitignored; this .example file is tracked.
+llm:
+  minimax:
+    api_key: ""                    # MiniMax key — sk-cp-... for coding-plan
+    base_url: "https://api.minimaxi.com/v1"
+    model: "MiniMax-M2.7"
+  openai:
+    api_key: ""
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+  anthropic:
+    api_key: ""
+    base_url: "https://api.anthropic.com"
+    model: "claude-sonnet-4-5-20250929"
+  deepseek:
+    api_key: ""
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"

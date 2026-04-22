@@ -9,12 +9,21 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig    `yaml:"server"`
-	Database DatabaseConfig   `yaml:"database"`
-	Redis    RedisConfig      `yaml:"redis"`
-	Git      GitConfig        `yaml:"git"`
-	OpenCode OpenCodeConfig   `yaml:"opencode"`
-	DataDir  string           `yaml:"data_dir"`
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+	Redis    RedisConfig    `yaml:"redis"`
+	Git      GitConfig      `yaml:"git"`
+	OpenCode OpenCodeConfig `yaml:"opencode"`
+	// LLM is the native-runtime provider-credential bag. Each subkey
+	// corresponds to one provider ever seen in production. Adding a
+	// key here is a bootstrap convenience — the same credentials
+	// normally live in the llm_endpoint DB table (registered via the
+	// dashboard). The config slots are used by:
+	//   * cmd/nativesmoke-real: real end-to-end smoke test against the
+	//     provider, so we verify the runtime without a dashboard UI.
+	//   * First-boot bootstrap on a fresh DB (future work).
+	LLM     LLMConfig `yaml:"llm"`
+	DataDir string    `yaml:"data_dir"`
 }
 
 type ServerConfig struct {
@@ -47,6 +56,32 @@ type OpenCodeConfig struct {
 	ProjectPath          string `yaml:"project_path"`
 	DefaultModelProvider string `yaml:"default_model_provider"`
 	DefaultModelID       string `yaml:"default_model_id"`
+}
+
+// LLMConfig holds bootstrap credentials for providers the native
+// runtime targets. In steady-state these live in the llm_endpoint
+// table and are edited via the dashboard; the config.yaml slots are
+// for the offline smoke-test harness and for first-boot seeding.
+//
+// Never hard-code keys in source — they belong in config.yaml (which
+// the repo .gitignore excludes) or in the environment. The OpenAI
+// and Anthropic struct shapes mirror MiniMax so adding a new
+// OpenAI-compatible provider is a one-line YAML change + a one-line
+// Go struct add here.
+type LLMConfig struct {
+	MiniMax   ProviderCreds `yaml:"minimax"`
+	OpenAI    ProviderCreds `yaml:"openai"`
+	Anthropic ProviderCreds `yaml:"anthropic"`
+	DeepSeek  ProviderCreds `yaml:"deepseek"`
+}
+
+// ProviderCreds is the shared shape for any LLM provider's bootstrap
+// entry. Leaving APIKey empty is legitimate — downstream code that
+// requires it must surface a clear error.
+type ProviderCreds struct {
+	APIKey   string `yaml:"api_key"`
+	BaseURL  string `yaml:"base_url,omitempty"`
+	Model    string `yaml:"model,omitempty"` // optional default model id
 }
 
 func Load(path string) *Config {
