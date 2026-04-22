@@ -57,3 +57,11 @@ platform/backend/cmd/dbquery/
 # Real API keys live here locally; never commit.
 configs/config.yaml
 
+
+# role-audit transcript dumps
+roleaudit-output*.txt
+
+
+# temp commit-message file
+.git-commit-msg.txt
+

@@ -34,6 +34,17 @@ import (
 // we can eventually delete it without touching runner.
 var OpencodeFallback agent.SessionDispatcher
 
+// SessionCompletionHandler is invoked after a native-runtime session
+// finishes (regardless of success). Wired at startup to
+// service.HandleSessionCompletion so the refinery feedback loop bumps
+// the right counters on KnowledgeArtifacts that were injected into
+// the finished session — closing the self-evolution loop that
+// opencode had via a parallel hook.
+//
+// Signature matches service.HandleSessionCompletion exactly so the
+// wire-up is a one-liner. nil = silently skip (test contexts).
+var SessionCompletionHandler func(sessionID, projectID, role, status string)
+
 // NativeRegistryBuilder is how the dispatcher constructs the Tool set
 // for a given role. Set by wire.go (or by tests); defaults to a
 // builder that only includes the 4 builtin file tools.
@@ -145,6 +156,7 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 	duration := time.Since(started)
 	if err != nil {
 		markSession(sess, "failed", err.Error())
+		fireSessionCompletion(sess, "failed")
 		return fmt.Errorf("dispatcher: native run: %w", err)
 	}
 
@@ -154,7 +166,25 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 	sess.Output = res.FinalText
 	persistRunMetadata(sess, cfg, res, duration)
 	markSession(sess, "completed", "")
+	fireSessionCompletion(sess, "completed")
 	return nil
+}
+
+// fireSessionCompletion closes the refinery feedback loop — identical
+// to opencode.SessionCompletionHandler firing at end of serve session.
+// Guarded by recover() so a panicky feedback path can't stain the
+// dispatcher's success signal. Nil handler = silently skip (smoke
+// tests that don't wire the full service stack).
+func fireSessionCompletion(sess *agent.Session, status string) {
+	if SessionCompletionHandler == nil || sess == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Dispatcher] session-completion hook panicked: %v", r)
+		}
+	}()
+	SessionCompletionHandler(sess.ID, sess.ProjectID, string(sess.Role), status)
 }
 
 // markSession updates both the in-memory Session and the DB row.

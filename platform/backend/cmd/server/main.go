@@ -59,6 +59,12 @@ func main() {
 	runner.StreamEmitter = func(projectID, eventType string, payload map[string]interface{}) {
 		service.SSEManager.BroadcastToProject(projectID, eventType, gin.H(payload), "")
 	}
+	// Session-completion hook: closes the refinery feedback loop by
+	// bumping success/failure counters on KnowledgeArtifacts injected
+	// into the finished session. Opencode gets this via its parallel
+	// hook (line below); we route native runs through the same
+	// service function so both runtimes feed the same counters.
+	runner.SessionCompletionHandler = service.HandleSessionCompletion
 	agent.RegisterDispatcher(runner.Dispatch)
 
 	// Wire dashboard session callback to bridge service → handler without import cycle

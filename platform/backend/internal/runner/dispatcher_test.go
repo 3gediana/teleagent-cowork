@@ -80,6 +80,49 @@ func TestDefaultPromptBuilder_UsesInputContentWhenSet(t *testing.T) {
 	}
 }
 
+func TestFireSessionCompletion_NoHandlerIsSafe(t *testing.T) {
+	// Null handler is a legitimate state (tests/offline tools) — must
+	// not panic. Also: no-op when sess is nil.
+	prev := SessionCompletionHandler
+	SessionCompletionHandler = nil
+	defer func() { SessionCompletionHandler = prev }()
+
+	fireSessionCompletion(nil, "completed")
+	fireSessionCompletion(&agent.Session{ID: "s"}, "completed")
+}
+
+func TestFireSessionCompletion_InvokesHandlerWithCorrectFields(t *testing.T) {
+	var got struct {
+		sessionID, projectID, role, status string
+	}
+	prev := SessionCompletionHandler
+	SessionCompletionHandler = func(sid, pid, role, status string) {
+		got.sessionID = sid
+		got.projectID = pid
+		got.role = role
+		got.status = status
+	}
+	defer func() { SessionCompletionHandler = prev }()
+
+	sess := &agent.Session{ID: "sess_1", ProjectID: "proj_1", Role: agent.RoleAudit1}
+	fireSessionCompletion(sess, "completed")
+	if got.sessionID != "sess_1" || got.projectID != "proj_1" ||
+		got.role != string(agent.RoleAudit1) || got.status != "completed" {
+		t.Errorf("handler received wrong fields: %+v", got)
+	}
+}
+
+func TestFireSessionCompletion_PanicInHandlerIsRecovered(t *testing.T) {
+	prev := SessionCompletionHandler
+	SessionCompletionHandler = func(_, _, _, _ string) {
+		panic("boom")
+	}
+	defer func() { SessionCompletionHandler = prev }()
+
+	// Must not propagate the panic.
+	fireSessionCompletion(&agent.Session{ID: "s"}, "completed")
+}
+
 func TestDefaultMaxTokensForRole_HasSensibleDefaults(t *testing.T) {
 	// Audit roles are terse (just a tool call) — a low budget
 	// prevents runaway output if the model starts narrating.

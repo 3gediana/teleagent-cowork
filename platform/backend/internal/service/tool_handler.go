@@ -106,6 +106,13 @@ func handleCreateTask(projectID, projectPath string, args map[string]interface{}
 		content += "\n" + taskLine + "\n"
 	}
 
+	// Ensure the parent directory exists. In production projectPath is
+	// a checked-out repo root that always exists, but for smoke tests
+	// + fresh projects that haven't been cloned yet the directory may
+	// be missing — MkdirAll is idempotent and cheap, so always do it.
+	if err := os.MkdirAll(filepath.Dir(tasksPath), 0755); err != nil {
+		return fmt.Errorf("failed to create project dir: %w", err)
+	}
 	if err := os.WriteFile(tasksPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write TASKS.md: %w", err)
 	}
