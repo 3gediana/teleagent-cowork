@@ -261,13 +261,16 @@ A3C's wedge: the **skills library lifecycle + low-intervention Chief pattern**. 
 
 ## Status
 
-Active development on `revert-v1.3`. Phase 3 native runtime is shipped — audit/fix/evaluate/merge/analyze/chief all run through the Go runner, opencode is the fallback for legacy roles (will be removed when every role has been migrated and observed stable).
+Active development on `revert-v1.3`. Phase 3 native runtime is **complete** — every platform agent role (audit_1 / audit_2 / fix / evaluate / merge / maintain / chief / analyze / consult / assess) dispatches through the Go runner. The legacy `internal/opencode/` scheduler has been removed. Multi-round Chief + Maintain dashboard dialogue is stored in `model.DialogueMessage` and rehydrated as prompt prefix on each new turn, so the stateless native runner behaves like a stateful conversation to the human.
+
+`opencode` still appears in one place on purpose: the platform-hosted **Agent Pool** spawns `opencode serve` as a subprocess for **client-side** agents (the ones that submit changes, like Claude Code or Codex would). That's an external harness, not platform runtime.
 
 Open:
 - Session lineage UI (Chief → Maintain delegation chain)
 - Agent topology graph
 - Proactive suggestions ported from Claude Code
 - Backend-truth policy match endpoint (v1 is client-side only)
+- Data-driven role→model router (see `docs/dev/14_router.md` sketch)
 
 ## Contributing
 
