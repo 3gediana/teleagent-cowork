@@ -4,6 +4,7 @@ import { useDashboard } from '../hooks/useDashboard'
 import { useSSE } from '../hooks/useSSE'
 import { InfoCard, VersionCard, AgentsCard, LocksCard } from '../components/InfoCards'
 import { ChatPanel } from '../components/ChatPanel'
+import { ChiefQueueCompact } from '../components/ChiefQueueCompact'
 import { Modal, SuccessResult, Select, Textarea, Button, useModal } from '../components/Modal'
 import { versionApi, milestoneApi, taskApi } from '../api/endpoints'
 import { TaskKanban } from '../components/TaskKanban'
@@ -147,6 +148,9 @@ export default function OverviewPage() {
         </div>
         <div className="px-1">
           <LocksCard />
+        </div>
+        <div className="px-1">
+          <ChiefQueueCompact />
         </div>
       </div>
 

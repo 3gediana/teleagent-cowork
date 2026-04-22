@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
-import { chiefApi, experienceApi, skillApi, policyApi } from '../api/endpoints'
+import { chiefApi, experienceApi, skillApi, policyApi, prApi } from '../api/endpoints'
+import { ChiefQueuePanel } from '../components/ChiefQueuePanel'
 
 interface ChiefMessage {
   id: string
@@ -52,10 +53,10 @@ interface Experience {
   created_at: string
 }
 
-type TabType = 'chat' | 'policies' | 'sessions' | 'experience' | 'skills'
+type TabType = 'chat' | 'queue' | 'policies' | 'sessions' | 'experience' | 'skills'
 
 function getTabLabel(t: string): string {
-  const labels: Record<string, string> = { chat: 'Chat', policies: 'Policies', sessions: 'Sessions', experience: 'Exp', skills: 'Skills' }
+  const labels: Record<string, string> = { chat: 'Chat', queue: 'Queue', policies: 'Policies', sessions: 'Sessions', experience: 'Exp', skills: 'Skills' }
   return labels[t] || t
 }
 
@@ -73,6 +74,10 @@ export default function ChiefPage() {
   const [skills, setSkills] = useState<any[]>([])
   const [skillStatusFilter, setSkillStatusFilter] = useState('candidate')
   const [loading, setLoading] = useState(false)
+  // pendingCount powers the little number on the Queue tab header so
+  // operators spot incoming decisions without having to click into
+  // the tab first. Refreshed whenever the Chief page mounts.
+  const [pendingCount, setPendingCount] = useState(0)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -81,6 +86,22 @@ export default function ChiefPage() {
     if (tab === 'experience' && selectedProjectId) loadExperiences()
     if (tab === 'skills') loadSkills()
   }, [tab, selectedProjectId])
+
+  // Pending-count refresher — fires on mount and every 15s while the
+  // Chief page is open. Cheap: single /pr/list call, the server is
+  // already caching it for the PR page.
+  useEffect(() => {
+    const refresh = async () => {
+      const res = await prApi.list()
+      if (res.success) {
+        const prs = res.data?.pull_requests || []
+        setPendingCount(prs.filter((p: any) => p.status === 'pending_human_review' || p.status === 'pending_human_merge').length)
+      }
+    }
+    refresh()
+    const i = setInterval(refresh, 15000)
+    return () => clearInterval(i)
+  }, [selectedProjectId])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -200,15 +221,25 @@ export default function ChiefPage() {
     <div className="h-full flex flex-col">
       {/* Tab Header */}
       <div className="flex items-center gap-2 mb-6 px-1 shrink-0">
-        {(['chat', 'policies', 'sessions', 'experience', 'skills'] as TabType[]).map((t) => {
+        {(['chat', 'queue', 'policies', 'sessions', 'experience', 'skills'] as TabType[]).map((t) => {
           const isActive = tab === t
+          const showCount = t === 'queue' && pendingCount > 0
           return (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={'px-5 py-2 rounded-xl text-sm font-marker transition-all ' + (isActive ? 'bg-[#5d4037] text-[#efebe9] shadow-md scale-105' : 'bg-[#f4ece1] text-[#5d4037]/70 border border-[#8b4513]/20 hover:bg-[#8b4513]/10')}
+              className={'px-5 py-2 rounded-xl text-sm font-marker transition-all inline-flex items-center gap-2 ' + (isActive ? 'bg-[#5d4037] text-[#efebe9] shadow-md scale-105' : 'bg-[#f4ece1] text-[#5d4037]/70 border border-[#8b4513]/20 hover:bg-[#8b4513]/10')}
             >
               {getTabLabel(t)}
+              {showCount && (
+                <span className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-mono ${
+                  isActive
+                    ? 'bg-emerald-400/80 text-[#3e2723]'
+                    : 'bg-amber-500 text-white shadow-[0_0_8px_rgba(245,158,11,0.6)] animate-pulse'
+                }`}>
+                  {pendingCount}
+                </span>
+              )}
             </button>
           )
         })}
@@ -216,6 +247,13 @@ export default function ChiefPage() {
           Chief Agent
         </span>
       </div>
+
+      {/* Queue Tab — the new "Chief's desk" of decisions waiting */}
+      {tab === 'queue' && (
+        <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+          <ChiefQueuePanel />
+        </div>
+      )}
 
       {/* Chat Tab */}
       {tab === 'chat' && (

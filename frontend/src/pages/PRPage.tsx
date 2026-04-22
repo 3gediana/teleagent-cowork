@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { prApi, branchApi } from '../api/endpoints'
+import { PREvaluationCard } from '../components/PREvaluationCard'
 
 const statusConfig: Record<string, { bg: string; text: string; border: string; rotate: string; icon: string }> = {
   pending_human_review: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', rotate: 'rotate-1', icon: '⏳' },
@@ -156,19 +157,12 @@ export default function PRPage() {
                     </div>
                   )}
 
-                  {/* Tech Review */}
-                  {pr.tech_review && (
-                    <div className="mb-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
-                      <p className="text-[9px] font-marker text-blue-400 uppercase tracking-widest mb-2">Tech Evaluation</p>
-                      <pre className="text-xs text-blue-800 font-mono whitespace-pre-wrap max-h-32 overflow-auto">{(() => { try { return JSON.stringify(JSON.parse(pr.tech_review), null, 2) } catch { return pr.tech_review } })()}</pre>
-                    </div>
-                  )}
-
-                  {/* Biz Review */}
-                  {pr.biz_review && (
-                    <div className="mb-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
-                      <p className="text-[9px] font-marker text-indigo-400 uppercase tracking-widest mb-2">Business Evaluation</p>
-                      <pre className="text-xs text-indigo-800 font-mono whitespace-pre-wrap max-h-32 overflow-auto">{(() => { try { return JSON.stringify(JSON.parse(pr.biz_review), null, 2) } catch { return pr.biz_review } })()}</pre>
+                  {/* Evaluate + Maintain verdicts, structured so the humans
+                      actually see Evaluate's recommended_action (the field
+                      that drives Chief's AutoMode path). */}
+                  {(pr.tech_review || pr.biz_review) && (
+                    <div className="mb-4">
+                      <PREvaluationCard techReview={pr.tech_review} bizReview={pr.biz_review} />
                     </div>
                   )}
 

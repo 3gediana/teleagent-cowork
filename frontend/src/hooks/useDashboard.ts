@@ -2,7 +2,7 @@ import { useAppStore } from '../stores/appStore'
 import { dashboardApi, projectApi } from '../api/endpoints'
 
 export function useDashboard() {
-  const { setProject, setSelectedProjectId, selectedProjectId, setLoading } = useAppStore()
+  const { setProject, setSelectedProjectId, selectedProjectId, setLoading, setAutoMode } = useAppStore()
 
   const refreshState = async () => {
     if (!selectedProjectId) return
@@ -21,6 +21,12 @@ export function useDashboard() {
           locks: res.data.locks || [],
           agents: res.data.agents || [],
         })
+        // Keep the store's AutoMode flag aligned with the server's truth
+        // on every refresh. Without this, the toggle in the header would
+        // drift whenever another operator flipped it.
+        if (typeof res.data.auto_mode === 'boolean') {
+          setAutoMode(res.data.auto_mode)
+        }
       }
     } finally {
       setLoading(false)
@@ -42,6 +48,9 @@ export function useDashboard() {
         locks: res.data.locks || [],
         agents: res.data.agents || [],
       })
+      if (typeof res.data.auto_mode === 'boolean') {
+        setAutoMode(res.data.auto_mode)
+      }
     }
   }
 

@@ -38,6 +38,7 @@ interface Agent {
   name: string
   status: string
   current_task: string | null
+  is_platform_hosted?: boolean
 }
 
 export interface BroadcastEvent {
