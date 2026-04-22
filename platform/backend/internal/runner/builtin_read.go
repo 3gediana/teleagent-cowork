@@ -76,6 +76,10 @@ type ReadTool struct{}
 
 func (ReadTool) Name() string { return "read" }
 
+// IsConcurrencySafe: pure read, no state mutation. Always safe to run
+// alongside any number of other safe tools.
+func (ReadTool) IsConcurrencySafe(_ json.RawMessage) bool { return true }
+
 func (ReadTool) Description() string {
 	return "Read the contents of a text file inside the project. Truncates to 256 KiB; use offset/limit for larger files. Returns the file content; on error, returns a message starting with 'Error:' and is_error=true."
 }
@@ -165,6 +169,9 @@ func (ReadTool) Execute(ctx context.Context, sess *RunnerSession, raw json.RawMe
 type GlobTool struct{}
 
 func (GlobTool) Name() string { return "glob" }
+
+// IsConcurrencySafe: pure directory walk, no mutation.
+func (GlobTool) IsConcurrencySafe(_ json.RawMessage) bool { return true }
 
 func (GlobTool) Description() string {
 	return "Find files matching a glob pattern. Supports '*' (within a path segment), '?' (single char), and '**' (any number of directories). Returns newline-separated paths relative to project root; at most 500 results."

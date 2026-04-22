@@ -16,18 +16,19 @@ package runner
 //   - Hot-swap models per role without restarting
 //   - Build domain-specific sub-tools without shelling out
 //
-// Non-goals for Phase 1:
-//   - Parallel tool execution (Anthropic's tool_use array can have
-//     multiple pending calls — we handle them sequentially for now).
+// Non-goals today:
 //   - Sub-agents / agent chaining (a tool invoking another full Run).
 //   - Checkpointing / resume across server restarts.
+//
+// Parallel tool execution (Anthropic's tool_use array can carry
+// multiple pending calls) landed in Phase 4: see dispatch.go for the
+// partition + bounded-goroutine-pool logic.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/llm"
@@ -290,59 +291,15 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 			finalText.WriteString("\n")
 		}
 
-		resultBlocks := make([]llm.ContentBlock, 0, len(turn.ToolCalls))
-		for _, tc := range turn.ToolCalls {
-			// Broadcast the intent to call a tool BEFORE executing so
-			// the frontend shows "running tool X" while the actual
-			// work happens. Payload shape matches opencode's TOOL_CALL
-			// so the existing dashboard activity feed renders it
-			// without changes.
-			argsMap := map[string]interface{}{}
-			_ = json.Unmarshal(tc.Input, &argsMap)
-			emit(projectID, EventToolCall, map[string]interface{}{
-				"session_id": sessionID,
-				"tool":       tc.Name,
-				"args":       argsMap,
-			})
-
-			tool := reg.Get(tc.Name)
-			if tool == nil {
-				// Model hallucinated a tool. Feed the error back so it
-				// can retry with a real name — this is cheaper than
-				// aborting.
-				msg := fmt.Sprintf("Error: unknown tool %q. Available tools: %s",
-					tc.Name, strings.Join(toolNames(reg), ", "))
-				resultBlocks = append(resultBlocks, llm.NewToolResultBlock(tc.ID, msg, true))
-				rsess.Journal = append(rsess.Journal, JournalEntry{
-					ToolName: tc.Name, Input: tc.Input, Output: msg, IsError: true,
-				})
-				recordToolCallTrace(sessionID, projectID, tc.Name, tc.Input, msg, false)
-				continue
-			}
-
-			start := time.Now()
-			result, isErr, fatal := tool.Execute(ctx, rsess, tc.Input)
-			elapsedMs := time.Since(start).Milliseconds()
-
-			rsess.Journal = append(rsess.Journal, JournalEntry{
-				ToolName:  tc.Name,
-				Input:     tc.Input,
-				Output:    result,
-				IsError:   isErr,
-				ElapsedMs: elapsedMs,
-			})
-			// Persist the trace after every call — fire-and-forget so
-			// DB writes don't block the conversation loop. Treats
-			// fatal errors as failures; model-level isErr is also a
-			// failure signal for the trace.
-			recordToolCallTrace(sessionID, projectID, tc.Name, tc.Input, result, !isErr && fatal == nil)
-
-			if fatal != nil {
-				// Fatal = runner aborts the whole session. The tool
-				// has already written its journal entry.
-				return nil, emitErr(fmt.Errorf("runner: tool %s fatal error: %w", tc.Name, fatal))
-			}
-			resultBlocks = append(resultBlocks, llm.NewToolResultBlock(tc.ID, result, isErr))
+		// Dispatch all tool_use calls from this turn. Safe (read-only)
+		// tools run in parallel bounded by MaxToolUseConcurrency;
+		// unsafe tools (writes, platform sinks) run sequentially.
+		// Order of result blocks is preserved to match the order of
+		// tool_use blocks the model emitted — required by both
+		// Anthropic and OpenAI APIs.
+		resultBlocks, fatal := dispatchToolCalls(ctx, reg, rsess, projectID, sessionID, turn.ToolCalls)
+		if fatal != nil {
+			return nil, emitErr(fmt.Errorf("runner: %w", fatal))
 		}
 
 		// Tool-result block list is delivered as a single user turn;

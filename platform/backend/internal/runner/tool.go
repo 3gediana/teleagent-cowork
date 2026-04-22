@@ -31,6 +31,21 @@ type Tool interface {
 	// within a given role's tool set.
 	Name() string
 
+	// IsConcurrencySafe reports whether this tool can run in parallel
+	// with siblings inside the same assistant turn. The loop
+	// partitions a turn's tool_use blocks into consecutive safe-batches
+	// (run concurrently up to a cap) and unsafe-singletons (run
+	// serially). Safe = "no mutation of shared state (disk, DB,
+	// external service) that another concurrent call could collide
+	// with". Pure reads (read/glob/grep) are safe; writes (edit,
+	// platform sinks) are not.
+	//
+	// The signature takes the raw JSON input so tools can decide
+	// per-call (e.g. a hypothetical bash tool could mark `ls` safe and
+	// `rm` unsafe). For the current tool set nobody uses the input
+	// argument — pass raw through.
+	IsConcurrencySafe(input json.RawMessage) bool
+
 	// Description is the natural-language help string the model reads
 	// to decide when to call the tool. Short + instructive — Claude
 	// Code's experience is that 2–3 sentences outperforms a wall of

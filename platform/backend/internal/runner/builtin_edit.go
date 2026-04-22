@@ -24,6 +24,9 @@ type GrepTool struct{}
 
 func (GrepTool) Name() string { return "grep" }
 
+// IsConcurrencySafe: read-only regex scan across files.
+func (GrepTool) IsConcurrencySafe(_ json.RawMessage) bool { return true }
+
 func (GrepTool) Description() string {
 	return "Search project files for a regex pattern. Returns up to 200 matches as 'path:line:text' lines. Binary files and common junk dirs (.git, node_modules, vendor) are skipped."
 }
@@ -188,6 +191,12 @@ func (GrepTool) Execute(ctx context.Context, sess *RunnerSession, raw json.RawMe
 type EditTool struct{}
 
 func (EditTool) Name() string { return "edit" }
+
+// IsConcurrencySafe: NEVER. Edits the filesystem. Two concurrent
+// edits to the same file would race (last writer wins). Even edits to
+// different files in parallel are serialised because the filesystem
+// as a whole is shared state the runner can't guard.
+func (EditTool) IsConcurrencySafe(_ json.RawMessage) bool { return false }
 
 func (EditTool) Description() string {
 	return "Make a targeted edit to a file. Requires old_text that appears EXACTLY ONCE in the file (for safe replacement), or leave old_text empty to create a new file with the given new_text. Returns a unified diff of the change on success."

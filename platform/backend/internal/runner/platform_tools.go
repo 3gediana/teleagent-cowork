@@ -41,6 +41,13 @@ type PlatformTool struct {
 
 func (p *PlatformTool) Name() string { return p.Def.Name }
 
+// IsConcurrencySafe: platform tools are terminal "sinks" that mutate
+// the DB (audit verdict, task creation, milestone update). Even two
+// parallel audit_output calls would race on the same change row. We
+// mark the whole class unsafe to avoid edge-case reasoning about
+// which sinks touch which tables.
+func (p *PlatformTool) IsConcurrencySafe(_ json.RawMessage) bool { return false }
+
 // Description returns the full tool description the LLM sees.
 // Concatenates the base description with an optional ErrorGuidance
 // paragraph — keeping them separate in the struct lets the dashboard

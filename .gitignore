@@ -65,3 +65,7 @@ roleaudit-output*.txt
 # temp commit-message file
 .git-commit-msg.txt
 
+
+# any scratch commit-message file
+*commit-msg.txt
+
