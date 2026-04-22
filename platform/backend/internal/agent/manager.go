@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -53,6 +54,11 @@ type SessionContext struct {
 	// Chief Agent fields
 	GlobalState string // 平台全局状态快照
 	AutoMode    bool   // 项目 AutoMode 开关
+
+	// Refinery feedback: IDs of KnowledgeArtifacts injected into this prompt.
+	// Persisted on AgentSession so session-completion hooks can bump
+	// success/failure counts.
+	InjectedArtifactIDs []string
 }
 
 type ChangeContext struct {
@@ -121,6 +127,11 @@ func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionCo
 	}
 	if ctx != nil && ctx.ChangeInfo != nil {
 		dbSession.ChangeID = ctx.ChangeInfo.ChangeID
+	}
+	if ctx != nil && len(ctx.InjectedArtifactIDs) > 0 {
+		if b, err := json.Marshal(ctx.InjectedArtifactIDs); err == nil {
+			dbSession.InjectedArtifacts = string(b)
+		}
 	}
 	if err := model.DB.Create(dbSession).Error; err != nil {
 		log.Printf("[Agent] Failed to persist session %s to DB: %v", sessionID, err)

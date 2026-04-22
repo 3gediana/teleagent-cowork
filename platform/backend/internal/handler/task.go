@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
+	"github.com/a3c/platform/internal/service"
 )
 
 type TaskHandler struct{}
@@ -146,16 +147,40 @@ func (h *TaskHandler) Claim(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, gin.H{
-		"success": true,
-		"data": gin.H{
-			"id":           task.ID,
-			"name":         task.Name,
-			"description":  task.Description,
-			"milestone_id": task.MilestoneID,
-			"priority":     task.Priority,
-		},
-	})
+	// Build experience hints for the claiming agent. Failure here is
+	// soft — the agent still gets the task, just without curated
+	// context. That matches the "graceful degradation" contract for
+	// everything in the semantic pipeline.
+	hints, hintsErr := service.BuildTaskClaimHints(c.Request.Context(), task.ID)
+	if hintsErr != nil {
+		// Log only; do not fail the claim over a hints glitch.
+		// (No logger import in this file; swallow quietly.)
+		hints = nil
+	} else if hints != nil && len(hints.InjectedIDs) > 0 {
+		// Feedback loop: bump usage_count on every injected artifact so
+		// the lifecycle rules see real-world use. The corresponding
+		// success/failure bump happens later via HandleSessionCompletion
+		// once the change this task produces gets audited.
+		model.DB.Model(&model.KnowledgeArtifact{}).
+			Where("id IN ?", hints.InjectedIDs).
+			Update("usage_count", gorm.Expr("usage_count + 1"))
+		now := time.Now()
+		model.DB.Model(&model.KnowledgeArtifact{}).
+			Where("id IN ?", hints.InjectedIDs).
+			Update("last_used_at", &now)
+	}
+
+	resp := gin.H{
+		"id":           task.ID,
+		"name":         task.Name,
+		"description":  task.Description,
+		"milestone_id": task.MilestoneID,
+		"priority":     task.Priority,
+	}
+	if hints != nil {
+		resp["hints"] = hints
+	}
+	c.JSON(200, gin.H{"success": true, "data": resp})
 }
 
 func (h *TaskHandler) Complete(c *gin.Context) {
@@ -261,6 +286,17 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Failed to create task"}})
 		return
 	}
+
+	// Kick off semantic embedding so the injection selector has a query
+	// vector ready for this task. Async: the sidecar being slow or down
+	// must not delay the handler response. BackfillTaskEmbeddings will
+	// pick this up later if the async call fails.
+	service.EmbedTaskAsync(task.ID)
+
+	// Run keyword-rule tagging in the background too. Rules are
+	// deterministic + fast (<1ms), but we keep them off the hot path
+	// so a DB hiccup on TaskTag insert never blocks task creation.
+	go service.ProposeAndPersistTagsForTask(task.ID, task.Name, task.Description)
 
 	c.JSON(200, gin.H{
 		"success": true,

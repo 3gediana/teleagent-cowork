@@ -46,6 +46,8 @@ func InitDB(cfg *config.DatabaseConfig) error {
 		&Branch{}, &PullRequest{}, &RoleOverride{},
 		&AgentSession{}, &ToolCallTrace{}, &TaskTag{}, &Policy{},
 		&Experience{}, &SkillCandidate{},
+		// Refinery pipeline (M1)
+		&Episode{}, &KnowledgeArtifact{}, &RefineryRun{},
 	); err != nil {
 		log.Printf("[DB] AutoMigrate warning: %v (attempting retry)", err)
 		// Retry once - GORM sometimes fails on first pass with index issues

@@ -39,6 +39,11 @@ var ToolCallHandler func(sessionID, changeID, projectID, toolName string, args m
 // BroadcastHandler is called to push real-time events (e.g. agent text, tool results) to the frontend via SSE
 var BroadcastHandler func(projectID, eventType string, payload map[string]interface{})
 
+// SessionCompletionHandler is called when a session reaches a terminal status
+// (completed / failed / rejected / pending_fix). Used for feedback loops such
+// as bumping KnowledgeArtifact success/failure counts.
+var SessionCompletionHandler func(sessionID, projectID, role, status string)
+
 // agentServeSessionMap tracks agentID -> ocSessionID for injecting poll messages into serve sessions
 var (
 	agentServeSessionMap   = make(map[string]string)
@@ -344,9 +349,20 @@ func (s *Scheduler) runAgentViaServe(session *agent.Session, message string, age
 			"model_id":     modelStr,
 		})
 
-		// Retry logic: if session failed and role supports retry, re-dispatch
+		// Retry logic: if session failed and role supports retry, re-dispatch.
+		retrying := false
 		if session.Status == "failed" {
-			s.maybeRetry(session, message, agentName, modelStr)
+			retrying = s.maybeRetry(session, message, agentName, modelStr)
+		}
+
+		// Feedback hook: only fire when this attempt is actually terminal.
+		// If a retry was enqueued, the retry's own defer will fire the hook
+		// for the true terminal state — otherwise we'd double-count the
+		// same session in refinery artifact feedback counters.
+		if !retrying && SessionCompletionHandler != nil &&
+			(session.Status == "completed" || session.Status == "failed" ||
+				session.Status == "rejected" || session.Status == "pending_fix") {
+			SessionCompletionHandler(session.ID, session.ProjectID, string(session.Role), session.Status)
 		}
 	}()
 
@@ -961,21 +977,21 @@ var retryPolicies = map[agent.Role]retryPolicy{
 }
 
 // maybeRetry checks if a failed session should be retried and re-dispatches if eligible.
-func (s *Scheduler) maybeRetry(session *agent.Session, message string, agentName string, modelStr string) {
+func (s *Scheduler) maybeRetry(session *agent.Session, message string, agentName string, modelStr string) bool {
 	policy, ok := retryPolicies[session.Role]
 	if !ok {
-		return
+		return false
 	}
 
 	// Read current retry count from DB
 	var dbSession model.AgentSession
 	if model.DB.Where("id = ?", session.ID).First(&dbSession).Error != nil {
-		return
+		return false
 	}
 
 	if dbSession.RetryCount >= policy.MaxRetries {
 		log.Printf("[Retry] Session %s (role=%s) max retries reached (%d/%d)", session.ID, session.Role, dbSession.RetryCount, policy.MaxRetries)
-		return
+		return false
 	}
 
 	newRetryCount := dbSession.RetryCount + 1
@@ -1011,6 +1027,7 @@ func (s *Scheduler) maybeRetry(session *agent.Session, message string, agentName
 
 		s.runAgentViaServe(retrySession, message, agentName, modelStr)
 	}()
+	return true
 }
 
 func (s *Scheduler) PollSession(session *agent.Session) error {

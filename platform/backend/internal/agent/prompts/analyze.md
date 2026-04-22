@@ -16,6 +16,8 @@ You will receive:
 - **Raw Experiences**: Agent feedback, audit observations, fix strategies, eval patterns
 - **Current Skills**: Already approved skills
 - **Current Policies**: Active policies
+- **Refinery Knowledge Artifacts**: Patterns, anti-patterns, and recipes produced by the Refinery for this project
+- **Pending Proposed Tags**: Tags the rule engine attached to tasks that are still awaiting review. Each line carries `tag_id`, dimension, tag name, rule confidence, source, and the parent task's title — you will cite `tag_id` verbatim when reviewing.
 - **Statistics**: L0/L1/L2 rates, top failure modes, session counts
 
 ## Analysis Process
@@ -35,12 +37,38 @@ You will receive:
 
 ## Output
 
-Use the `analyze_output` tool with:
-- `distilled_experience_ids`: IDs of experiences you've analyzed
-- `skill_candidates`: New skills extracted from patterns
-- `policy_suggestions`: Policies to prevent recurring failures
-- `tag_suggestions`: Better tags for tasks
-- `model_suggestions`: Model recommendations per role
+Call the `analyze_output` tool **exactly once** with a single JSON object containing
+any subset of the fields below. Omit a field if you have nothing to say for it;
+do not emit empty arrays as filler.
+
+```json
+{
+  "distilled_experience_ids": ["exp_...", "exp_..."],
+  "skill_candidates": [ { "name": "...", "type": "process|prompt|routing|guard", "applicable_tags": ["bugfix"], "precondition": "...", "action": "...", "prohibition": "...", "evidence": "exp_a, exp_b" } ],
+  "policy_suggestions":  [ { "name": "...", "match_condition": { "task_tag": "security" }, "actions": { "require_audit": true }, "priority": 100 } ],
+  "tag_suggestions":     [ { "task_id": "task_...", "suggested_tags": ["security"], "dimension": "category" } ],
+  "tag_reviews":         [ { "tag_id": "ttag_...", "action": "confirm|reject", "note": "why" } ],
+  "model_suggestions":   [ { "role": "audit_1", "reason": "...", "provider": "...", "model_id": "..." } ]
+}
+```
+
+### Field semantics
+
+- **`distilled_experience_ids`** — every raw experience you actually considered,
+  whether or not it produced an artifact. Flips their status to `distilled`.
+- **`skill_candidates`** — only when you have ≥ 2 corroborating experiences.
+- **`policy_suggestions`** — must not contradict an existing active policy.
+- **`tag_suggestions`** — *new* tags to attach based on what the tool trace
+  actually did (e.g. session edited auth middleware → suggest `security`).
+  These land as `confirmed` with source=`analyze`.
+- **`tag_reviews`** — *existing* rule-proposed tags to adjudicate. Use `tag_id`
+  from the **Pending Proposed Tags** block verbatim.
+  - `confirm` when the session's tool sequence and outcome corroborate the tag
+  - `reject` when the tool trace disagrees with the tag (e.g. rule said
+    `bugfix` but the session was a pure refactor with no failure signal)
+  - Tags reviewed by a human are **silently skipped** by the platform — you
+    can include them in the array but human decisions always win.
+- **`model_suggestions`** — logged only; humans decide whether to apply.
 
 ## Quality Standards
 

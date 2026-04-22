@@ -1,0 +1,18 @@
+# A3C embedding microservice dependencies
+#
+# Versions pinned to what's known-working with bge-base-zh-v1.5.
+# On first launch, sentence-transformers downloads the model (~400MB) from
+# HuggingFace into `./models/`. Subsequent launches are offline.
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.0,<3.0
+sentence-transformers>=2.5,<3.0
+# huggingface-hub is a transitive dep of sentence-transformers but we pin it
+# explicitly so offline-download helpers (`huggingface-cli download ...`) are
+# guaranteed available.
+huggingface-hub>=0.20,<1.0
+# torch is pulled in transitively by sentence-transformers; install explicitly
+# if you need a specific CPU / CUDA build. For GPU users on Windows, prefer
+# the PyTorch wheel index, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch>=2.1,<3.0

@@ -159,6 +159,11 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.AuditLevel = &result.Level
 		model.DB.Save(&change)
 		notifyAuditCompletion(changeID, "approved", "L0", "")
+		// Client-agent feedback loop: L0 means the injected hints led to
+		// a clean change → bump success_count on the artifacts that were
+		// surfaced to the claiming agent. Idempotent (FeedbackApplied
+		// guard inside).
+		HandleChangeAudit(changeID, "L0")
 
 	case "L1":
 		change.Status = "pending_fix"
@@ -170,6 +175,11 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		}
 		model.DB.Save(&change)
 		notifyAuditCompletion(changeID, "pending_fix", "L1", change.AuditReason)
+		// L1 is a mixed verdict (fixable issues, not outright failure) —
+		// HandleChangeAudit records "feedback applied" without bumping
+		// either counter. If the Fix Agent ends up clean, a subsequent
+		// L0 call on the SAME change would be idempotent and silent.
+		HandleChangeAudit(changeID, "L1")
 
 		issuesJSON, _ := json.Marshal(result.Issues)
 
@@ -188,6 +198,10 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.AuditLevel = &result.Level
 		change.AuditReason = result.RejectReason
 		model.DB.Save(&change)
+		// L2 is a hard reject — bump failure_count on the injected
+		// artifacts so the lifecycle rules can eventually deprecate
+		// patterns/recipes that consistently lead here.
+		HandleChangeAudit(changeID, "L2")
 
 		// Start 10-minute watchdog: reset task ONLY if agent is silent (no recent
 		// heartbeat AND no resubmit) throughout the entire window. Previous
