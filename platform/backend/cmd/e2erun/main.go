@@ -126,6 +126,9 @@ func main() {
 	banner(12, "Tag lifecycle — rules propose, human confirms, selector notices")
 	demonstrateTagLifecycle(db, projectID, humanID)
 
+	banner(13, "Native runtime — llm_endpoint → runner.Dispatch → audit_output")
+	stage13Native(db, projectID, humanID)
+
 	fmt.Println("\n✔ done.  re-run with a fresh DB to see deterministic results.")
 }
 
