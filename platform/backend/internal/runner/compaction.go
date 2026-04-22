@@ -283,6 +283,14 @@ var DefaultClearPolicy = ClearPolicy{
 //
 // Returns the (possibly cleared) messages + a reason string. Empty
 // reason means "didn't clear".
+//
+// Important: clear triggers key on *genuine* new user turns, not on
+// tool_result-carrying user messages (the runner wraps every
+// tool_result batch as a Role=user message, which is a protocol
+// requirement, not a semantic "human just typed"). Earlier drafts
+// conflated the two and fired a clear after every tool turn, forcing
+// the model into an infinite terminal-tool loop. The
+// lastRealUserIx helper enforces the distinction.
 func maybeClear(
 	cs *CompactionState,
 	pol ClearPolicy,
@@ -293,35 +301,28 @@ func maybeClear(
 		return messages, ""
 	}
 
+	lastUserIx := lastRealUserIx(messages)
+
 	// Signal 1: terminal-tool emission already in transcript and a
 	// fresh user turn arrived after it. Walk backwards finding the
-	// *last* user turn, then see if an earlier assistant turn emitted
-	// a terminal tool.
-	if len(pol.TerminalToolNames) > 0 {
+	// *last* real user turn, then see if an earlier assistant turn
+	// emitted a terminal tool.
+	if len(pol.TerminalToolNames) > 0 && lastUserIx > 0 {
 		terminalSet := make(map[string]bool, len(pol.TerminalToolNames))
 		for _, n := range pol.TerminalToolNames {
 			terminalSet[n] = true
 		}
-		lastUserIx := -1
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].Role == llm.RoleUser {
-				lastUserIx = i
-				break
+		// Look at everything BEFORE the last real user turn — if a
+		// terminal-output tool was emitted in there, that work-unit
+		// is done; the new user turn starts fresh.
+		for i := 0; i < lastUserIx; i++ {
+			if messages[i].Role != llm.RoleAssistant {
+				continue
 			}
-		}
-		if lastUserIx > 0 {
-			// Look at everything BEFORE the last user turn — if a
-			// terminal-output tool was emitted in there, that
-			// work-unit is done; the new user turn starts fresh.
-			for i := 0; i < lastUserIx; i++ {
-				if messages[i].Role != llm.RoleAssistant {
-					continue
-				}
-				for _, blk := range messages[i].Content {
-					if blk.Type == llm.BlockToolUse && terminalSet[blk.ToolName] {
-						cs.clearsFired++
-						return applyClear(messages, lastUserIx, pol), "terminal-output"
-					}
+			for _, blk := range messages[i].Content {
+				if blk.Type == llm.BlockToolUse && terminalSet[blk.ToolName] {
+					cs.clearsFired++
+					return applyClear(messages, lastUserIx, pol), "terminal-output"
 				}
 			}
 		}
@@ -330,18 +331,9 @@ func maybeClear(
 	// Signal 2: idle gap — dormant for a long stretch, clear on the
 	// assumption the operator has moved on between tasks.
 	if pol.IdleClearAfter > 0 && !cs.lastUserTurnAt.IsZero() {
-		if now.Sub(cs.lastUserTurnAt) > pol.IdleClearAfter {
-			lastUserIx := -1
-			for i := len(messages) - 1; i >= 0; i-- {
-				if messages[i].Role == llm.RoleUser {
-					lastUserIx = i
-					break
-				}
-			}
-			if lastUserIx > 0 {
-				cs.clearsFired++
-				return applyClear(messages, lastUserIx, pol), "idle-gap"
-			}
+		if now.Sub(cs.lastUserTurnAt) > pol.IdleClearAfter && lastUserIx > 0 {
+			cs.clearsFired++
+			return applyClear(messages, lastUserIx, pol), "idle-gap"
 		}
 	}
 
@@ -354,23 +346,41 @@ func maybeClear(
 			// turns. Union compensates for short latest messages.
 			prior := strings.Join(userTurns[:len(userTurns)-1], " ")
 			j := jaccard(tokenSet(latest), tokenSet(prior))
-			if j < pol.TopicShiftJaccardMax {
-				lastUserIx := -1
-				for i := len(messages) - 1; i >= 0; i-- {
-					if messages[i].Role == llm.RoleUser {
-						lastUserIx = i
-						break
-					}
-				}
-				if lastUserIx > 0 {
-					cs.clearsFired++
-					return applyClear(messages, lastUserIx, pol), "topic-shift"
-				}
+			if j < pol.TopicShiftJaccardMax && lastUserIx > 0 {
+				cs.clearsFired++
+				return applyClear(messages, lastUserIx, pol), "topic-shift"
 			}
 		}
 	}
 
 	return messages, ""
+}
+
+// lastRealUserIx finds the most recent user-role message that carries
+// at least one BlockText block, i.e. actually represents something a
+// human typed (or a system-generated seed that looks like a user
+// turn). Messages whose content is entirely tool_result blocks are
+// skipped — they exist for protocol reasons (both Anthropic and
+// OpenAI wrap tool_result blocks inside user turns) but semantically
+// they're the tail end of an assistant turn, not a new user turn.
+// Returns -1 when no such message exists.
+func lastRealUserIx(messages []llm.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llm.RoleUser {
+			continue
+		}
+		hasText := false
+		for _, blk := range messages[i].Content {
+			if blk.Type == llm.BlockText {
+				hasText = true
+				break
+			}
+		}
+		if hasText {
+			return i
+		}
+	}
+	return -1
 }
 
 // applyClear builds a fresh transcript: optionally the very first

@@ -38,7 +38,7 @@ func HandleMaintainToolCall(projectID string, toolName string, args map[string]i
 	case "propose_direction":
 		return handleProposeDirection(projectPath, args)
 	case "write_milestone":
-		return handleWriteMilestone(projectPath, args)
+		return handleWriteMilestone(projectID, projectPath, args)
 	case "assess_output":
 		return handleAssessOutput(projectPath, args)
 	default:
@@ -184,19 +184,83 @@ func handleProposeDirection(projectPath string, args map[string]interface{}) err
 	return nil
 }
 
-func handleWriteMilestone(projectPath string, args map[string]interface{}) error {
+func handleWriteMilestone(projectID, projectPath string, args map[string]interface{}) error {
 	content, _ := args["content"].(string)
 	if content == "" {
 		return fmt.Errorf("content required")
 	}
 
 	milestonePath := filepath.Join(projectPath, "MILESTONE.md")
+	if err := os.MkdirAll(filepath.Dir(milestonePath), 0755); err != nil {
+		return fmt.Errorf("failed to create project dir: %w", err)
+	}
 	if err := os.WriteFile(milestonePath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write MILESTONE.md: %w", err)
 	}
 
-	log.Printf("[Maintain] Wrote MILESTONE.md for project %s", projectPath)
+	// Parse the milestone title from the first markdown heading. The
+	// tool's schema documents the convention "content starts with
+	// '## Milestone: <title>'" — we tolerate "#"/"##"/"###" + optional
+	// "Milestone:" prefix + optional trailing colons/whitespace.
+	title := parseMilestoneTitle(content)
+	if title == "" {
+		title = "Milestone"
+	}
+
+	// Archive any existing in-progress milestone for this project so
+	// there's only one active milestone at a time (matches the
+	// invariant enforced by the /milestone/switch HTTP handler).
+	// CompletedAt stays unset — this is a supersede, not a real
+	// completion, and archival history lives in MilestoneArchive
+	// rows created by the dedicated switch endpoint.
+	model.DB.Model(&model.Milestone{}).
+		Where("project_id = ? AND status = ?", projectID, "in_progress").
+		Update("status", "superseded")
+
+	// Upsert-style create. Description stores the full markdown so
+	// the dashboard can render it; Name is the extracted title.
+	newMilestone := model.Milestone{
+		ID:          model.GenerateID("ms"),
+		ProjectID:   projectID,
+		Name:        title,
+		Description: content,
+		Status:      "in_progress",
+		CreatedBy:   "maintain_agent",
+	}
+	if err := model.DB.Create(&newMilestone).Error; err != nil {
+		return fmt.Errorf("failed to create milestone row: %w", err)
+	}
+
+	log.Printf("[Maintain] Wrote MILESTONE.md + created milestone %s (%q) for project %s",
+		newMilestone.ID, title, projectID)
 	return nil
+}
+
+// parseMilestoneTitle extracts the display title from the first
+// markdown heading of a milestone body. Accepts:
+//
+//	# Milestone: M1 核心调度器
+//	## Milestone: M1 核心调度器
+//	### M1 核心调度器
+//
+// Returns the title without the "Milestone:" prefix (if present) and
+// without leading '#' characters. Empty string if no recognizable
+// heading is found.
+func parseMilestoneTitle(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		trimmed = strings.TrimLeft(trimmed, "# ")
+		trimmed = strings.TrimPrefix(trimmed, "Milestone:")
+		trimmed = strings.TrimPrefix(trimmed, "milestone:")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func handleAssessOutput(projectPath string, args map[string]interface{}) error {

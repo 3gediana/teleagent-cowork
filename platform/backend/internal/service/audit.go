@@ -111,7 +111,16 @@ func approveChange(change *model.Change) error {
 	change.Status = "approved"
 	now := time.Now()
 	change.ReviewedAt = &now
-	model.DB.Save(change)
+	// Surface DB save errors instead of silently dropping them. In
+	// particular MySQL strict JSON mode rejects empty strings in
+	// json-typed columns (InjectedArtifacts, Diff, ModifiedFiles,
+	// etc.), so a bare .Save that ignores the error leaves the
+	// caller thinking the change was approved when the row still
+	// shows status=pending. Better to bubble the failure up so the
+	// audit workflow tracking notices.
+	if err := model.DB.Save(change).Error; err != nil {
+		return fmt.Errorf("approve change: persist: %w", err)
+	}
 
 	var task model.Task
 	taskName := ""
@@ -157,7 +166,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 			return err
 		}
 		change.AuditLevel = &result.Level
-		model.DB.Save(&change)
+		if err := model.DB.Save(&change).Error; err != nil {
+			return fmt.Errorf("persist L0 audit level: %w", err)
+		}
 		notifyAuditCompletion(changeID, "approved", "L0", "")
 		// Client-agent feedback loop: L0 means the injected hints led to
 		// a clean change → bump success_count on the artifacts that were
@@ -173,7 +184,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		if failureMode := classifyFailureMode(result.Issues); failureMode != "" {
 			change.FailureMode = failureMode
 		}
-		model.DB.Save(&change)
+		if err := model.DB.Save(&change).Error; err != nil {
+			return fmt.Errorf("persist L1 audit verdict: %w", err)
+		}
 		notifyAuditCompletion(changeID, "pending_fix", "L1", change.AuditReason)
 		// L1 is a mixed verdict (fixable issues, not outright failure) —
 		// HandleChangeAudit records "feedback applied" without bumping
@@ -197,7 +210,9 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		change.Status = "rejected"
 		change.AuditLevel = &result.Level
 		change.AuditReason = result.RejectReason
-		model.DB.Save(&change)
+		if err := model.DB.Save(&change).Error; err != nil {
+			return fmt.Errorf("persist L2 audit verdict: %w", err)
+		}
 		// L2 is a hard reject — bump failure_count on the injected
 		// artifacts so the lifecycle rules can eventually deprecate
 		// patterns/recipes that consistently lead here.

@@ -201,7 +201,16 @@ func runNative(sess *agent.Session, route resolvedRoute) error {
 	// Persist the assembled output onto the in-memory Session + DB
 	// so downstream consumers (change audit, PR gate, dashboard)
 	// see it the same way they always have.
-	sess.Output = res.FinalText
+	//
+	// Guard: a terminal tool handler (chief_output, evaluate_output,
+	// etc.) may have already set sess.Output to a structured summary
+	// via agent.DefaultManager.UpdateSessionOutput. In that case
+	// res.FinalText is usually just the model's closing "Done." and
+	// overwriting would lose the useful summary. Only fill from the
+	// trailing text when the tool path didn't.
+	if strings.TrimSpace(sess.Output) == "" {
+		sess.Output = res.FinalText
+	}
 	persistRunMetadata(sess, route, res, duration)
 	markSession(sess, "completed", "")
 	fireSessionCompletion(sess, "completed")
@@ -270,8 +279,15 @@ func persistRunMetadata(sess *agent.Session, route resolvedRoute, res *RunResult
 		u.CacheReadTokens, u.CacheCreationTokens, u.USD,
 		res.Iterations, duration)
 
+	// Same guard as runNative — use whatever the terminal tool
+	// already wrote onto sess.Output; only fall back to the LLM's
+	// closing text when no tool filled it in.
+	outputToWrite := sess.Output
+	if strings.TrimSpace(outputToWrite) == "" {
+		outputToWrite = res.FinalText
+	}
 	updates := map[string]any{
-		"output":      res.FinalText,
+		"output":      outputToWrite,
 		"duration_ms": int(duration.Milliseconds()),
 	}
 	if err := model.DB.Model(&model.AgentSession{}).
