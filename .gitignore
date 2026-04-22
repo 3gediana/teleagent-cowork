@@ -69,3 +69,8 @@ roleaudit-output*.txt
 # any scratch commit-message file
 *commit-msg.txt
 
+
+# scratch temp files
+*.tmp
+*commit-msg*
+

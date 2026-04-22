@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/a3c/platform/internal/agent"
@@ -79,6 +80,13 @@ type RunOptions struct {
 	// tool name. Useful for locking outputs in a schema the rest of
 	// the platform can consume.
 	ToolChoice string
+
+	// Compaction controls the long-conversation survival mechanism.
+	// See compaction.go for the two-tier design. Zero value (empty
+	// struct) = disabled; callers passing an explicit policy get the
+	// auto-compact behaviour. DefaultCompactionPolicy is a reasonable
+	// starting point for a 200k-window model.
+	Compaction CompactionPolicy
 }
 
 // RunResult captures everything a caller might want to inspect after
@@ -164,9 +172,36 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 		return err
 	}
 
+	// Compaction state — persists across iterations so the circuit
+	// breaker and already-compacted-ids tracking survive the loop.
+	compactState := newCompactionState()
+	var lastTurnTokens int
+
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if err := ctx.Err(); err != nil {
 			return nil, emitErr(fmt.Errorf("runner: cancelled at iteration %d: %w", iter, err))
+		}
+
+		// Compact if needed BEFORE building the next request. This
+		// way a summarize LLM call can fail without aborting the
+		// parent run — we just proceed with whatever transcript we
+		// have and let the next iteration try again.
+		if opts.Compaction.ContextWindow > 0 {
+			compacted, outcome := maybeCompact(ctx, compactState, opts.Compaction,
+				opts.EndpointID, opts.Model, messages, lastTurnTokens)
+			if outcome.Action == "microcompact" || outcome.Action == "summarized" {
+				log.Printf("[Compaction] iter=%d %s: %d→%d tokens, stripped=%d, summary_cost=$%.4f",
+					iter, outcome.Action, outcome.Before, outcome.Tokens,
+					outcome.StrippedResults, outcome.SummaryUSD)
+				emit(projectID, EventAgentTurn, map[string]interface{}{
+					"session_id":  sessionID,
+					"iteration":   iter,
+					"compaction":  outcome.Action,
+					"before":      outcome.Before,
+					"after":       outcome.Tokens,
+				})
+			}
+			messages = compacted
 		}
 
 		req := llm.ChatRequest{
@@ -218,6 +253,13 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 		totalUsage.OutputTokens += turn.Usage.OutputTokens
 		totalUsage.CacheReadTokens += turn.Usage.CacheReadTokens
 		totalUsage.CacheCreationTokens += turn.Usage.CacheCreationTokens
+
+		// Track the most recent input_tokens for the compaction
+		// decision on the NEXT iteration. InputTokens is authoritative
+		// ("what the provider just charged us for") — better than the
+		// estimator because it includes system prompt + tools schema
+		// that the estimator can't see.
+		lastTurnTokens = turn.Usage.InputTokens
 		totalUsage.USD += turn.Usage.USD
 		lastStop = turn.StopReason
 

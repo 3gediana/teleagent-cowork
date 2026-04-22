@@ -152,6 +152,10 @@ func runNative(sess *agent.Session, cfg *agent.RoleConfig) error {
 		UserInput:     userInput,
 		MaxTokens:     defaultMaxTokensForRole(sess.Role),
 		MaxIterations: 25,
+		// Auto-compaction protects long chief/analyze sessions from
+		// hitting the provider's context window. See compaction.go
+		// for the two-tier design (microcompact then summarize).
+		Compaction: DefaultCompactionPolicy,
 	})
 	duration := time.Since(started)
 	if err != nil {
