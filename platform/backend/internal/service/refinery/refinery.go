@@ -152,8 +152,9 @@ func (r *Refinery) RunWithID(runID, projectID string, lookbackHours int, trigger
 		allStats[p.Name()] = stats
 	}
 
-	run.EndedAt = time.Now()
-	run.DurationMs = int(run.EndedAt.Sub(run.StartedAt).Milliseconds())
+	ended := time.Now()
+	run.EndedAt = &ended
+	run.DurationMs = int(ended.Sub(run.StartedAt).Milliseconds())
 	if hadError {
 		run.Status = "partial"
 		if lastErr != nil {
