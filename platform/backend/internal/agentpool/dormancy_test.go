@@ -420,6 +420,55 @@ func TestApplyDefaults_DormancyKnobs(t *testing.T) {
 	}
 }
 
+// TestEnsureReadyByAgentID_AutoWakes — the broadcast auto-wake hook:
+// a dormant pool agent whose id matches should be kicked back to
+// ready in the background.
+func TestEnsureReadyByAgentID_AutoWakes(t *testing.T) {
+	m, _, _ := newDormancyManager(t)
+	inst := spawnReady(t, m, "auto-wake-happy")
+	if err := m.EnterDormancy(context.Background(), inst.ID, "test"); err != nil {
+		t.Fatalf("dormancy: %v", err)
+	}
+
+	kicked := m.EnsureReadyByAgentID(inst.AgentID)
+	if !kicked {
+		t.Fatal("auto-wake should have been kicked off for dormant agent")
+	}
+
+	// Wake is async; poll status back to ready within 2s.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := m.Get(inst.ID)
+		if got.Status == "ready" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, _ := m.Get(inst.ID)
+	t.Fatalf("expected ready after auto-wake, still %q", got.Status)
+}
+
+// TestEnsureReadyByAgentID_NoopForReady — already-ready agents
+// shouldn't be touched; the call returns false so callers can log.
+func TestEnsureReadyByAgentID_NoopForReady(t *testing.T) {
+	m, _, _ := newDormancyManager(t)
+	inst := spawnReady(t, m, "auto-wake-ready")
+	if kicked := m.EnsureReadyByAgentID(inst.AgentID); kicked {
+		t.Error("should not kick a wake on a ready agent")
+	}
+}
+
+// TestEnsureReadyByAgentID_NoopForUnknown — external agents (not in
+// the pool at all) should just be ignored; callers pass every
+// broadcast target through and shouldn't need to pre-filter.
+func TestEnsureReadyByAgentID_NoopForUnknown(t *testing.T) {
+	m, _, _ := newDormancyManager(t)
+	_ = spawnReady(t, m, "auto-wake-pool") // ensure the pool has something
+	if kicked := m.EnsureReadyByAgentID("agent_not_in_pool"); kicked {
+		t.Error("unknown agent id should not trigger wake")
+	}
+}
+
 // smoke: ensure fmt import is live (used indirectly via the archive
 // fake). Keeps gofmt happy across the test file's evolving body.
 var _ = fmt.Sprintf

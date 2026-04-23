@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/a3c/platform/internal/agentpool"
 	"github.com/a3c/platform/internal/model"
 )
 
@@ -278,6 +279,16 @@ func BroadcastDirected(agentID string, eventType string, payload gin.H) {
 	model.RDB.Expire(ctx, key, 10*time.Minute)
 
 	log.Printf("[Broadcast] Directed %s to agent %s", eventType, agentID)
+
+	// Auto-wake: if the target is a dormant pool agent, kick off a
+	// Wake in the background. The broadcast is already in Redis so
+	// the pool's own consumer will deliver it as soon as the agent
+	// is back to ready; this call just shortens the stall window
+	// from "next manual wake" to "immediately". No-op for external
+	// agents (not in the pool) or agents already running.
+	if pm := agentpool.GetDefault(); pm != nil {
+		_ = pm.EnsureReadyByAgentID(agentID)
+	}
 }
 
 // GetDirectedMessages retrieves and removes all directed messages for a specific agent

@@ -380,3 +380,45 @@ func (m *Manager) revertWakeFailure(sp *subprocess, cause string) {
 	sp.inst.LastError = cause
 }
 
+// EnsureReadyByAgentID is the auto-wake entry point. Caller passes
+// an agent id; if the pool manages that agent and it's dormant, the
+// manager kicks off a Wake in the background and returns immediately.
+// Already-ready / unknown / non-dormant agents are no-ops.
+//
+// Async is important: the caller is typically
+// service.BroadcastDirected, which is downstream of RPC handlers and
+// workflow timers — blocking it on a full opencode spawn (seconds)
+// would ripple into user-facing latency and starve task claim loops.
+// The broadcast itself lands in Redis regardless; the pool's own
+// broadcast consumer will pick it up once wake flips status back
+// to ready.
+//
+// Returns a bool indicating whether a wake was actually kicked off,
+// so callers can log/observe without having to re-query the pool.
+func (m *Manager) EnsureReadyByAgentID(agentID string) bool {
+	m.mu.Lock()
+	var target *subprocess
+	for _, sp := range m.instances {
+		if sp.inst.AgentID == agentID {
+			target = sp
+			break
+		}
+	}
+	m.mu.Unlock()
+	if target == nil {
+		return false // not a pool-hosted agent (external / already purged)
+	}
+	if target.inst.Status != "dormant" {
+		return false // already awake, or mid-something-else
+	}
+	instID := target.inst.ID
+	go func() {
+		if _, err := m.Wake(context.Background(), instID); err != nil {
+			log.Printf("[Pool] auto-wake for %s (%s) failed: %v", agentID, instID, err)
+		} else {
+			log.Printf("[Pool] auto-woke %s (%s) on broadcast arrival", agentID, instID)
+		}
+	}()
+	return true
+}
+

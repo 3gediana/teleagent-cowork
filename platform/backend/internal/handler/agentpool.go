@@ -15,6 +15,7 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/agentpool"
+	"github.com/a3c/platform/internal/opencode"
 )
 
 type AgentPoolHandler struct{}
@@ -103,6 +104,27 @@ func (h *AgentPoolHandler) Shutdown(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"instance_id": req.InstanceID, "status": "stopped"}})
+}
+
+// OpencodeProviders surfaces the provider/model catalogue opencode
+// itself carries in ~/.config/opencode/opencode.json. This is what
+// pool agents pin when Spawn puts A3C_OPENCODE_PROVIDER_ID /
+// A3C_OPENCODE_MODEL_ID into the subprocess env — NOT the LLMEndpoint
+// catalogue (/opencode/providers which is for the native runner).
+// The frontend spawn modal consumes this endpoint to drive its
+// provider + model dropdowns.
+//
+// Any authenticated agent can read this (there are no secrets in
+// the response — apiKey is intentionally dropped by the reader).
+// Missing config file is a 200 with empty providers, so fresh
+// installs don't block the spawn modal.
+func (h *AgentPoolHandler) OpencodeProviders(c *gin.Context) {
+	providers, err := opencode.LoadProviders()
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "CONFIG_READ_FAILED", "message": err.Error()}})
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"providers": providers}})
 }
 
 // Sleep puts a ready instance into dormancy manually. Mirrors what
