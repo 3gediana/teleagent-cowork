@@ -120,6 +120,14 @@ func main() {
 	v1.POST("/auth/logout", authHandler.Logout)
 	v1.POST("/agent/register", authHandler.Register)
 
+	// /events is registered here (not in the auth group) because the
+	// browser EventSource API cannot attach an Authorization header,
+	// so the SSE handler does its own authentication inline: the
+	// ?key= query param is mandatory and must resolve to an agent that
+	// either is human or has the requested project_id currently
+	// selected. See handler/sse.go.
+	v1.GET("/events", sseHandler.Events)
+
 	auth := v1.Group("", middleware.AuthMiddleware())
 	{
 		auth.POST("/project/create", projectHandler.Create)
@@ -176,8 +184,6 @@ func main() {
 
 		auth.GET("/status/sync", statusHandler.Sync)
 		auth.POST("/poll", statusHandler.Poll)
-
-		auth.GET("/events", sseHandler.Events)
 
 		auth.GET("/dashboard/state", dashboardHandler.GetState)
 		auth.POST("/dashboard/input", dashboardHandler.Input)
