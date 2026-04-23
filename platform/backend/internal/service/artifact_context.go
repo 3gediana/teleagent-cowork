@@ -4,26 +4,37 @@ package service
 // builder (Chief, Analyze, future MCP hints) uses to pick which
 // KnowledgeArtifacts to inject into a session.
 //
-// Replaces the old "top-20 by confidence" blunt filter with a scoped,
-// multi-signal selector:
+// Four component scores feed a Reciprocal Rank Fusion (RRF) combiner:
 //
-//   score =  0.55 * semantic_similarity        (query vs artifact vector)
-//          + 0.20 * tag_overlap                (placeholder today — the
-//                                               multi-source Tag lifecycle
-//                                               PR will fill this in)
-//          + 0.15 * importance                 (usage/success/failure)
-//          + 0.10 * recency                    (exponential decay, 30d)
+//   semantic_similarity   (query vs artifact vector)
+//   tag_overlap           (task tags + file categories vs artifact text)
+//   importance            (logistic on success/failure counts)
+//   recency               (exponential decay, 30d half-life)
 //
-// Each factor is normalised to [0, 1]. Missing signals (no embedding,
-// no tags yet, cold artifact) degrade gracefully to 0 so the selector
-// never crashes on partial data.
+// Each signal is dense-ranked independently, then combined as
 //
-// Per-artifact `Reason` is recorded so the feedback loop can later
-// compute "success rate by injection reason" — i.e. learn whether
-// semantic matches outperform tag matches, globally or per project.
+//   score = sum_over_signals  1 / (rrfK + rank_in_signal)
+//
+// RRF is scale-invariant (semantic scores in [0,1] and importance
+// scores in [0,1] no longer need hand-tuned weights), tolerates
+// missing signals (a zero-variance signal contributes equally to
+// every candidate and washes out of the ordering), and penalises
+// low-ranked candidates smoothly rather than linearly. The magic
+// constant 60 matches the Cormack et al. 2009 recommendation; the
+// Phase 2.5 L1 auto-tuning work will later learn per-project values.
+//
+// A session-diversity cap (max 2 artifacts from the same root source
+// cluster) is applied before the per-kind budgeting so a single
+// high-signal session can't monopolise top-K.
+//
+// Per-artifact `Reason` records the raw component scores so the
+// feedback loop can later compute "success rate by injection reason"
+// — i.e. learn whether semantic matches outperform tag matches,
+// globally or per project.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -32,6 +43,20 @@ import (
 
 	"github.com/a3c/platform/internal/model"
 )
+
+// rrfK is the RRF smoothing constant. k=60 is the literature default
+// (Cormack, Clarke & Büttcher 2009); it balances "rank-1 gets a big
+// bump" against "rank-50 still contributes something". Phase 2.5's L1
+// auto-tuning will learn per-project values; for now a single
+// hardcoded value is the right default — changing it after we have
+// training data is trivial.
+const rrfK = 60.0
+
+// maxArtifactsPerSourceCluster caps how many artifacts derived from
+// the same root source (session / episode) can survive into the
+// top-K. Prevents a single high-signal session from monopolising the
+// prompt when several of its derivatives happen to match the query.
+const maxArtifactsPerSourceCluster = 2
 
 // Audience tells the selector which subset of artifacts is relevant.
 // Anti-patterns go to auditors; tool recipes to coders. One artifact
@@ -181,26 +206,154 @@ func SelectArtifactsForInjection(ctx context.Context, q ArtifactQuery) []Injecte
 		tags = LoadTaskTagsForSelector(q.TaskID)
 	}
 
-	// 3. Score every candidate.
+	// 3. Compute raw component scores for every candidate. These are
+	//    the same four signals as before; only the *combining* step
+	//    has changed. We keep the raw floats around for formatReason
+	//    so the Reason string still tells operators what actually
+	//    fired, not just the final RRF magnitude.
 	now := time.Now()
-	scored := make([]InjectedArtifact, 0, len(candidates))
-	for _, a := range candidates {
-		sem := semanticScore(queryVec, a.Embedding)
-		tag := tagScore(tags, q.FileCategories, a)
-		imp := importanceScore(a)
-		rec := recencyScore(now, a)
+	rawSem := make([]float64, len(candidates))
+	rawTag := make([]float64, len(candidates))
+	rawImp := make([]float64, len(candidates))
+	rawRec := make([]float64, len(candidates))
+	for i, a := range candidates {
+		rawSem[i] = semanticScore(queryVec, a.Embedding)
+		rawTag[i] = tagScore(tags, q.FileCategories, a)
+		rawImp[i] = importanceScore(a)
+		rawRec[i] = recencyScore(now, a)
+	}
 
-		final := 0.55*sem + 0.20*tag + 0.15*imp + 0.10*rec
+	// 4. Dense-rank each signal separately. Dense ranking means ties
+	//    share the same rank (1, 2, 2, 3 — no gaps) which is important:
+	//    when a signal is zero-variance across all candidates (e.g.
+	//    no query embedding provided → all semantic=0) every candidate
+	//    gets rank 1 and the signal contributes equally to everyone's
+	//    RRF sum, effectively washing out of the ordering. That's the
+	//    graceful-degradation story.
+	semRanks := denseRank(rawSem)
+	tagRanks := denseRank(rawTag)
+	impRanks := denseRank(rawImp)
+	recRanks := denseRank(rawRec)
+
+	// 5. RRF combine: each signal contributes 1/(k+rank). Sum across
+	//    signals. Higher total = better overall rank. The magic k=60
+	//    balances "rank-1 gets a big bump" against "rank-50 still
+	//    contributes something" and is the Cormack 2009 default.
+	scored := make([]InjectedArtifact, 0, len(candidates))
+	for i, a := range candidates {
+		rrfScore := 1.0/(rrfK+float64(semRanks[i])) +
+			1.0/(rrfK+float64(tagRanks[i])) +
+			1.0/(rrfK+float64(impRanks[i])) +
+			1.0/(rrfK+float64(recRanks[i]))
 		scored = append(scored, InjectedArtifact{
 			Artifact: a,
-			Reason:   formatReason(sem, tag, imp, rec),
-			Score:    final,
+			Reason:   formatReason(rawSem[i], rawTag[i], rawImp[i], rawRec[i]),
+			Score:    rrfScore,
 		})
 	}
 
-	// 4. Sort by final score, then apply per-kind budgets.
-	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+	// 6. Sort by RRF score. Stable sort so equally-scored artifacts
+	//    preserve DB order, which keeps the output deterministic.
+	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+
+	// 7. Apply session-diversity cap BEFORE the per-kind budget.
+	//    Rationale: if we let budgeting run first, a kind might be
+	//    filled entirely from one session's derivatives; diversifying
+	//    first ensures each kind sees artifacts from multiple root
+	//    sessions before the budget clips them.
+	scored = applySessionDiversity(scored, maxArtifactsPerSourceCluster)
+
+	// 8. Apply per-kind budgets.
 	return applyBudget(scored, q.Budget)
+}
+
+// denseRank assigns dense ranks (1 = highest value, ties share the
+// same rank, no gaps) to a slice of scores. Returns a parallel slice
+// where index i holds the rank of values[i].
+//
+// Examples:
+//   [0.9, 0.5, 0.5, 0.1] → [1, 2, 2, 3]
+//   [0.0, 0.0, 0.0]       → [1, 1, 1]   (all tied at the top)
+//   []                    → []
+//
+// Dense rather than ordinal (1,2,3,4) on purpose: under RRF a
+// signal with no variance (every candidate has score 0) should
+// contribute equally to every candidate's total — not arbitrarily
+// order them by input index. Dense ranking gives every tied value
+// the same rank, so their RRF contributions cancel out of the final
+// ordering.
+func denseRank(values []float64) []int {
+	n := len(values)
+	if n == 0 {
+		return nil
+	}
+	type idxVal struct {
+		idx int
+		val float64
+	}
+	sorted := make([]idxVal, n)
+	for i, v := range values {
+		sorted[i] = idxVal{idx: i, val: v}
+	}
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].val > sorted[j].val })
+	ranks := make([]int, n)
+	rank := 0
+	prev := math.Inf(1)
+	for _, e := range sorted {
+		if e.val < prev {
+			rank++
+			prev = e.val
+		}
+		ranks[e.idx] = rank
+	}
+	return ranks
+}
+
+// applySessionDiversity drops artifacts whose source cluster already
+// has `maxPerCluster` entries ahead in the ranked list. Prevents a
+// single high-signal session from dominating the final top-K when
+// several of its derivative artifacts happen to match the query.
+//
+// Artifacts with no parseable source cluster (empty SourceEvents
+// or malformed JSON) are treated as singletons — they never count
+// toward anyone's cap and are always kept. This is the right default
+// because historical artifacts pre-dating SourceEvents tracking
+// should not be unfairly penalised.
+func applySessionDiversity(scored []InjectedArtifact, maxPerCluster int) []InjectedArtifact {
+	if maxPerCluster <= 0 || len(scored) == 0 {
+		return scored
+	}
+	seen := map[string]int{}
+	filtered := make([]InjectedArtifact, 0, len(scored))
+	for _, ia := range scored {
+		key := clusterKey(ia.Artifact)
+		if key == "" {
+			filtered = append(filtered, ia)
+			continue
+		}
+		if seen[key] >= maxPerCluster {
+			continue
+		}
+		seen[key]++
+		filtered = append(filtered, ia)
+	}
+	return filtered
+}
+
+// clusterKey extracts the first source-event ID from an artifact's
+// SourceEvents JSON array. This is conventionally the root episode /
+// session ID the artifact was derived from, so artifacts sharing a
+// first element are "from the same cluster" for diversity purposes.
+// Returns empty string on empty / malformed / zero-length input.
+func clusterKey(a model.KnowledgeArtifact) string {
+	if a.SourceEvents == "" {
+		return ""
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(a.SourceEvents), &ids); err != nil || len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
 
 // fetchInjectionCandidates pulls a pre-filtered candidate pool scoped to

@@ -87,9 +87,11 @@ func TestSelector_SemanticRecallOutranksConfidence(t *testing.T) {
 	defer setupArtifactCtxDB(t)()
 
 	// Three artifacts, all same kind, all active. A is semantically close
-	// to the query; B and C are far. The OLD top-N-by-confidence would
-	// have picked whichever has highest confidence; the NEW selector
-	// must pick A because semantic carries the most weight (0.55).
+	// to the query; B and C are orthogonal. Under RRF, semantic is one of
+	// four equally-weighted signals, so this test isolates semantic as
+	// the only varying signal by flattening tag / importance / recency
+	// across the three artifacts. A wins because it's rank 1 on semantic
+	// while everything else ties at rank 1.
 	seedArtifact(t, "a", "p1", "pattern", "pat:login",
 		makeUnitVec(1, 0, 0)) // near the query
 	seedArtifact(t, "b", "p1", "pattern", "pat:billing",
@@ -97,9 +99,14 @@ func TestSelector_SemanticRecallOutranksConfidence(t *testing.T) {
 	seedArtifact(t, "c", "p1", "pattern", "pat:analytics",
 		makeUnitVec(0, 0, 1)) // orthogonal
 
-	// Manually bump B and C's confidence to 1.0 so any confidence-biased
-	// selector would pick them first. Selector should still pick A.
-	model.DB.Model(&model.KnowledgeArtifact{}).Where("id IN ?", []string{"b", "c"}).Update("confidence", 1.0)
+	// Flatten updated_at across all three so recency doesn't prefer the
+	// last-seeded artifact. We use UpdateColumn to bypass GORM's
+	// auto-update-of-updated_at hook — otherwise the Update itself would
+	// re-dirty the timestamps and defeat the purpose.
+	fixed := time.Now()
+	model.DB.Model(&model.KnowledgeArtifact{}).
+		Where("id IN ?", []string{"a", "b", "c"}).
+		UpdateColumn("updated_at", fixed)
 
 	// Query vector aligned with A.
 	queryVec := makeUnitVec(1, 0.05, 0)
@@ -279,7 +286,133 @@ func TestSelector_ReasonReflectsContributingSignals(t *testing.T) {
 	}
 }
 
+// TestSelector_SessionDiversity_CapsSameClusterArtifacts verifies the
+// Phase 2 session-diversity guard: at most maxArtifactsPerSourceCluster
+// (2) artifacts from the same root cluster survive into top-K even
+// when many same-cluster siblings match the query equally well.
+//
+// Without the guard, a single "productive" session could monopolise
+// the prompt — the selector would inject 4-5 near-duplicate lessons
+// derived from the same trajectory, crowding out genuinely different
+// knowledge from other sessions.
+func TestSelector_SessionDiversity_CapsSameClusterArtifacts(t *testing.T) {
+	defer setupArtifactCtxDB(t)()
+
+	// Four artifacts, all perfect semantic match. First three share
+	// source_events[0] = "ep_A" (same cluster); the fourth has a
+	// different cluster. Expected: ep_A yields at most 2 survivors;
+	// ep_B is unaffected. Use Analyzer audience so the per-kind
+	// budget (10) doesn't clip before we can observe diversity.
+	for _, id := range []string{"a1", "a2", "a3"} {
+		seedArtifactWithCluster(t, id, "p1", "pattern", "pat:"+id, makeUnitVec(1, 0, 0), "ep_A")
+	}
+	seedArtifactWithCluster(t, "b1", "p1", "pattern", "pat:b1", makeUnitVec(1, 0, 0), "ep_B")
+
+	r := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding: makeUnitVec(1, 0, 0),
+	})
+
+	clusterCount := map[string]int{}
+	for _, ia := range r {
+		clusterCount[clusterKey(ia.Artifact)]++
+	}
+	if clusterCount["ep_A"] > 2 {
+		t.Errorf("ep_A cluster cap = 2, got %d", clusterCount["ep_A"])
+	}
+	if clusterCount["ep_B"] != 1 {
+		t.Errorf("ep_B (singleton cluster) should survive, got %d", clusterCount["ep_B"])
+	}
+}
+
+// TestSelector_EmptySourceEventsTreatedAsSingleton verifies legacy
+// artifacts with no SourceEvents field don't get unfairly penalised
+// by the diversity guard. They all have empty clusterKey and are
+// treated as singletons — every one of them survives.
+func TestSelector_EmptySourceEventsTreatedAsSingleton(t *testing.T) {
+	defer setupArtifactCtxDB(t)()
+
+	// Five artifacts, no SourceEvents set on any. All should survive
+	// the diversity filter (they're "different" singletons by default)
+	// even if the per-kind budget clips them afterwards.
+	for i := 0; i < 5; i++ {
+		seedArtifact(t, fmt.Sprintf("p%d", i), "p1", "pattern",
+			fmt.Sprintf("pat#%d", i), makeUnitVec(1, 0, 0))
+	}
+
+	// Inspect the pre-budget scored list by driving the selector for
+	// a budget-free audience (Analyzer has MaxTotal=30 and 10/kind, so
+	// none of our 5 get clipped).
+	r := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding: makeUnitVec(1, 0, 0),
+	})
+	if len(r) != 5 {
+		t.Errorf("legacy artifacts (no SourceEvents) must all survive diversity; got %d, want 5", len(r))
+	}
+}
+
+// TestDenseRank covers the ranking primitive in isolation. Important
+// edge cases: ties share rank, all-zero input becomes all-tied-at-1
+// (critical for RRF graceful degradation), empty input returns nil.
+func TestDenseRank(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []float64
+		want   []int
+	}{
+		{"descending", []float64{0.9, 0.5, 0.1}, []int{1, 2, 3}},
+		{"ties middle", []float64{0.9, 0.5, 0.5, 0.1}, []int{1, 2, 2, 3}},
+		{"all equal", []float64{0.5, 0.5, 0.5}, []int{1, 1, 1}},
+		{"all zero (RRF degradation)", []float64{0, 0, 0}, []int{1, 1, 1}},
+		{"ascending input", []float64{0.1, 0.5, 0.9}, []int{3, 2, 1}},
+		{"single element", []float64{0.42}, []int{1}},
+		{"empty", []float64{}, nil},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := denseRank(tc.values)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %d want %d", len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("rank[%d]: got %d want %d (full: %v want %v)",
+						i, got[i], tc.want[i], got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // -- helpers --------------------------------------------------------------
+
+// seedArtifactWithCluster is like seedArtifact but also sets the
+// SourceEvents field so the diversity guard can detect shared
+// clusters. `clusterID` becomes the first element of the JSON array.
+func seedArtifactWithCluster(t *testing.T, id, projectID, kind, name string, vec []float32, clusterID string) {
+	t.Helper()
+	sourceEvents := `["` + clusterID + `","` + id + `_evt"]`
+	ka := &model.KnowledgeArtifact{
+		ID:           id,
+		ProjectID:    projectID,
+		Kind:         kind,
+		Name:         name,
+		Summary:      name + " summary",
+		Status:       "active",
+		Confidence:   0.8,
+		Version:      1,
+		Embedding:    MarshalEmbedding(vec),
+		EmbeddingDim: len(vec),
+		SourceEvents: sourceEvents,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	if err := model.DB.Create(ka).Error; err != nil {
+		t.Fatalf("seed artifact: %v", err)
+	}
+}
 
 func summariseScores(r []InjectedArtifact) []string {
 	out := make([]string, len(r))
