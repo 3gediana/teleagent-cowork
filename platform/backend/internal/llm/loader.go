@@ -94,14 +94,19 @@ func installEntry(row *model.LLMEndpoint) error {
 		Models:  models,
 	}
 
+	// openai_compatible is an alias for openai: same wire protocol,
+	// different label so operators can distinguish first-party OpenAI
+	// from compatible providers (DeepSeek, Zhipu, Moonshot, Together,
+	// local vLLM, ...). Both route through NewOpenAIProvider; the
+	// Format column keeps whichever the operator picked for display.
 	var prov Provider
 	switch strings.ToLower(row.Format) {
 	case "anthropic":
 		prov = NewAnthropicProvider(cfg)
-	case "openai":
+	case "openai", "openai_compatible":
 		prov = NewOpenAIProvider(cfg)
 	default:
-		return fmt.Errorf("unknown format %q (expected 'anthropic' or 'openai')", row.Format)
+		return fmt.Errorf("unknown format %q (expected 'anthropic', 'openai' or 'openai_compatible')", row.Format)
 	}
 
 	// Default model fallback: if the operator didn't set one and the

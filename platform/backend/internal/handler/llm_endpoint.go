@@ -32,6 +32,20 @@ type LLMEndpointHandler struct{}
 
 func NewLLMEndpointHandler() *LLMEndpointHandler { return &LLMEndpointHandler{} }
 
+// isValidEndpointFormat gates what the handler accepts. Must stay in
+// sync with the switch in internal/llm/loader.go:installEntry — both
+// sides need to agree on which labels exist. 'openai_compatible' is
+// an alias for 'openai' (same wire protocol); keeping it as a
+// separate label lets operators tell at a glance which endpoints are
+// first-party OpenAI versus third-party compatible providers.
+func isValidEndpointFormat(f string) bool {
+	switch f {
+	case "anthropic", "openai", "openai_compatible":
+		return true
+	}
+	return false
+}
+
 // endpointResponse is the wire shape for GET responses. Mirrors the
 // DB row but replaces APIKey with a redacted preview and decodes the
 // Models JSON into a typed slice so the frontend doesn't have to parse
@@ -140,9 +154,9 @@ func (h *LLMEndpointHandler) Create(c *gin.Context) {
 			"error": gin.H{"code": "INVALID_PARAMS", "message": "name required"}})
 		return
 	}
-	if req.Format != "anthropic" && req.Format != "openai" {
+	if !isValidEndpointFormat(req.Format) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false,
-			"error": gin.H{"code": "INVALID_PARAMS", "message": "format must be 'anthropic' or 'openai'"}})
+			"error": gin.H{"code": "INVALID_PARAMS", "message": "format must be 'anthropic', 'openai' or 'openai_compatible'"}})
 		return
 	}
 	if req.APIKey == "" {
@@ -240,9 +254,9 @@ func (h *LLMEndpointHandler) Update(c *gin.Context) {
 		updates["name"] = name
 	}
 	if f := strings.ToLower(strings.TrimSpace(req.Format)); f != "" && f != row.Format {
-		if f != "anthropic" && f != "openai" {
+		if !isValidEndpointFormat(f) {
 			c.JSON(http.StatusBadRequest, gin.H{"success": false,
-				"error": gin.H{"code": "INVALID_PARAMS", "message": "format must be 'anthropic' or 'openai'"}})
+				"error": gin.H{"code": "INVALID_PARAMS", "message": "format must be 'anthropic', 'openai' or 'openai_compatible'"}})
 			return
 		}
 		updates["format"] = f
