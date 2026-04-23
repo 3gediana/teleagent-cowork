@@ -123,6 +123,41 @@ fix that stuck:
    Use `cat payload.json | redis-cli -x RPUSH key` with the
    payload staged via `docker cp`.
 
+---------------- Multi-agent parallel run (1a2b105) ---------------
+
+3-agent real-project E2E (e2e-multi.ps1), confirmed against live
+MiniMax-M2.7:
+
+  - spawned pool_a85e7b34 (util-string),
+            pool_9cff7783 (util-math),
+            pool_b0d70789 (util-datetime)
+  - each got its own broadcast → opencode prompt_async →
+    real LLM inference → tool calls to write module + test files
+  - all three workdirs stayed disjoint (data/pool/<id>/)
+  - host-side pytest PASSES on each workdir's tests
+  - delivered working code — euclid-algorithm gcd, case/punct-normalising
+    palindrome, fromisoformat date parser — not AI-slop stubs
+
+Three bugs surfaced and fixed during this run:
+
+1. Silent drop on BOM-prefixed Redis payload. json.Unmarshal rejects
+   UTF-8 BOM; consumer's FetchEvents caught it + continue'd without
+   log. PowerShell's Set-Content -Encoding UTF8 writes BOM. Now we
+   (a) TrimPrefix "\ufeff" before unmarshal, (b) log any remaining
+   parse failure with preview. The e2e script switched to
+   [System.IO.File]::WriteAllBytes.
+
+2. Heartbeat checker offlining pool agents. The MCP-heartbeat sweep
+   ran on ALL online agents including platform-hosted ones, which
+   never heartbeat via the poller. At the 7-minute mark every pool
+   agent got DB-flipped to offline while still serving requests.
+   Now scoped out via WHERE is_platform_hosted = false.
+
+3. Windows cmd '>' redirection fully buffers stdio to files. Go's
+   log.Printf writes appeared 4+ minutes late. Not a code fix —
+   just documented in progress.txt so the next debugger doesn't
+   chase a phantom bug.
+
 ---------------- What's still out ---------------------------------
 
 Not in this sprint but queued in the todo:
@@ -132,3 +167,6 @@ Not in this sprint but queued in the todo:
   - Native-runner side task dispatcher auto-wake (currently only
     the broadcast path triggers; if the runner picks an agent it
     doesn't check pool status first)
+  - Pool agent tied into change/review workflow — right now they
+    deliver code but don't automatically land a Change row + kick
+    StartAuditWorkflow. Next step to close the loop.
