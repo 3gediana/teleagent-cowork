@@ -11,6 +11,7 @@ import KnowledgePage from './pages/KnowledgePage'
 import TagReviewPage from './pages/TagReviewPage'
 import LLMEndpointsPage from './pages/LLMEndpointsPage'
 import AgentPoolPage from './pages/AgentPoolPage'
+import LoopCheckPage from './pages/LoopCheckPage'
 import WorkspacePickerPage from './pages/WorkspacePickerPage'
 import { Layout } from './components/Layout'
 
@@ -42,6 +43,7 @@ function AuthenticatedApp() {
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/tags" element={<TagReviewPage />} />
         <Route path="/llm" element={<LLMEndpointsPage />} />
+        <Route path="/loopcheck" element={<LoopCheckPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

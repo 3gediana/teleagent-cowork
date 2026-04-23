@@ -89,6 +89,7 @@ func main() {
 	policyHandler := handler.NewPolicyHandler()
 	refineryHandler := handler.NewRefineryHandler()
 	agentPoolHandler := handler.NewAgentPoolHandler()
+	loopCheckHandler := handler.NewLoopCheckHandler()
 
 	// Platform-hosted agent pool — spawns opencode subprocesses on
 	// the same host, auto-injects skills from the DB + baseline
@@ -129,6 +130,12 @@ func main() {
 
 		// Injection-signal metrics — see @platform/backend/internal/handler/metrics.go
 		auth.GET("/metrics/injection-signal", metricsHandler.InjectionSignal)
+
+		// Loop-health diagnostic — see @platform/backend/internal/handler/loopcheck.go
+		// Reports whether every self-evolution and automation loop
+		// is flowing at its expected cadence. Read-only. Safe to
+		// poll at ~1/min from the dashboard.
+		auth.GET("/loopcheck", loopCheckHandler.Get)
 
 		// User-registered LLM endpoints (PR 10 — opencode replacement).
 		// List/Get are open to any authenticated agent so MCP clients

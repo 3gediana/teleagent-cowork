@@ -16,7 +16,7 @@ import { useAppStore } from '../stores/appStore'
 type IconName =
   | 'overview' | 'tasks' | 'submissions' | 'prs' | 'chief'
   | 'pool' | 'knowledge' | 'tags' | 'activity' | 'llm' | 'settings'
-  | 'chevron' | 'more'
+  | 'loopcheck' | 'chevron' | 'more'
 
 function Icon({ name, size = 14 }: { name: IconName; size?: number }) {
   const s = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
@@ -41,6 +41,9 @@ function Icon({ name, size = 14 }: { name: IconName; size?: number }) {
       return (<svg {...s}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>)
     case 'llm':
       return (<svg {...s}><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>)
+    case 'loopcheck':
+      // Pulse/heartbeat line — echoes the "is the system breathing" framing of the page.
+      return (<svg {...s}><path d="M3 12h4l2-6 4 12 2-6 2 3h4"/></svg>)
     case 'settings':
       return (<svg {...s}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>)
     case 'chevron':
@@ -76,8 +79,9 @@ const navGroups: NavGroup[] = [
   {
     title: 'System',
     items: [
-      { path: '/activity', label: 'Activity', icon: 'activity' },
-      { path: '/settings', label: 'Settings', icon: 'settings' },
+      { path: '/activity',  label: 'Activity',    icon: 'activity' },
+      { path: '/loopcheck', label: 'Loop Health', icon: 'loopcheck' },
+      { path: '/settings',  label: 'Settings',    icon: 'settings' },
     ],
   },
 ]

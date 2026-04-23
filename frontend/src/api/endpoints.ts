@@ -294,3 +294,39 @@ export const refineryApi = {
   updateStatus: (artifactId: string, status: string) =>
     api.put('/refinery/artifacts/' + artifactId + '/status', { status }) as Promise<{ success: boolean; data: { id: string; status: string } }>,
 }
+
+// LoopCheck — mirrors internal/service/loopcheck. See the Go doc
+// comments there for what each field means; the types here are
+// kept minimal so the page can render whatever the server ships
+// without a schema-contract dance.
+export type LoopStatus = 'healthy' | 'stale' | 'unused' | 'broken'
+
+export interface LoopCheck {
+  name: string
+  status: LoopStatus
+  summary: string
+  metrics?: Record<string, any>
+  last_activity?: string | null
+}
+
+export interface LoopPillar {
+  name: string
+  overall_status: LoopStatus
+  checks: LoopCheck[]
+}
+
+export interface LoopReport {
+  generated_at: string
+  window_days: number
+  project_id?: string
+  self_evolution: LoopPillar
+  automation: LoopPillar
+  overall_status: LoopStatus
+}
+
+export const loopcheckApi = {
+  get: (projectId?: string, windowDays = 7) =>
+    api.get('/loopcheck', {
+      params: { project_id: projectId || undefined, window_days: windowDays },
+    }) as Promise<{ success: boolean; data: LoopReport }>,
+}
