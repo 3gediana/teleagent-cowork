@@ -29,6 +29,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+
 	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/service/loopcheck"
@@ -40,12 +44,19 @@ func main() {
 		windowDays = flag.Int("window", 7, "Look-back window in days for recent-activity counts")
 		asJSON     = flag.Bool("json", false, "Emit JSON instead of a terminal report")
 		configPath = flag.String("config", "", "Optional config file override; defaults to configs/config.yaml")
+		useSQLite  = flag.Bool("sqlite", false, "Skip MySQL and run against an empty in-memory SQLite (demo/smoke mode; every check will report 'unused')")
 	)
 	flag.Parse()
 
-	cfg := config.Load(*configPath)
-	if err := model.InitDB(&cfg.Database); err != nil {
-		log.Fatalf("database init failed: %v", err)
+	if *useSQLite {
+		if err := bootstrapSQLite(); err != nil {
+			log.Fatalf("sqlite bootstrap failed: %v", err)
+		}
+	} else {
+		cfg := config.Load(*configPath)
+		if err := model.InitDB(&cfg.Database); err != nil {
+			log.Fatalf("database init failed: %v\n\nTip: pass --sqlite to run against an empty in-memory DB without MySQL.", err)
+		}
 	}
 
 	report := loopcheck.Generate(loopcheck.Options{
@@ -140,6 +151,35 @@ func statusBadge(s loopcheck.Status) string {
 		return "\033[31m BROKEN  \033[0m"
 	}
 	return string(s)
+}
+
+// bootstrapSQLite opens an in-memory SQLite, migrates the subset of
+// models the loopcheck queries touch, and pins it into model.DB so
+// Generate() sees it like any other live connection. Nothing is
+// seeded — every check will report 'unused'. That's the point:
+// when the DB is empty, the tool should correctly tell you that.
+func bootstrapSQLite() error {
+	db, err := gorm.Open(sqlite.Open("file:loopcheck?mode=memory&cache=shared"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return fmt.Errorf("open sqlite: %w", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Project{},
+		&model.Agent{},
+		&model.Change{},
+		&model.AgentSession{},
+		&model.Experience{},
+		&model.SkillCandidate{},
+		&model.Policy{},
+		&model.KnowledgeArtifact{},
+		&model.RefineryRun{},
+	); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	model.DB = db
+	return nil
 }
 
 func statusIcon(s loopcheck.Status) string {
