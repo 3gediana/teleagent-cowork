@@ -22,11 +22,34 @@ func (h *SSEHandler) Events(c *gin.Context) {
 		return
 	}
 
+	// Browser EventSource cannot set an Authorization header, so the
+	// dashboard passes the access key as ?key=... and we treat that as
+	// the sole auth channel for this endpoint. The key was previously
+	// optional, which meant anyone who could guess a project_id could
+	// stream its entire event feed (audit reasoning, PR content,
+	// agent activity). Now: key is required, must resolve to a real
+	// agent, and that agent must have selected this project (or be a
+	// human, who can switch projects from the dashboard).
 	key := c.Query("key")
-	if key != "" {
-		agent, err := repo.GetAgentByKey(key)
-		if err != nil || agent == nil {
-			c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Invalid access key"}})
+	if key == "" {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "UNAUTHORIZED", "message": "key query parameter is required"}})
+		return
+	}
+	agent, err := repo.GetAgentByKey(key)
+	if err != nil || agent == nil {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Invalid access key"}})
+		return
+	}
+	if !agent.IsHuman {
+		current := ""
+		if agent.CurrentProjectID != nil {
+			current = *agent.CurrentProjectID
+		}
+		if current != projectID {
+			c.JSON(403, gin.H{"success": false, "error": gin.H{
+				"code":    "PROJECT_FORBIDDEN",
+				"message": "caller has not selected this project",
+			}})
 			return
 		}
 	}
