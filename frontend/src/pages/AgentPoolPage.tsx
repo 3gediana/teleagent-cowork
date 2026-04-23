@@ -22,11 +22,20 @@ const ARCHIVE_THRESHOLD_TOKENS = 150_000
  */
 
 const STATUS_STYLES: Record<PoolInstance['status'], { bg: string; text: string; border: string; icon: string; label: string }> = {
-  starting: { bg: 'bg-amber-50',   text: 'text-amber-700',   border: 'border-amber-300',   icon: '⏳', label: 'BOOTING' },
-  ready:    { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-400', icon: '✅', label: 'READY' },
-  crashed:  { bg: 'bg-rose-50',    text: 'text-rose-700',    border: 'border-rose-300',    icon: '💥', label: 'CRASHED' },
-  stopping: { bg: 'bg-[#8b4513]/5',text: 'text-[#8b4513]/60',border: 'border-[#8b4513]/20',icon: '⏹️', label: 'STOPPING' },
-  stopped:  { bg: 'bg-[#8b4513]/10',text: 'text-[#5d4037]',   border: 'border-[#8b4513]/30',icon: '💤', label: 'STOPPED' },
+  starting: { bg: 'bg-amber-50',      text: 'text-amber-700',   border: 'border-amber-300',   icon: '⏳', label: 'BOOTING' },
+  ready:    { bg: 'bg-emerald-50',    text: 'text-emerald-700', border: 'border-emerald-400', icon: '✅', label: 'READY' },
+  crashed:  { bg: 'bg-rose-50',       text: 'text-rose-700',    border: 'border-rose-300',    icon: '💥', label: 'CRASHED' },
+  stopping: { bg: 'bg-[#8b4513]/5',   text: 'text-[#8b4513]/60',border: 'border-[#8b4513]/20',icon: '⏹️', label: 'STOPPING' },
+  stopped:  { bg: 'bg-[#8b4513]/10',  text: 'text-[#5d4037]',   border: 'border-[#8b4513]/30',icon: '💤', label: 'STOPPED' },
+  // 'dormant' = platform idly-reclaimed; opencode subprocess is
+  // gone but the Instance + session metadata are preserved so a
+  // Wake click rehydrates the same agent. Moon glyph + slate tone
+  // to distinguish from the grey 'stopped' (which is terminal).
+  dormant:  { bg: 'bg-slate-100',     text: 'text-slate-700',   border: 'border-slate-300',   icon: '🌙', label: 'DORMANT' },
+  // 'waking' is the few-second transient while Wake re-spawns
+  // opencode. Operators see it briefly, same tone family as
+  // 'starting' so the visual rhythm tracks.
+  waking:   { bg: 'bg-sky-50',        text: 'text-sky-700',     border: 'border-sky-300',     icon: '☀️', label: 'WAKING' },
 }
 
 function StatusTag({ status }: { status: PoolInstance['status'] }) {
@@ -234,13 +243,36 @@ function SessionHealthPanel({ inst }: { inst: PoolInstance }) {
   )
 }
 
-function InstanceCard({ inst, onShutdown, onPurge }: {
+// dormantDuration renders "3m", "2h" etc. for how long an agent's
+// been asleep. Empty string if dormant_at is missing (legacy rows
+// from before Phase 4). Updates only on re-render — caller is
+// responsible for polling the list if they want live counters.
+function dormantDuration(dormantAt?: string): string {
+  if (!dormantAt) return ''
+  const ms = Date.now() - new Date(dormantAt).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
+}
+
+function InstanceCard({ inst, onShutdown, onSleep, onWake, onPurge, pendingAction }: {
   inst: PoolInstance
   onShutdown: (id: string) => void
+  onSleep: (id: string) => void
+  onWake: (id: string) => void
   onPurge: (id: string) => void
+  pendingAction: string | null
 }) {
-  const running = inst.status === 'ready' || inst.status === 'starting'
+  const running = inst.status === 'ready' || inst.status === 'starting' || inst.status === 'waking'
   const canPurge = inst.status === 'stopped' || inst.status === 'crashed'
+  const canSleep = inst.status === 'ready'
+  const canWake = inst.status === 'dormant'
+  const busy = pendingAction === inst.id
 
   return (
     <div className="parchment rounded-2xl p-5 border border-[#8b4513]/20 shadow-md hover:shadow-lg transition-shadow relative">
@@ -280,22 +312,49 @@ function InstanceCard({ inst, onShutdown, onPurge }: {
         </p>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        {canSleep && (
+          <button
+            disabled={busy}
+            onClick={() => onSleep(inst.id)}
+            title="Archive current session + stop opencode subprocess. Wake to bring back."
+            className="px-3 py-1.5 rounded-xl font-marker text-xs bg-slate-100 text-slate-700 border-2 border-slate-300 hover:bg-slate-200 transition-colors active:scale-95 disabled:opacity-50"
+          >
+            🌙 Sleep
+          </button>
+        )}
+        {canWake && (
+          <button
+            disabled={busy}
+            onClick={() => onWake(inst.id)}
+            title="Re-spawn opencode + create a fresh session. Agent identity preserved."
+            className="px-3 py-1.5 rounded-xl font-marker text-xs bg-sky-100 text-sky-700 border-2 border-sky-300 hover:bg-sky-200 transition-colors active:scale-95 disabled:opacity-50"
+          >
+            ☀️ Wake
+          </button>
+        )}
         {running && (
           <button
+            disabled={busy}
             onClick={() => onShutdown(inst.id)}
-            className="px-4 py-1.5 rounded-xl font-marker text-xs bg-rose-100 text-rose-700 border-2 border-rose-300 hover:bg-rose-200 transition-colors active:scale-95"
+            className="px-3 py-1.5 rounded-xl font-marker text-xs bg-rose-100 text-rose-700 border-2 border-rose-300 hover:bg-rose-200 transition-colors active:scale-95 disabled:opacity-50"
           >
             ⏹ Shutdown
           </button>
         )}
         {canPurge && (
           <button
+            disabled={busy}
             onClick={() => onPurge(inst.id)}
-            className="px-4 py-1.5 rounded-xl font-marker text-xs bg-[#8b4513]/10 text-[#5d4037] border-2 border-[#8b4513]/20 hover:bg-[#8b4513]/20 transition-colors active:scale-95"
+            className="px-3 py-1.5 rounded-xl font-marker text-xs bg-[#8b4513]/10 text-[#5d4037] border-2 border-[#8b4513]/20 hover:bg-[#8b4513]/20 transition-colors active:scale-95 disabled:opacity-50"
           >
             🗑 Purge
           </button>
+        )}
+        {inst.status === 'dormant' && inst.dormant_at && (
+          <span className="text-[10px] font-hand text-slate-500 italic">
+            asleep for {dormantDuration(inst.dormant_at)}
+          </span>
         )}
         {inst.project_id && (
           <span className="ml-auto text-[10px] font-hand text-[#8b4513]/40">project <span className="font-mono">{inst.project_id}</span></span>
@@ -310,31 +369,36 @@ function InstanceCard({ inst, onShutdown, onPurge }: {
 function PoolOverview({ instances }: { instances: PoolInstance[] }) {
   // Pre-compute once per render; cheap on any realistic pool size.
   const totals = useMemo(() => {
-    let ready = 0, booting = 0, crashed = 0, stopped = 0
+    let ready = 0, booting = 0, crashed = 0, stopped = 0, dormant = 0, waking = 0
     let tokenSum = 0, rotSum = 0, sessionBound = 0
     for (const i of instances) {
       if (i.status === 'ready') ready++
       else if (i.status === 'starting') booting++
+      else if (i.status === 'waking') waking++
+      else if (i.status === 'dormant') dormant++
       else if (i.status === 'crashed') crashed++
       else stopped++
       tokenSum += i.last_context_tokens || 0
       rotSum += i.archive_rotation || 0
       if (i.opencode_session_id) sessionBound++
     }
-    return { ready, booting, crashed, stopped, tokenSum, rotSum, sessionBound }
+    return { ready, booting, crashed, stopped, dormant, waking, tokenSum, rotSum, sessionBound }
   }, [instances])
 
   const stats: { label: string; value: string; sub?: string; tone: string }[] = [
     {
       label: 'Running',
       value: String(totals.ready),
-      sub: totals.booting > 0 ? `+${totals.booting} booting` : totals.stopped > 0 ? `${totals.stopped} stopped` : undefined,
+      sub: totals.booting + totals.waking > 0
+        ? `+${totals.booting + totals.waking} ${totals.waking > 0 ? 'waking' : 'booting'}`
+        : totals.stopped > 0 ? `${totals.stopped} stopped` : undefined,
       tone: totals.ready > 0 ? 'text-emerald-700' : 'text-[#8b4513]/60',
     },
     {
-      label: 'Crashed',
-      value: String(totals.crashed),
-      tone: totals.crashed > 0 ? 'text-rose-700' : 'text-[#8b4513]/40',
+      label: 'Dormant',
+      value: String(totals.dormant),
+      sub: totals.dormant > 0 ? 'asleep; session preserved' : 'no sleepers',
+      tone: totals.dormant > 0 ? 'text-slate-700' : 'text-[#8b4513]/40',
     },
     {
       label: 'Tokens in flight',
@@ -345,8 +409,10 @@ function PoolOverview({ instances }: { instances: PoolInstance[] }) {
     {
       label: 'Rotations',
       value: String(totals.rotSum),
-      sub: totals.rotSum > 0 ? 'archive threshold reached' : 'since spawn',
-      tone: totals.rotSum > 0 ? 'text-indigo-700' : 'text-[#8b4513]/60',
+      sub: totals.crashed > 0
+        ? `${totals.crashed} crashed`
+        : totals.rotSum > 0 ? 'archive threshold reached' : 'since spawn',
+      tone: totals.crashed > 0 ? 'text-rose-700' : totals.rotSum > 0 ? 'text-indigo-700' : 'text-[#8b4513]/60',
     },
   ]
 
@@ -367,6 +433,12 @@ export default function AgentPoolPage() {
   const [instances, setInstances] = useState<PoolInstance[]>([])
   const [loading, setLoading] = useState(true)
   const [spawnOpen, setSpawnOpen] = useState(false)
+  // pendingAction holds the id of the instance currently being
+  // mutated (sleep/wake/shutdown/purge) so we can disable its card's
+  // buttons. One global slot is plenty — operators don't fire two
+  // actions at once from the same page.
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [actionErr, setActionErr] = useState<string | null>(null)
 
   const load = async () => {
     const res = await agentPoolApi.list()
@@ -383,14 +455,32 @@ export default function AgentPoolPage() {
     return () => clearInterval(i)
   }, [])
 
-  const handleShutdown = async (id: string) => {
-    await agentPoolApi.shutdown(id)
-    load()
+  // runAction is the common wrapper around every lifecycle call. It
+  // locks the card for the instance, runs the call, surfaces any
+  // backend error on a banner, and reloads regardless — so even a
+  // failed Wake refreshes the error text on the card.
+  const runAction = async (id: string, kind: string, fn: () => Promise<{ success: boolean; error?: any }>) => {
+    if (pendingAction) return
+    setPendingAction(id)
+    setActionErr(null)
+    try {
+      const res = await fn()
+      if (!res?.success) {
+        const msg = res?.error?.message || `${kind} failed`
+        setActionErr(`${kind} on ${id.slice(0, 12)}: ${msg}`)
+      }
+    } catch (e) {
+      setActionErr(`${kind}: ${e instanceof Error ? e.message : 'network error'}`)
+    } finally {
+      setPendingAction(null)
+      load()
+    }
   }
-  const handlePurge = async (id: string) => {
-    await agentPoolApi.purge(id)
-    load()
-  }
+
+  const handleShutdown = (id: string) => runAction(id, 'shutdown', () => agentPoolApi.shutdown(id))
+  const handleSleep    = (id: string) => runAction(id, 'sleep',    () => agentPoolApi.sleep(id))
+  const handleWake     = (id: string) => runAction(id, 'wake',     () => agentPoolApi.wake(id))
+  const handlePurge    = (id: string) => runAction(id, 'purge',    () => agentPoolApi.purge(id))
 
   return (
     <div className="space-y-6">
@@ -408,6 +498,18 @@ export default function AgentPoolPage() {
           + Spawn Agent
         </button>
       </div>
+
+      {actionErr && (
+        <div className="parchment rounded-xl px-4 py-2 border-2 border-rose-300 bg-rose-50 text-rose-700 font-hand text-sm flex items-center justify-between gap-2">
+          <span>⚠ {actionErr}</span>
+          <button
+            onClick={() => setActionErr(null)}
+            className="text-xs font-marker px-2 py-0.5 rounded bg-rose-100 border border-rose-300 hover:bg-rose-200"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
 
       {instances.length > 0 && <PoolOverview instances={instances} />}
 
@@ -428,7 +530,15 @@ export default function AgentPoolPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {instances.map((inst) => (
-            <InstanceCard key={inst.id} inst={inst} onShutdown={handleShutdown} onPurge={handlePurge} />
+            <InstanceCard
+              key={inst.id}
+              inst={inst}
+              onShutdown={handleShutdown}
+              onSleep={handleSleep}
+              onWake={handleWake}
+              onPurge={handlePurge}
+              pendingAction={pendingAction}
+            />
           ))}
         </div>
       )}

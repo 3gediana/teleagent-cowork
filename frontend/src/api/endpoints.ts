@@ -264,7 +264,7 @@ export type PoolInstance = {
   project_id?: string
   port: number
   pid: number
-  status: 'starting' | 'ready' | 'crashed' | 'stopping' | 'stopped'
+  status: 'starting' | 'ready' | 'crashed' | 'stopping' | 'stopped' | 'dormant' | 'waking'
   started_at: string
   skills_injected?: string[]
   working_dir?: string
@@ -281,11 +281,18 @@ export type PoolInstance = {
   // observed. Both drive the "session health" panel on the card.
   archive_rotation?: number
   last_context_tokens?: number
+  // Dormancy lifecycle timestamps. LastActivityAt is the "is this
+  // agent asleep yet" signal the backend's detector keys on;
+  // DormantAt is set when the transition actually happens. Both
+  // omitted for an agent that's never gone through the cycle.
+  last_activity_at?: string
+  dormant_at?: string
 }
 
 export const agentPoolApi = {
   list: () =>
     api.get('/agentpool/list') as Promise<{ success: boolean; data: { instances: PoolInstance[] } }>,
+
   spawn: (payload: {
     project_id?: string
     role_hint?: string
@@ -294,8 +301,18 @@ export const agentPoolApi = {
     opencode_model_id?: string
   }) =>
     api.post('/agentpool/spawn', payload) as Promise<{ success: boolean; data: PoolInstance; error?: any }>,
+
   shutdown: (instanceId: string) =>
     api.post('/agentpool/shutdown', { instance_id: instanceId }) as Promise<{ success: boolean; data: any }>,
+
+  // Dormancy manual controls — mirror what the background detector
+  // does on idle-timeout. Human-gated on the server (IsHuman).
+  sleep: (instanceId: string) =>
+    api.post('/agentpool/sleep', { instance_id: instanceId }) as Promise<{ success: boolean; data: any; error?: any }>,
+
+  wake: (instanceId: string) =>
+    api.post('/agentpool/wake', { instance_id: instanceId }) as Promise<{ success: boolean; data: PoolInstance; error?: any }>,
+
   purge: (instanceId: string) =>
     api.post('/agentpool/purge', { instance_id: instanceId }) as Promise<{ success: boolean; data: any }>,
 }
@@ -303,6 +320,7 @@ export const agentPoolApi = {
 export const refineryApi = {
   run: (projectId: string, lookbackHours?: number) =>
     api.post('/refinery/run', { project_id: projectId, lookback_hours: lookbackHours }) as Promise<{ success: boolean; data: { run_id: string; status: string } }>,
+
   runs: (projectId: string, limit = 20) =>
     api.get('/refinery/runs', { params: { project_id: projectId, limit } }) as Promise<{ success: boolean; data: { runs: any[] } }>,
   artifacts: (projectId: string, kind?: string, status?: string, limit = 200) =>
