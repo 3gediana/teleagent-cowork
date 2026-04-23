@@ -5,8 +5,37 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agent"
+	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/service"
 )
+
+// allowedSubmitOutputTools enumerates the tool names /internal/agent/session/:id/output
+// accepts. The service layer (service.HandleToolCallResult) silently logs and drops
+// unknown names, which made the endpoint a quiet sink for typo'd or attacker-probe
+// payloads. Keep this list in sync with the switch in tool_handler.go —
+// "project_status" is handled inline in SubmitOutput itself.
+var allowedSubmitOutputTools = map[string]struct{}{
+	"project_status":       {},
+	"audit_output":         {},
+	"fix_output":           {},
+	"audit2_output":        {},
+	"create_task":          {},
+	"delete_task":          {},
+	"update_milestone":     {},
+	"propose_direction":    {},
+	"write_milestone":      {},
+	"assess_output":        {},
+	"approve_pr":           {},
+	"reject_pr":            {},
+	"switch_milestone":     {},
+	"create_policy":        {},
+	"delegate_to_maintain": {},
+	"chief_output":         {},
+	"evaluate_output":      {},
+	"merge_output":         {},
+	"biz_review_output":    {},
+	"analyze_output":       {},
+}
 
 type AgentHandler struct{}
 
@@ -134,7 +163,7 @@ func (h *AgentHandler) GetSession(c *gin.Context) {
 	sessionID := c.Param("session_id")
 	session := agent.DefaultManager.GetSession(sessionID)
 	if session == nil {
-		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Session not found"}})
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SESSION_NOT_FOUND", "message": "Session not found"}})
 		return
 	}
 
@@ -156,7 +185,7 @@ func (h *AgentHandler) GetPrompt(c *gin.Context) {
 	sessionID := c.Param("session_id")
 	session := agent.DefaultManager.GetSession(sessionID)
 	if session == nil {
-		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Session not found"}})
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SESSION_NOT_FOUND", "message": "Session not found"}})
 		return
 	}
 
@@ -185,7 +214,35 @@ func (h *AgentHandler) SubmitOutput(c *gin.Context) {
 	sessionID := c.Param("session_id")
 	session := agent.DefaultManager.GetSession(sessionID)
 	if session == nil {
-		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SYSTEM_ERROR", "message": "Session not found"}})
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "SESSION_NOT_FOUND", "message": "Session not found"}})
+		return
+	}
+
+	// Session-owner check. Before this, any authenticated caller could POST
+	// output for any session ID they could guess — driving the Fix Agent,
+	// merging PRs, etc. on behalf of another agent. The link from session
+	// back to its owning agent lives on Agent.SessionID (set when the session
+	// is dispatched). If the caller's agent row does not currently hold this
+	// session, reject.
+	//
+	// Exception: platform-internal sessions (native runner, Chief auto-loop)
+	// are not bound to any Agent row — their SessionID mapping sits in
+	// Agent.SessionID="" — but those sessions are also never submitted via
+	// HTTP because the native runner completes them in-process. If a future
+	// sidecar needs this path, it should register as an agent and claim the
+	// session the normal way.
+	callerID, _ := c.Get("agent_id")
+	callerAgentID, _ := callerID.(string)
+	if callerAgentID == "" {
+		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "UNAUTHORIZED", "message": "missing agent context"}})
+		return
+	}
+	var owner model.Agent
+	if err := model.DB.Where("id = ? AND session_id = ?", callerAgentID, sessionID).First(&owner).Error; err != nil {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{
+			"code":    "SESSION_NOT_YOURS",
+			"message": "this session is not owned by the calling agent",
+		}})
 		return
 	}
 
@@ -193,6 +250,23 @@ func (h *AgentHandler) SubmitOutput(c *gin.Context) {
 	if err := c.ShouldBindJSON(&output); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
 		return
+	}
+
+	// Tool whitelist. The server-side switch in service.HandleToolCallResult
+	// silently drops unknown tool names (log only), which made the endpoint
+	// a quiet sink for typos and probes. Reject up front with a machine-
+	// readable code so clients notice their mistake instead of seeing a
+	// success response with no effect. An empty tool name is allowed — it
+	// represents a plain text completion with no tool dispatch.
+	if toolName, _ := output["tool"].(string); toolName != "" {
+		if _, ok := allowedSubmitOutputTools[toolName]; !ok {
+			c.JSON(400, gin.H{"success": false, "error": gin.H{
+				"code":    "UNKNOWN_TOOL",
+				"message": "tool not recognised by platform",
+				"tool":    toolName,
+			}})
+			return
+		}
 	}
 
 	// Handle project_status tool: return project snapshot instead of just storing output

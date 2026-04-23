@@ -244,7 +244,15 @@ func main() {
 		auth.POST("/agentpool/purge", agentPoolHandler.Purge)
 	}
 
-	internal := v1.Group("/internal")
+	// /api/v1/internal/* was previously bound directly on `v1` with no
+	// middleware, which meant every agent-session, git and project-import
+	// endpoint was world-callable. Nothing in this repo (MCP client,
+	// native runner, agentpool) actually goes over HTTP for these — they
+	// are Go-level calls — so gating the whole group with AuthMiddleware
+	// closes the hole without breaking callers. If a genuinely unauth'd
+	// sidecar is ever added, it should get its own token, not a blanket
+	// bypass.
+	internal := v1.Group("/internal", middleware.AuthMiddleware())
 	{
 		internal.POST("/agent/audit_output", agentHandler.AuditOutput)
 		internal.POST("/agent/fix_output", agentHandler.FixOutput)
