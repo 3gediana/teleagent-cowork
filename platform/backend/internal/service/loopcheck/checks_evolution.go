@@ -48,15 +48,28 @@ func checkFeedbackToExperience(opts Options, since time.Time) *Check {
 		Select("MAX(created_at)").
 		Row().Scan(&last)
 
+	// The "starved" threshold scales with the query window so that a
+	// 1-day lookback can legitimately see only a handful of writes
+	// without raising a stale flag. Rough intent: ~1 write per day
+	// as the floor, capped at 10 so a 30-day window doesn't demand
+	// 30+ writes before declaring the loop healthy.
+	minHealthy := int64(opts.WindowDays)
+	switch {
+	case minHealthy < 1:
+		minHealthy = 1
+	case minHealthy > 10:
+		minHealthy = 10
+	}
+
 	status := StatusHealthy
 	var summary string
 	switch {
 	case total == 0:
 		status = StatusUnused
 		summary = fmt.Sprintf("No Experience writes in %dd — feedback/output tools are either unused or the write path is broken.", opts.WindowDays)
-	case total < 5:
+	case total < minHealthy:
 		status = StatusStale
-		summary = fmt.Sprintf("Only %d writes in %dd — data starved.", total, opts.WindowDays)
+		summary = fmt.Sprintf("Only %d writes in %dd (expected ≥%d) — data starved.", total, opts.WindowDays, minHealthy)
 	default:
 		summary = fmt.Sprintf("%d Experience writes in %dd across %d source types.", total, opts.WindowDays, len(bySource))
 	}
@@ -69,6 +82,7 @@ func checkFeedbackToExperience(opts Options, since time.Time) *Check {
 			"window_total":      total,
 			"by_source_type":    bySource,
 			"source_type_count": len(bySource),
+			"min_healthy":       minHealthy,
 		},
 		LastActivity: timePtr(last),
 	}

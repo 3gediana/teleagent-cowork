@@ -206,6 +206,12 @@ func checkChiefAutoApproval(opts Options, since time.Time) *Check {
 	}
 	lastQ.Select("MAX(created_at)").Row().Scan(&lastChief)
 
+	// Sample-size floor below which a zero-approval reading isn't
+	// meaningful. Chief sessions are relatively frequent when the
+	// platform is busy, so asking for at least 5 in window before
+	// calling "0 approvals" a problem is conservative.
+	const minChiefSessionsForStale = int64(5)
+
 	status := StatusHealthy
 	var summary string
 	switch {
@@ -215,9 +221,17 @@ func checkChiefAutoApproval(opts Options, since time.Time) *Check {
 	case autoModeProjects == 0:
 		status = StatusHealthy
 		summary = fmt.Sprintf("Chief ran %d times in %dd (all manual-mode chats; no AutoMode projects).", chiefSessionsInWindow, opts.WindowDays)
+	case autoModeProjects > 0 && chiefApprovals == 0 && chiefSessionsInWindow < minChiefSessionsForStale:
+		// Too few Chief sessions to tell whether the approval path
+		// is broken. Don't raise a stale flag yet — the natural
+		// next Chief session will settle it.
+		status = StatusHealthy
+		summary = fmt.Sprintf("%d AutoMode project(s); %d Chief session(s) in %dd, no approvals yet (small sample, needs ≥%d to assess).",
+			autoModeProjects, chiefSessionsInWindow, opts.WindowDays, minChiefSessionsForStale)
 	case autoModeProjects > 0 && chiefApprovals == 0:
 		status = StatusStale
-		summary = fmt.Sprintf("%d AutoMode project(s) but zero Chief-driven approvals — either no PRs reached approval, or the auto-approval wiring is regressing.", autoModeProjects)
+		summary = fmt.Sprintf("%d AutoMode project(s) with %d Chief session(s) in %dd but zero approvals — check auto-approval wiring.",
+			autoModeProjects, chiefSessionsInWindow, opts.WindowDays)
 	default:
 		summary = fmt.Sprintf("%d AutoMode project(s); Chief did %d approvals in %dd (of %d total Chief sessions).", autoModeProjects, chiefApprovals, opts.WindowDays, chiefSessionsInWindow)
 	}
