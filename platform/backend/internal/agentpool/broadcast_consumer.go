@@ -224,6 +224,23 @@ func (m *Manager) consumeAgent(ctx context.Context, agentID, sessionID string, p
 			log.Printf("[Pool] inject %s to %s (%s) failed: %v", e.Type, agentID, currentSession, err)
 		} else {
 			log.Printf("[Pool] injected %s into %s (session=%s)", e.Type, agentID, currentSession)
+			m.touchActivity(agentID)
+		}
+	}
+}
+
+// touchActivity stamps Instance.LastActivityAt = now for whichever
+// instance hosts the given agent id. No-op if not found (agent was
+// shut down between snapshot and this call). Exported implicitly
+// via the context watcher which calls through the same helper.
+func (m *Manager) touchActivity(agentID string) {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sp := range m.instances {
+		if sp.inst.AgentID == agentID {
+			sp.inst.LastActivityAt = now
+			return
 		}
 	}
 }

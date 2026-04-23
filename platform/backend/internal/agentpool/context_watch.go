@@ -130,8 +130,20 @@ func (m *Manager) checkAndMaybeArchive(ctx context.Context, sp *subprocess) {
 
 	// Cache the reading so /agentpool/list can render a gauge
 	// without re-hitting opencode from the browser.
+	//
+	// Token *growth* is also our most reliable signal that the agent
+	// did something since the last tick — the LLM having replied
+	// shows up here before it hits any platform-side state. Stamp
+	// LastActivityAt on that edge so the dormancy detector doesn't
+	// reap an agent who's mid-thought. A flat reading is fine to
+	// keep the previous stamp; a decrease (won't happen in practice
+	// but defensively handled) is also a no-op.
 	m.mu.Lock()
+	prev := sp.inst.LastContextTokens
 	sp.inst.LastContextTokens = tokens
+	if tokens > prev {
+		sp.inst.LastActivityAt = time.Now()
+	}
 	m.mu.Unlock()
 
 	if tokens < m.cfg.ArchiveThresholdTokens {

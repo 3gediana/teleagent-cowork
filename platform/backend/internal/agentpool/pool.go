@@ -77,6 +77,13 @@ type Store interface {
 	CreateAgent(a *model.Agent) error
 	UpdateAgent(id string, updates map[string]any) error
 	DeleteAgent(id string) error
+	// GetAgent fetches the full Agent row. Used by Wake to pull
+	// the access_key back for the re-spawned subprocess (agents
+	// keep their identity across dormancy). Returns (nil, nil) on
+	// a miss so callers can branch without string-matching error
+	// text — every caller so far treats "not found" as a benign
+	// "instance was purged mid-flight".
+	GetAgent(id string) (*model.Agent, error)
 }
 
 // gormStore is the production implementation. Simply delegates to
@@ -92,6 +99,24 @@ func (gormStore) UpdateAgent(id string, updates map[string]any) error {
 }
 func (gormStore) DeleteAgent(id string) error {
 	return model.DB.Delete(&model.Agent{}, "id = ?", id).Error
+}
+func (gormStore) GetAgent(id string) (*model.Agent, error) {
+	var a model.Agent
+	if err := model.DB.First(&a, "id = ?", id).Error; err != nil {
+		// "not found" is not an infrastructure error; surface
+		// (nil, nil) and let the caller decide what to do.
+		if isRecordNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+// isRecordNotFound keeps gorm out of the interface boundary —
+// dormancy.go only sees (nil, nil) for missing rows.
+func isRecordNotFound(err error) bool {
+	return err != nil && err.Error() == "record not found"
 }
 
 // DefaultStore is the zero-dependency production store — what
@@ -146,6 +171,23 @@ type Instance struct {
 	// re-probing opencode from the browser. Zero until the first
 	// watch cycle.
 	LastContextTokens int `json:"last_context_tokens"`
+
+	// LastActivityAt is the wall-clock time of the last time this
+	// agent *did* something — broadcast injection, context-probe
+	// reading new tokens, or manual operator interaction. Drives
+	// the idle→dormant transition (see internal/agentpool/
+	// dormancy.go). Zero value means "never active yet", which is
+	// treated as "just spawned" — the spawn handler stamps it on
+	// ready transition so a fresh agent isn't immediately eligible
+	// for dormancy.
+	LastActivityAt time.Time `json:"last_activity_at,omitempty"`
+
+	// DormantAt is the wall-clock time the agent most recently
+	// entered the dormant state. Useful for the dashboard's "asleep
+	// for 12m" copy and for debugging "why did this agent not pick
+	// up the broadcast I just sent" (the broadcast consumer skips
+	// dormant instances — they have to wake first).
+	DormantAt time.Time `json:"dormant_at,omitempty"`
 }
 
 // ManagerConfig is the runtime knobs. Zero values are sensible, but
@@ -205,6 +247,22 @@ type ManagerConfig struct {
 	// below opencode's own 80% auto-compact line so we always
 	// archive *before* opencode silently summarises the transcript.
 	ArchiveThresholdTokens int
+
+	// IdleTimeout is how long a ready agent must go without any
+	// inject / probe / operator activity before the dormancy
+	// detector tears its opencode serve down. Session id is
+	// preserved on the Instance so wake can rebind; a "stopping
+	// point" archive session is created just before termination so
+	// the transcript up to dormancy is permanently addressable.
+	// Zero disables the detector entirely. Default 30m.
+	IdleTimeout time.Duration
+
+	// DormancyCheckInterval is how often the detector scans for
+	// eligible idle instances. Much larger than the activity
+	// resolution we actually need (agents sit in a conversation
+	// for minutes at a time). Zero defaults to IdleTimeout/6 but
+	// capped at 5m.
+	DormancyCheckInterval time.Duration
 }
 
 // ApplyDefaults fills in zeroes with sensible runtime values. Kept
@@ -232,9 +290,19 @@ func (c *ManagerConfig) ApplyDefaults() {
 	if c.ArchiveThresholdTokens == 0 {
 		c.ArchiveThresholdTokens = 150_000
 	}
-	// ContextWatchInterval=0 is a legitimate "off" signal; don't
-	// overwrite it here. The watcher start-up path treats zero as
-	// "don't run" explicitly.
+	if c.IdleTimeout > 0 && c.DormancyCheckInterval == 0 {
+		// Scale with IdleTimeout so shorter timeouts still get
+		// snappy detection, capped at 5m so an operator-set 24h
+		// timeout doesn't end up with a 4h probe lag.
+		c.DormancyCheckInterval = c.IdleTimeout / 6
+		if c.DormancyCheckInterval > 5*time.Minute {
+			c.DormancyCheckInterval = 5 * time.Minute
+		}
+	}
+	// ContextWatchInterval=0 and IdleTimeout=0 are both legitimate
+	// "off" signals; don't overwrite them. Respective Start* paths
+	// treat zero as "don't run" explicitly. main.go is where the
+	// operator's default 30m lives.
 }
 
 // SessionCreator abstracts "build a fresh opencode session on the
@@ -311,6 +379,11 @@ type Manager struct {
 	// Start*() method is called so a Manager built without any
 	// background goroutines stays purely synchronous (tests).
 	broadcastStop chan struct{}
+
+	// dormancyStop gates the idle→dormant detector goroutine
+	// (StartDormancyDetector). Same story as the other two: nil
+	// until started, closed on shutdown / replaced on re-start.
+	dormancyStop chan struct{}
 }
 
 // NewManager builds a Manager with the given config. Spawner may be
@@ -567,6 +640,10 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 	m.mu.Lock()
 	sp.inst.Status = "ready"
 	sp.inst.OpencodeSessionID = sessionID
+	// Stamp activity on ready transition so a freshly-spawned agent
+	// doesn't immediately qualify as idle. Dormancy detector checks
+	// Since(LastActivityAt) > IdleTimeout.
+	sp.inst.LastActivityAt = time.Now()
 	m.mu.Unlock()
 
 	// 9. Background watcher — flips status to "crashed" if the
@@ -578,22 +655,44 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 
 // watch fires when the subprocess exits. The goroutine runs for the
 // lifetime of the subprocess; clean shutdown paths also route through
-// here via stopChan.
+// here via stopChan. Two subtleties: (a) the watch gets launched once
+// per Spawn AND once per Wake so there can be overlapping goroutines
+// on the same subprocess struct across a dormancy/wake transition;
+// (b) dormancy nils out sp.handle when it tears down the subprocess,
+// so a racy launch that reads sp.handle after the nil-out would
+// otherwise panic. Snapshot the handle under the lock and bail if
+// it's already gone — the previous watcher will have done our job.
 func (m *Manager) watch(sp *subprocess) {
-	exitCh := sp.handle.Wait()
+	m.mu.Lock()
+	handle := sp.handle
+	m.mu.Unlock()
+	if handle == nil {
+		return
+	}
+	exitCh := handle.Wait()
 	select {
 	case code := <-exitCh:
 		m.mu.Lock()
-		// If the instance is already marked "stopped"/"stopping", a
-		// planned shutdown ate the exit — nothing to report.
-		if sp.inst.Status != "stopping" && sp.inst.Status != "stopped" {
+		// Any "we planned this exit" status (stopped/stopping,
+		// dormant/waking) must NOT be overwritten — the exit is
+		// the teardown side of a graceful transition that a
+		// different goroutine already accounted for. Only genuine
+		// surprise exits (ready → dead) get the crashed stamp.
+		s := sp.inst.Status
+		planned := s == "stopping" || s == "stopped" || s == "dormant" || s == "waking"
+		if !planned {
 			sp.inst.Status = "crashed"
 			sp.inst.LastError = fmt.Sprintf("exited with code %d", code)
 			log.Printf("[Pool] instance %s crashed: %s", sp.inst.ID, sp.inst.LastError)
 		}
 		m.mu.Unlock()
-		// Mark the agent offline so task queue / dashboard reflect.
-		_ = m.store.UpdateAgent(sp.inst.AgentID, map[string]any{"status": "offline"})
+		// Agent DB row: only push offline if this was a crash.
+		// Dormancy / planned shutdown already updated the row in
+		// their own code paths and re-updating here would clobber
+		// whatever state they set.
+		if !planned {
+			_ = m.store.UpdateAgent(sp.inst.AgentID, map[string]any{"status": "offline"})
+		}
 	case <-sp.stopChan:
 		// Explicit shutdown path handled elsewhere.
 	}
@@ -689,6 +788,7 @@ func (m *Manager) Purge(id string) error {
 func (m *Manager) ShutdownAll() {
 	m.stopContextWatcher()
 	m.StopBroadcastConsumer()
+	m.StopDormancyDetector()
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.instances))
 	for id := range m.instances {

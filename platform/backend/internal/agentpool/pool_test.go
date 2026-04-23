@@ -55,6 +55,16 @@ func (s *memStore) DeleteAgent(id string) error {
 	delete(s.agents, id)
 	return nil
 }
+func (s *memStore) GetAgent(id string) (*model.Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.agents[id]
+	if !ok {
+		return nil, nil
+	}
+	cp := *a
+	return &cp, nil
+}
 func (s *memStore) get(id string) (*model.Agent, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -105,6 +105,69 @@ func (h *AgentPoolHandler) Shutdown(c *gin.Context) {
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"instance_id": req.InstanceID, "status": "stopped"}})
 }
 
+// Sleep puts a ready instance into dormancy manually. Mirrors what
+// the background detector does on idle-timeout, just bypasses the
+// clock. Body: {instance_id}.
+func (h *AgentPoolHandler) Sleep(c *gin.Context) {
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "agent pool is human-controlled"}})
+		return
+	}
+	m := agentpool.GetDefault()
+	if m == nil {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{"code": "POOL_NOT_READY", "message": "agent pool not initialised"}})
+		return
+	}
+	var req struct {
+		InstanceID string `json:"instance_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+	// Cap at 30s so a hung archive-session creation doesn't block
+	// the dashboard indefinitely. enterDormancy's inner archive
+	// call also has its own 5s timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := m.EnterDormancy(ctx, req.InstanceID, "manual"); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SLEEP_FAILED", "message": err.Error()}})
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"instance_id": req.InstanceID, "status": "dormant"}})
+}
+
+// Wake revives a dormant instance: re-spawn opencode, create a
+// fresh session, flip status back to ready. Body: {instance_id}.
+func (h *AgentPoolHandler) Wake(c *gin.Context) {
+	if !callerIsHuman(c) {
+		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "agent pool is human-controlled"}})
+		return
+	}
+	m := agentpool.GetDefault()
+	if m == nil {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{"code": "POOL_NOT_READY", "message": "agent pool not initialised"}})
+		return
+	}
+	var req struct {
+		InstanceID string `json:"instance_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
+		return
+	}
+	// 60s cap like Spawn — wake does roughly the same amount of
+	// work (prepare .opencode, spawn, health check, create session).
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	inst, err := m.Wake(ctx, req.InstanceID)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "WAKE_FAILED", "message": err.Error()}})
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": inst})
+}
+
 // Purge drops a stopped / crashed instance from the pool (removes
 // the zombie Agent row the dashboard still shows).
 func (h *AgentPoolHandler) Purge(c *gin.Context) {

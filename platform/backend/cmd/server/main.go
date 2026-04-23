@@ -136,6 +136,7 @@ func main() {
 		Command:              poolCmd,
 		Args:                 poolArgs,
 		ContextWatchInterval: 30 * time.Second, // poll cadence — see ManagerConfig doc
+		IdleTimeout:          30 * time.Minute, // dormancy trigger; 0 would disable the detector
 		// ArchiveThresholdTokens omitted = ApplyDefaults sets 150_000.
 	}, nil).
 		WithSessionCreator(poolOC).
@@ -158,7 +159,8 @@ func main() {
 	// into the agent's opencode session. See agentpool/broadcast_consumer.go.
 	poolManager.StartContextWatcher(context.Background())
 	poolManager.StartBroadcastConsumer(context.Background(), 0)
-	log.Printf("[Pool] broadcast consumer started (watching Redis a3c:directed:*)")
+	poolManager.StartDormancyDetector(context.Background())
+	log.Printf("[Pool] broadcast consumer + dormancy detector started")
 
 	// Unauthenticated bootstrap endpoints only. Anything that mutates
 	// or reads project state now lives in the auth group below — previously
@@ -304,6 +306,8 @@ func main() {
 		auth.GET("/agentpool/list", agentPoolHandler.List)
 		auth.POST("/agentpool/spawn", agentPoolHandler.Spawn)
 		auth.POST("/agentpool/shutdown", agentPoolHandler.Shutdown)
+		auth.POST("/agentpool/sleep", agentPoolHandler.Sleep)
+		auth.POST("/agentpool/wake", agentPoolHandler.Wake)
 		auth.POST("/agentpool/purge", agentPoolHandler.Purge)
 	}
 
