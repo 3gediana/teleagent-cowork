@@ -45,6 +45,7 @@ func main() {
 		asJSON     = flag.Bool("json", false, "Emit JSON instead of a terminal report")
 		configPath = flag.String("config", "", "Optional config file override; defaults to configs/config.yaml")
 		useSQLite  = flag.Bool("sqlite", false, "Skip MySQL and run against an empty in-memory SQLite (demo/smoke mode; every check will report 'unused')")
+		dbName     = flag.String("dbname", "", "Override database.dbname from config (useful for running against e.g. a3c_live instead of a3c)")
 	)
 	flag.Parse()
 
@@ -54,6 +55,9 @@ func main() {
 		}
 	} else {
 		cfg := config.Load(*configPath)
+		if *dbName != "" {
+			cfg.Database.DBName = *dbName
+		}
 		if err := model.InitDB(&cfg.Database); err != nil {
 			log.Fatalf("database init failed: %v\n\nTip: pass --sqlite to run against an empty in-memory DB without MySQL.", err)
 		}
