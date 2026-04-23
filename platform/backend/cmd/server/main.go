@@ -103,16 +103,20 @@ func main() {
 	}, nil)
 	agentpool.SetDefault(poolManager)
 
+	// Unauthenticated bootstrap endpoints only. Anything that mutates
+	// or reads project state now lives in the auth group below — previously
+	// /project/create, /project/:id and /project/list were open which let
+	// any unauthenticated caller enumerate and create projects.
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
 	v1.POST("/agent/register", authHandler.Register)
 
-	v1.POST("/project/create", projectHandler.Create)
-	v1.GET("/project/:id", projectHandler.Get)
-	v1.GET("/project/list", projectHandler.List)
-
 	auth := v1.Group("", middleware.AuthMiddleware())
 	{
+		auth.POST("/project/create", projectHandler.Create)
+		auth.GET("/project/list", projectHandler.List)
+		auth.GET("/project/:id", projectHandler.Get)
+
 		auth.POST("/auth/heartbeat", authHandler.Heartbeat)
 		auth.POST("/auth/select-project", authHandler.SelectProject)
 		auth.POST("/task/create", taskHandler.Create)

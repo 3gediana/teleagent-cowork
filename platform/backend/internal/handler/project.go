@@ -31,12 +31,20 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// agent_id is set by AuthMiddleware once this route moved under the
+	// auth group. Kept as empty string if somehow missing rather than
+	// returning 500 — the record just loses attribution but the caller
+	// still gets their project. The middleware is the real gate.
+	creatorID, _ := c.Get("agent_id")
+	createdBy, _ := creatorID.(string)
+
 	project := model.Project{
 		ID:          model.GenerateID("proj"),
 		Name:        req.Name,
 		Description: req.Description,
 		GithubRepo:  req.GithubRepo,
 		Status:      "initializing",
+		CreatedBy:   createdBy,
 	}
 
 	if err := model.DB.Create(&project).Error; err != nil {

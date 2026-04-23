@@ -25,6 +25,13 @@ type Project struct {
 	GithubRepo  string     `gorm:"size:512" json:"github_repo"`
 	Status      string     `gorm:"size:20;default:'initializing'" json:"status"` // initializing/ready/idle
 	AutoMode    bool       `gorm:"default:true" json:"auto_mode"`                // true=auto (blocks for audit), false=manual (requires human confirm before audit)
+	// CreatedBy is the agent.id of the caller that hit /project/create.
+	// Populated only for projects created after the auth tightening in
+	// PR "auth: guard /project/* + record creator"; pre-existing rows
+	// keep an empty string. Used by the dashboard for "my projects"
+	// filters and by audit trails — NOT an authorization check (any
+	// authenticated agent can still read any project).
+	CreatedBy   string     `gorm:"size:64;index" json:"created_by"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
