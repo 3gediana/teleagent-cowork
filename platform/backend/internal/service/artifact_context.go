@@ -48,9 +48,27 @@ import (
 // (Cormack, Clarke & Büttcher 2009); it balances "rank-1 gets a big
 // bump" against "rank-50 still contributes something". Phase 2.5's L1
 // auto-tuning will learn per-project values; for now a single
-// hardcoded value is the right default — changing it after we have
-// training data is trivial.
-const rrfK = 60.0
+// default is the right choice — changing it after we have training
+// data is trivial.
+//
+// Declared as a var (not const) so benchmarks and Phase 2.5 tuning
+// tools can override it via SetRRFK without a rebuild. Production
+// start-up leaves it at 60; evobench sweeps 30/60/90 to characterise
+// the signal-weight tradeoff.
+var rrfK = 60.0
+
+// SetRRFK overrides the RRF smoothing constant. Intended for
+// benchmarks and L1 auto-tuning; not called from normal request
+// paths. Values ≤ 0 are rejected (would divide by zero downstream).
+func SetRRFK(k float64) {
+	if k > 0 {
+		rrfK = k
+	}
+}
+
+// RRFK returns the currently-active RRF constant. Useful for tests
+// and tooling that want to restore the default after a sweep.
+func RRFK() float64 { return rrfK }
 
 // maxArtifactsPerSourceCluster caps how many artifacts derived from
 // the same root source (session / episode) can survive into the
@@ -162,6 +180,31 @@ type InjectedArtifact struct {
 	Artifact model.KnowledgeArtifact
 	Reason   string  // e.g. "semantic=0.81;tag=bugfix"
 	Score    float64 // final weighted score
+
+	// Signals exposes the four raw component scores and their dense
+	// ranks within this call. Populated by SelectArtifactsForInjection
+	// so downstream tools (L1 weight tuner, evobench trainer) can
+	// train on features without re-running the scoring pipeline.
+	// All fields are zero for historical callers that don't observe
+	// them.
+	Signals RRFSignals
+}
+
+// RRFSignals captures the four component scores and their dense
+// ranks produced by the selector. `Rank*` fields are 1-indexed.
+// Exposed publicly because the L1 auto-tuning pipeline needs these
+// as training features; internal ranking code should prefer the
+// score fields.
+type RRFSignals struct {
+	Semantic   float64
+	Tag        float64
+	Importance float64
+	Recency    float64
+
+	RankSemantic   int
+	RankTag        int
+	RankImportance int
+	RankRecency    int
 }
 
 // SelectArtifactsForInjection is the single entry point. Returns up to
@@ -249,6 +292,16 @@ func SelectArtifactsForInjection(ctx context.Context, q ArtifactQuery) []Injecte
 			Artifact: a,
 			Reason:   formatReason(rawSem[i], rawTag[i], rawImp[i], rawRec[i]),
 			Score:    rrfScore,
+			Signals: RRFSignals{
+				Semantic:       rawSem[i],
+				Tag:            rawTag[i],
+				Importance:     rawImp[i],
+				Recency:        rawRec[i],
+				RankSemantic:   semRanks[i],
+				RankTag:        tagRanks[i],
+				RankImportance: impRanks[i],
+				RankRecency:    recRanks[i],
+			},
 		})
 	}
 

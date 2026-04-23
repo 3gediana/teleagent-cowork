@@ -52,6 +52,30 @@ var (
 	flagRounds    = envInt("EVOBENCH_ROUNDS", 30)
 	flagArtifacts = envInt("EVOBENCH_ARTIFACTS", 60)
 	flagSeed      = envInt("EVOBENCH_SEED", 0) // 0 = use current time
+
+	// RRF smoothing constant. 0 = keep service default (60).
+	flagRRFK = envInt("EVOBENCH_RRFK", 0)
+
+	// Judge provider: empty disables the LLM judge entirely.
+	// Set to "minimax", "openai", "deepseek", or "anthropic".
+	flagJudge = envStr("EVOBENCH_JUDGE", "")
+
+	// How many rounds to ask the LLM to judge. Every round is expensive
+	// (one API call + latency); default to a small fraction of rounds.
+	flagJudgeRounds = envInt("EVOBENCH_JUDGE_ROUNDS", 0)
+
+	// How many top-ranked evobench artifacts to present to the judge.
+	flagJudgeTopN = envInt("EVOBENCH_JUDGE_TOPN", 5)
+
+	// How many judge requests to run in parallel. Reasoning models
+	// take 20-40s per call; 16 concurrent workers turn ~12 minutes
+	// of sequential calls into ~30-60s. Most providers tolerate
+	// this easily; if you hit 429s, lower it.
+	flagJudgeWorkers = envInt("EVOBENCH_JUDGE_WORKERS", 16)
+
+	// Train the per-signal RRF weights on the collected feedback
+	// + judge pairs. Set to 0 to disable.
+	flagTrain = envInt("EVOBENCH_TRAIN", 1)
 )
 
 func envInt(key string, def int) int {
@@ -64,6 +88,13 @@ func envInt(key string, def int) int {
 	return n
 }
 
+func envStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 // -- main -----------------------------------------------------------------
 
 func main() {
@@ -73,10 +104,29 @@ func main() {
 	}
 	rng := rand.New(rand.NewSource(seed))
 
-	fmt.Printf("╔══════════════════════════════════════════════╗\n")
+	fmt.Printf("╔════════════════════════════════════════════╗\n")
 	fmt.Printf("║  evobench — self-evolution synthetic bench    ║\n")
-	fmt.Printf("╚══════════════════════════════════════════════╝\n")
-	fmt.Printf("rounds=%d  artifacts=%d  seed=%d\n\n", flagRounds, flagArtifacts, seed)
+	fmt.Printf("╚════════════════════════════════════════════╝\n")
+	fmt.Printf("rounds=%d  artifacts=%d  seed=%d  rrfK=%.0f\n",
+		flagRounds, flagArtifacts, seed, service.RRFK())
+
+	if flagRRFK > 0 {
+		service.SetRRFK(float64(flagRRFK))
+		fmt.Printf("(rrfK overridden to %d)\n", flagRRFK)
+	}
+
+	// Judge setup
+	var judge JudgeConfig
+	if flagJudge != "" {
+		judge = LoadJudgeConfig(flagJudge)
+		if judge.Enabled {
+			fmt.Printf("LLM judge: %s / %s (up to %d rounds, top-%d)\n",
+				judge.Provider, judge.Model, flagJudgeRounds, flagJudgeTopN)
+		} else {
+			fmt.Printf("LLM judge requested (%s) but no API key in config.yaml; disabled\n", flagJudge)
+		}
+	}
+	fmt.Println()
 
 	initDB()
 	defer resetDB()
@@ -85,11 +135,54 @@ func main() {
 	artifacts := seedPool(rng, flagArtifacts)
 	fmt.Printf("Seeded %d artifacts across %d clusters\n\n", len(artifacts), countClusters(artifacts))
 
-	// Phase 2: run simulation rounds
-	stats := runSimulation(rng, flagRounds)
+	// Phase 2: run simulation rounds (collect feedback + optional judge labels)
+	dataset := &TrainingDataset{}
+	eval := &EvalSet{}
+	stats := runSimulation(rng, flagRounds, judge, dataset, eval)
 
-	// Phase 3: print report
+	// Phase 3: print retrieval / feedback report
 	printReport(stats)
+
+	// Phase 4: train per-signal RRF weights on the collected data
+	if flagTrain > 0 && len(dataset.Pairs) >= 8 {
+		fmt.Println()
+		fmt.Println("┌─────────────────────────────────────────────┐")
+		fmt.Println("│  WEIGHT TRAINING (in-process)               │")
+		fmt.Println("├─────────────────────────────────────────────┤")
+		auditPairs, judgePairs := countPairs(dataset)
+		fmt.Printf("│  Pairs collected: %d audit + %d judge        │\n", auditPairs, judgePairs)
+
+		weights, lossHist := TrainWeights(dataset, rng)
+		if len(lossHist) >= 2 {
+			fmt.Printf("│  Loss: %.4f → %.4f over %d epochs       │\n",
+				lossHist[0], lossHist[len(lossHist)-1], len(lossHist))
+		}
+		fmt.Printf("│  Default weights: %s │\n", DefaultWeights())
+		fmt.Printf("│  Learned weights: %s │\n", weights)
+
+		// Evaluate: on the held-out eval set, does reranking with the
+		// learned weights change top-1 agreement with the judge?
+		if eval.Size() > 0 {
+			base, learned := eval.CompareAgreement(weights)
+			fmt.Println("├─────────────────────────────────────────────┤")
+			fmt.Println("│  JUDGE-VS-WEIGHTS A/B (eval set)             │")
+			fmt.Println("├─────────────────────────────────────────────┤")
+			fmt.Printf("│  Fixed RRF top-1 match judge: %d / %d (%4.1f%%) │\n",
+				base.Agree, base.Total, pct(base.Agree, base.Total))
+			fmt.Printf("│  Learned RRF top-1 match judge: %d / %d (%4.1f%%) │\n",
+				learned.Agree, learned.Total, pct(learned.Agree, learned.Total))
+			delta := learned.Agree - base.Agree
+			switch {
+			case delta > 0:
+				fmt.Printf("│  Δ = +%d (learned ↑)                             │\n", delta)
+			case delta < 0:
+				fmt.Printf("│  Δ = %d (learned ↓ — beware overfitting)         │\n", delta)
+			default:
+				fmt.Printf("│  Δ = 0 (no change)                              │\n")
+			}
+		}
+		fmt.Println("└─────────────────────────────────────────────┘")
+	}
 }
 
 // -- DB setup -------------------------------------------------------------
@@ -130,8 +223,22 @@ type artifactMeta struct {
 func seedPool(rng *rand.Rand, n int) []artifactMeta {
 	kinds := []string{"pattern", "anti_pattern", "tool_recipe"}
 	clusters := []string{"ep_A", "ep_B", "ep_C", "ep_D", "ep_E", "ep_F", "ep_G", "ep_H"}
-	topics := 5 // 5 orthogonal semantic directions
+	topics := 5
 	tagLabels := []string{"bugfix", "refactor", "feature", "test", "docs"}
+
+	// Heterogeneous verbs/subjects so the LLM judge can actually
+	// differentiate candidates in a meaningful way. A judge faced
+	// with 5 identical summaries has no signal to learn from.
+	verbs := []string{"validate", "refactor", "migrate", "optimize", "debug", "document", "instrument"}
+	subjects := []string{
+		"auth token renewal", "order settlement", "user permissions",
+		"cache invalidation", "retry backoff policy", "schema migration",
+		"metrics export", "error taxonomy", "session cleanup",
+	}
+	paths := []string{
+		"src/auth", "services/billing", "internal/cache",
+		"handlers/user", "storage/migrations", "observability/metrics",
+	}
 
 	metas := make([]artifactMeta, n)
 	for i := 0; i < n; i++ {
@@ -139,14 +246,29 @@ func seedPool(rng *rand.Rand, n int) []artifactMeta {
 		kind := kinds[rng.Intn(len(kinds))]
 		cluster := clusters[rng.Intn(len(clusters))]
 		topic := rng.Intn(topics)
-		// Pre-existing success/failure to test importance signal
-		succ := rng.Intn(6)
-		fail := rng.Intn(4)
+
+		// Deliberately skewed importance: 20% "gold" (high success),
+		// 15% "poison" (high failure), 65% neutral. This is the
+		// signal tension we need for the trainer to learn a useful
+		// weight vector — without it, importance correlates with
+		// nothing and its weight will stay flat.
+		var succ, fail int
+		quality := rng.Float64()
+		switch {
+		case quality < 0.20: // gold
+			succ = 10 + rng.Intn(8)
+			fail = rng.Intn(2)
+		case quality < 0.35: // poison
+			succ = rng.Intn(2)
+			fail = 5 + rng.Intn(5)
+		default:
+			succ = rng.Intn(4)
+			fail = rng.Intn(3)
+		}
 
 		vec := topicVec(topic, rng)
 		sourceEvents := fmt.Sprintf(`["%s","%s_evt"]`, cluster, id)
 
-		// 20% of artifacts get no embedding (simulates sidecar down)
 		noEmbed := rng.Float64() < 0.20
 		var embedding []byte
 		var embDim int
@@ -155,16 +277,33 @@ func seedPool(rng *rand.Rand, n int) []artifactMeta {
 			embDim = len(vec)
 		}
 
-		// Embed tag label in payload so tagScore can pick it up
 		tag := tagLabels[rng.Intn(len(tagLabels))]
-		payload := fmt.Sprintf(`{"task_tag":"%s","topic":%d}`, tag, topic)
+		verb := verbs[rng.Intn(len(verbs))]
+		subject := subjects[rng.Intn(len(subjects))]
+		path := paths[rng.Intn(len(paths))]
+
+		// Realistic-ish summary — the judge sees this and can actually
+		// pick based on semantic content, not just "topic 3" labels.
+		summary := fmt.Sprintf("%s %s in %s (tag=%s, topic=%d)",
+			verb, subject, path, tag, topic)
+
+		// Bias recency: some artifacts are fresh (last 3 days), some
+		// old (60+ days). Gives the recency signal real variance.
+		var ageDays int
+		if rng.Float64() < 0.3 {
+			ageDays = rng.Intn(3)
+		} else {
+			ageDays = 20 + rng.Intn(60)
+		}
+
+		payload := fmt.Sprintf(`{"task_tag":"%s","topic":%d,"path":"%s"}`, tag, topic, path)
 
 		ka := &model.KnowledgeArtifact{
 			ID:           id,
 			ProjectID:    "p1",
 			Kind:         kind,
-			Name:         fmt.Sprintf("%s_topic%d_%s", kind, topic, id),
-			Summary:      fmt.Sprintf("Summary for %s about topic %d tag %s", kind, topic, tag),
+			Name:         fmt.Sprintf("%s-%s-%s", verb, subject, id[len(id)-3:]),
+			Summary:      summary,
 			Payload:      payload,
 			Status:       "active",
 			Confidence:   0.5 + rng.Float64()*0.5,
@@ -175,8 +314,8 @@ func seedPool(rng *rand.Rand, n int) []artifactMeta {
 			SuccessCount: succ,
 			FailureCount: fail,
 			UsageCount:   succ + fail,
-			CreatedAt:    time.Now().Add(-time.Duration(rng.Intn(45)) * 24 * time.Hour),
-			UpdatedAt:    time.Now().Add(-time.Duration(rng.Intn(10)) * 24 * time.Hour),
+			CreatedAt:    time.Now().Add(-time.Duration(ageDays+10) * 24 * time.Hour),
+			UpdatedAt:    time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour),
 		}
 		if err := model.DB.Create(ka).Error; err != nil {
 			log.Fatalf("seed artifact %s: %v", id, err)
@@ -263,12 +402,37 @@ type simStats struct {
 	FinalSuccessCounts []int
 	FinalFailureCounts []int
 	ScoreDivergence    float64 // std dev of (success - failure) across artifacts
+
+	// LLM-judge stats (populated only when judge enabled)
+	JudgeCalls        int   // successful judge replies
+	JudgeSkipped      int   // errored / timed out / degraded skipped
+	JudgeTop1Agree    int   // rounds where evobench top-1 == judge top-1
+	JudgeInTop3       int   // rounds where judge's pick was in evobench top-3
+	JudgeInAnyTopK    int   // rounds where judge's pick was in the top-K sent to it
+	JudgeTotalLatency int64 // sum of call latencies (ms)
+	JudgeErrors       []string
 }
 
-func runSimulation(rng *rand.Rand, rounds int) simStats {
+func runSimulation(rng *rand.Rand, rounds int, judge JudgeConfig,
+	dataset *TrainingDataset, eval *EvalSet) simStats {
 	stats := simStats{
 		ClusterCounts: map[string]int{},
 	}
+
+	judgeBudget := flagJudgeRounds
+	if !judge.Enabled {
+		judgeBudget = 0
+	}
+	// Hold out 30% of judge rounds as eval-only so the learned
+	// weights are never trained on the same pairs we evaluate them
+	// on. Integer rounding biases toward training (minimum 1 eval
+	// round when budget ≥ 2).
+	judgeTrainBudget := (judgeBudget * 7) / 10
+	if judgeBudget >= 2 && judgeBudget-judgeTrainBudget < 1 {
+		judgeTrainBudget = judgeBudget - 1
+	}
+	judgeDone := 0
+	var judgeTasks []JudgeTask
 
 	for r := 0; r < rounds; r++ {
 		// Pick a random query topic
@@ -389,6 +553,13 @@ func runSimulation(rng *rand.Rand, rounds int) simStats {
 		// Run feedback attribution
 		service.HandleChangeAudit(changeID, auditLevel)
 
+		// Harvest training pairs from this round's feedback.
+		if !noEmbed {
+			for _, p := range BuildAuditPairs(result, auditLevel, rng) {
+				dataset.Pairs = append(dataset.Pairs, p)
+			}
+		}
+
 		// Check if top-scored artifact was credited
 		if len(refs) > 0 && refs[0].Score > 0 {
 			stats.TopScoredTotal++
@@ -403,6 +574,101 @@ func runSimulation(rng *rand.Rand, rounds int) simStats {
 				if ka.FailureCount > 0 {
 					stats.TopScoredCredited++
 				}
+			}
+		}
+
+		// Queue a judge task for the first judgeBudget non-degraded
+		// rounds. Actual API calls happen in parallel AFTER the
+		// simulation loop finishes so we don't serialize 30-second
+		// reasoning-model latencies.
+		if judgeBudget > 0 && !noEmbed {
+			topN := flagJudgeTopN
+			if topN > len(result) {
+				topN = len(result)
+			}
+			cands := make([]JudgeCandidate, topN)
+			for i := 0; i < topN; i++ {
+				cands[i] = JudgeCandidate{
+					ID:      result[i].Artifact.ID,
+					Kind:    result[i].Artifact.Kind,
+					Summary: result[i].Artifact.Summary,
+				}
+			}
+			verbs := []string{"implement", "fix", "investigate", "improve", "refactor"}
+			subjects := []string{
+				"auth token renewal", "order settlement",
+				"cache invalidation", "retry backoff policy",
+				"schema migration", "metrics export",
+			}
+			paths := []string{"src/auth", "services/billing", "internal/cache", "handlers/user"}
+			queryDesc := fmt.Sprintf("%s %s in %s (tag=%s)",
+				verbs[rng.Intn(len(verbs))],
+				subjects[rng.Intn(len(subjects))],
+				paths[rng.Intn(len(paths))],
+				tag)
+
+			// Deep-copy result slice so later mutations (if any) don't
+			// corrupt the captured ranking.
+			capturedRanked := make([]service.InjectedArtifact, len(result))
+			copy(capturedRanked, result)
+
+			judgeTasks = append(judgeTasks, JudgeTask{
+				RoundIndex:  r,
+				QueryDesc:   queryDesc,
+				Ranked:      capturedRanked,
+				Candidates:  cands,
+				ForTraining: judgeDone < judgeTrainBudget,
+			})
+			judgeDone++
+			judgeBudget--
+		}
+	}
+
+	// Phase 2b: execute queued judge tasks in parallel.
+	if len(judgeTasks) > 0 && judge.Enabled {
+		workers := flagJudgeWorkers
+		if workers < 1 {
+			workers = 1
+		}
+		results := RunJudgePool(context.Background(), judge, judgeTasks, workers)
+		idsByRankForTask := func(t JudgeTask) []string {
+			ids := make([]string, len(t.Candidates))
+			for i, c := range t.Candidates {
+				ids[i] = c.ID
+			}
+			return ids
+		}
+		for _, tr := range results {
+			stats.JudgeTotalLatency += tr.Result.LatencyMs
+			if tr.Result.Skipped {
+				stats.JudgeSkipped++
+				if len(stats.JudgeErrors) < 3 {
+					stats.JudgeErrors = append(stats.JudgeErrors, tr.Result.Err)
+				}
+				continue
+			}
+			stats.JudgeCalls++
+			if tr.Result.BestID == tr.Task.Ranked[0].Artifact.ID {
+				stats.JudgeTop1Agree++
+			}
+			for i := 0; i < 3 && i < len(tr.Task.Ranked); i++ {
+				if tr.Result.BestID == tr.Task.Ranked[i].Artifact.ID {
+					stats.JudgeInTop3++
+					break
+				}
+			}
+			for _, id := range idsByRankForTask(tr.Task) {
+				if tr.Result.BestID == id {
+					stats.JudgeInAnyTopK++
+					break
+				}
+			}
+			if tr.Task.ForTraining {
+				for _, p := range BuildJudgePairs(tr.Task.Ranked, tr.Result.BestID) {
+					dataset.Pairs = append(dataset.Pairs, p)
+				}
+			} else {
+				eval.Add(tr.Task.Ranked, tr.Result.BestID)
 			}
 		}
 	}
@@ -541,6 +807,27 @@ func printReport(s simStats) {
 	if s.TopScoredTotal > 0 {
 		fmt.Printf("│  Top-scored artifact credited: %d / %d (%4.1f%%) │\n",
 			s.TopScoredCredited, s.TopScoredTotal, pct(s.TopScoredCredited, s.TopScoredTotal))
+	}
+
+	// LLM judge agreement
+	if s.JudgeCalls+s.JudgeSkipped > 0 {
+		fmt.Println("├─────────────────────────────────────────────┤")
+		fmt.Println("│  LLM JUDGE (agreement with evobench top-1)  │")
+		fmt.Println("├─────────────────────────────────────────────┤")
+		fmt.Printf("│  Calls: %d ok, %d skipped                    │\n", s.JudgeCalls, s.JudgeSkipped)
+		if s.JudgeCalls > 0 {
+			fmt.Printf("│  Top-1 agreement: %d / %d (%4.1f%%)            │\n",
+				s.JudgeTop1Agree, s.JudgeCalls, pct(s.JudgeTop1Agree, s.JudgeCalls))
+			fmt.Printf("│  Judge pick in top-3: %d / %d (%4.1f%%)        │\n",
+				s.JudgeInTop3, s.JudgeCalls, pct(s.JudgeInTop3, s.JudgeCalls))
+			fmt.Printf("│  Judge pick in top-K: %d / %d (%4.1f%%)        │\n",
+				s.JudgeInAnyTopK, s.JudgeCalls, pct(s.JudgeInAnyTopK, s.JudgeCalls))
+			avgLatency := s.JudgeTotalLatency / int64(s.JudgeCalls+s.JudgeSkipped)
+			fmt.Printf("│  Avg latency: %d ms                        │\n", avgLatency)
+		}
+		for _, e := range s.JudgeErrors {
+			fmt.Printf("│  !! %s\n", truncate(e, 40))
+		}
 	}
 
 	fmt.Println("├─────────────────────────────────────────────┤")
