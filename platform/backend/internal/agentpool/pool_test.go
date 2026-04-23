@@ -203,14 +203,19 @@ func TestShutdownAll(t *testing.T) {
 }
 
 // fakeSessionCreator captures what the pool passes into
-// CreateInitialSession so we can assert Spawn wires it correctly.
+// CreateInitialSession / CreateArchiveSession so we can assert Spawn
+// and the context watcher wire the interface correctly.
 type fakeSessionCreator struct {
-	mu          sync.Mutex
-	calls       int
-	lastServeURL string
-	lastName     string
-	nextID       string
-	nextErr      error
+	mu            sync.Mutex
+	calls         int
+	archiveCalls  int
+	lastServeURL  string
+	lastName      string
+	lastRotation  int
+	initialID     string
+	archiveID     string
+	nextErr       error
+	archiveErr    error
 }
 
 func (f *fakeSessionCreator) CreateInitialSession(_ context.Context, serveURL, agentName string) (string, error) {
@@ -222,10 +227,26 @@ func (f *fakeSessionCreator) CreateInitialSession(_ context.Context, serveURL, a
 	if f.nextErr != nil {
 		return "", f.nextErr
 	}
-	if f.nextID == "" {
+	if f.initialID == "" {
 		return "ses_fake_" + agentName, nil
 	}
-	return f.nextID, nil
+	return f.initialID, nil
+}
+
+func (f *fakeSessionCreator) CreateArchiveSession(_ context.Context, serveURL, agentName string, rotation int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.archiveCalls++
+	f.lastServeURL = serveURL
+	f.lastName = agentName
+	f.lastRotation = rotation
+	if f.archiveErr != nil {
+		return "", f.archiveErr
+	}
+	if f.archiveID == "" {
+		return fmt.Sprintf("ses_archive_%s_%d", agentName, rotation), nil
+	}
+	return f.archiveID, nil
 }
 
 // TestSpawn_CreatesInitialOpencodeSession: the pool must call the
@@ -236,7 +257,7 @@ func (f *fakeSessionCreator) CreateInitialSession(_ context.Context, serveURL, a
 func TestSpawn_CreatesInitialOpencodeSession(t *testing.T) {
 	spawner := &FakeSpawner{HealthDelay: 20 * time.Millisecond}
 	store := newMemStore()
-	sc := &fakeSessionCreator{nextID: "ses_test_xyz"}
+	sc := &fakeSessionCreator{initialID: "ses_test_xyz"}
 	m := NewManager(ManagerConfig{
 		Root:                t.TempDir(),
 		StartupTimeout:      2 * time.Second,

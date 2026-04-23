@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agent"
@@ -122,16 +124,30 @@ func main() {
 	if raw := strings.TrimSpace(os.Getenv("A3C_OPENCODE_ARGS")); raw != "" {
 		poolArgs = strings.Fields(raw)
 	}
+	// PoolSessionCreator doubles as both SessionCreator and
+	// ContextProbe — one object, two interfaces — so the pool only
+	// needs the one wire-up here rather than two parallel clients
+	// pointing at the same opencode serves.
+	poolOC := opencodepkg.NewPoolSessionCreator(0)
 	poolManager := agentpool.NewManager(agentpool.ManagerConfig{
-		Root:        fmt.Sprintf("%s/pool", cfg.DataDir),
-		PlatformURL: fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
-		Command:     poolCmd,
-		Args:        poolArgs,
-	}, nil).WithSessionCreator(opencodepkg.NewPoolSessionCreator(0))
+		Root:                 fmt.Sprintf("%s/pool", cfg.DataDir),
+		PlatformURL:          fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		Command:              poolCmd,
+		Args:                 poolArgs,
+		ContextWatchInterval: 30 * time.Second, // poll cadence — see ManagerConfig doc
+		// ArchiveThresholdTokens omitted = ApplyDefaults sets 150_000.
+	}, nil).
+		WithSessionCreator(poolOC).
+		WithContextProbe(poolOC).
+		WithArchiveNotifier(service.NewPoolArchiveNotifier())
 	agentpool.SetDefault(poolManager)
 	if poolCmd != "" {
 		log.Printf("[Pool] spawner command override: %s %v", poolCmd, poolArgs)
 	}
+	// Start the context watcher goroutine once the pool manager is
+	// wired. context.Background() gives it a server-lifetime ceiling;
+	// pool.ShutdownAll() stops it cleanly on graceful shutdown.
+	poolManager.StartContextWatcher(context.Background())
 
 	// Unauthenticated bootstrap endpoints only. Anything that mutates
 	// or reads project state now lives in the auth group below — previously

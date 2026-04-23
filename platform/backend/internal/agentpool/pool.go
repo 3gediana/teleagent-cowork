@@ -132,6 +132,20 @@ type Instance struct {
 	// rotated by the archive loop once the context nears its cap.
 	// Empty while Status="starting" or if session creation failed.
 	OpencodeSessionID string `json:"opencode_session_id,omitempty"`
+
+	// ArchiveRotation counts how many times the session has been
+	// rotated for this agent. 0 = still on the initial session. The
+	// counter is folded into the title we give each replacement so
+	// opencode's session list stays legible to operators reviewing
+	// history.
+	ArchiveRotation int `json:"archive_rotation"`
+
+	// LastContextTokens is the most recent ContextSize reading the
+	// watcher observed on this agent's session. Surfaced so the
+	// dashboard can draw a "how full is the context" gauge without
+	// re-probing opencode from the browser. Zero until the first
+	// watch cycle.
+	LastContextTokens int `json:"last_context_tokens"`
 }
 
 // ManagerConfig is the runtime knobs. Zero values are sensible, but
@@ -172,6 +186,20 @@ type ManagerConfig struct {
 	// Set this in tests (FakeSpawner never actually runs opencode)
 	// and in deployments where operators hand-manage the template.
 	SkipOpencodeEnvPrep bool
+
+	// ContextWatchInterval is the period between context-size polls
+	// the watcher runs for each ready agent. Zero disables the
+	// watcher entirely — useful for tests that want deterministic
+	// session state. Default 30s in production (see ApplyDefaults).
+	ContextWatchInterval time.Duration
+
+	// ArchiveThresholdTokens is the context size at which the
+	// watcher rotates an agent's opencode session. We trigger on
+	// input + cache.read tokens specifically (the part that gets
+	// replayed on every subsequent turn). Default 150_000 — well
+	// below opencode's own 80% auto-compact line so we always
+	// archive *before* opencode silently summarises the transcript.
+	ArchiveThresholdTokens int
 }
 
 // ApplyDefaults fills in zeroes with sensible runtime values. Kept
@@ -196,6 +224,12 @@ func (c *ManagerConfig) ApplyDefaults() {
 	if c.PlatformURL == "" {
 		c.PlatformURL = "http://localhost:8080"
 	}
+	if c.ArchiveThresholdTokens == 0 {
+		c.ArchiveThresholdTokens = 150_000
+	}
+	// ContextWatchInterval=0 is a legitimate "off" signal; don't
+	// overwrite it here. The watcher start-up path treats zero as
+	// "don't run" explicitly.
 }
 
 // SessionCreator abstracts "build a fresh opencode session on the
@@ -212,6 +246,32 @@ type SessionCreator interface {
 	// is non-fatal for the spawn (agent still becomes "ready"), it
 	// just means no session is bound yet.
 	CreateInitialSession(ctx context.Context, serveURL, agentName string) (string, error)
+
+	// CreateArchiveSession is called by the context watcher when an
+	// agent's current session crosses the archive threshold. The
+	// implementation picks a title that distinguishes it from the
+	// previous session ("pool:name#2" etc.) so operators browsing
+	// opencode's session list can spot rotations. Returns the new
+	// session id to bind the agent to.
+	CreateArchiveSession(ctx context.Context, serveURL, agentName string, rotation int) (string, error)
+}
+
+// ContextProbe reads the current token footprint of an opencode
+// session. Separated from SessionCreator because some test
+// scenarios only exercise the probe side (no rotation needed).
+type ContextProbe interface {
+	// ContextSize returns input+cache.read tokens on the latest
+	// assistant message in the session, or 0 if none exists yet.
+	ContextSize(ctx context.Context, serveURL, sessionID string) (int, error)
+}
+
+// ArchiveNotifier pushes a "your session just rotated" signal out
+// to the MCP poller running inside the pool agent's subprocess.
+// The MCP will see the new session id on its next broadcast poll
+// and swap its cached lock. Kept as an interface so tests can
+// observe what would have been broadcast without touching Redis.
+type ArchiveNotifier interface {
+	NotifyArchive(agentID string, oldSessionID, newSessionID string, tokens int, reason string)
 }
 
 // Manager owns the running pool. Methods are goroutine-safe.
@@ -221,10 +281,12 @@ type SessionCreator interface {
 // instance struct they mutate is owned by the goroutine that owns
 // the subprocess, so no double-locking required.
 type Manager struct {
-	cfg            ManagerConfig
-	spawner        Spawner
-	store          Store
-	sessionCreator SessionCreator
+	cfg             ManagerConfig
+	spawner         Spawner
+	store           Store
+	sessionCreator  SessionCreator
+	contextProbe    ContextProbe
+	archiveNotifier ArchiveNotifier
 
 	mu        sync.Mutex
 	instances map[string]*subprocess
@@ -232,6 +294,10 @@ type Manager struct {
 	// lastPort tracks the next port to try — reused from one Spawn
 	// to the next so we don't scan the whole range every time.
 	lastPort int
+
+	// watchStop, once non-nil, signals the context-watch goroutine
+	// to exit. Set by StartContextWatcher / cleared by Stop.
+	watchStop chan struct{}
 }
 
 // NewManager builds a Manager with the given config. Spawner may be
@@ -267,6 +333,25 @@ func (m *Manager) WithStore(s Store) *Manager {
 // pass a fake, or leave it nil to skip session creation entirely.
 func (m *Manager) WithSessionCreator(sc SessionCreator) *Manager {
 	m.sessionCreator = sc
+	return m
+}
+
+// WithContextProbe installs the component that queries an agent's
+// current opencode session for its accumulated token footprint.
+// Required for the context watcher to function; nil disables the
+// watcher even if an interval was configured.
+func (m *Manager) WithContextProbe(cp ContextProbe) *Manager {
+	m.contextProbe = cp
+	return m
+}
+
+// WithArchiveNotifier installs the sink the context watcher calls
+// after rotating a session. The MCP poller inside the agent reads
+// whichever "you are now on session X" message this emits. nil =
+// rotations still happen on the server side, but the MCP never
+// learns about them (OK in tests that only want to observe state).
+func (m *Manager) WithArchiveNotifier(an ArchiveNotifier) *Manager {
+	m.archiveNotifier = an
 	return m
 }
 
@@ -585,8 +670,10 @@ func (m *Manager) Purge(id string) error {
 }
 
 // ShutdownAll stops every instance — useful on server shutdown so we
-// don't leak subprocesses.
+// don't leak subprocesses. Also stops the context watcher so the
+// probe goroutine doesn't keep hitting dying serves.
 func (m *Manager) ShutdownAll() {
+	m.stopContextWatcher()
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.instances))
 	for id := range m.instances {
