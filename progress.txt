@@ -1,0 +1,134 @@
+A3C agent pool — session rotation / dormancy / metrics lineage
+================================================================
+
+Latest branch: revert-v1.3
+Evidence:     e2e-run.log  (real MiniMax-M2.7 roundtrip, captured)
+Test scripts: e2e-real.ps1 (bash-free, runs on Windows PowerShell)
+
+---------------- Commit trail ------------------------------------
+
+7984585  agentpool: internal broadcast consumer + subprocess-ctx + spawn plumbing fixes
+  - Fix exec.CommandContext-bound-to-HTTP-ctx bug killing every spawn
+  - Move port range to 5500-5599 (Windows reserves 4091-4290 for Hyper-V)
+  - Plumb opencode_provider_id/model through handler → spawn
+  - Pool-internal broadcast consumer replacing per-agent node MCP bridge
+
+fc61c65  agentpool: Phase 4 — idle/dormant/wake lifecycle
+  - Instance.LastActivityAt / DormantAt
+  - Dormancy detector (default 30m idle → opencode teardown)
+  - Wake path re-spawns, keeps agent id + access key
+  - Broadcast consumer skips dormant naturally (status gate)
+  - watch() guards against planned exits (dormant/waking) + nil handle
+
+b3461d3  frontend/AgentPoolPage: provider+model on spawn, session health, overview
+  - SpawnModal gets datalist-backed provider/model inputs + localStorage memo
+  - SessionHealthPanel under each card (session id, token bar, rotation badge)
+  - 4-up overview strip (running / dormant / tokens / rotations)
+
+079dc9b  agentpool: opencode config bridge + broadcast-driven auto-wake
+  - New endpoint /agentpool/opencode-providers reads ~/.config/opencode/opencode.json
+  - service.BroadcastDirected auto-kicks wake for dormant pool targets
+  - Handler routes + tests for both
+
+31f996e  frontend/AgentPoolPage: opencode-config dropdowns + expandable metrics
+  - SpawnModal swaps datalist for real dropdown when the config lists >=1 provider
+  - Card click toggles a metrics panel polling /agentpool/metrics/:id @ 4s
+  - Inline SVG TokenSparkline with 60%/85% thresholds + rotation markers
+  - Event log (HH:MM:SS + icon + phrase + detail)
+
+04d0f41  agentpool: metrics ring buffer + consumer-side auto-wake + e2e script
+  - Per-instance ring buffers (tokens: 120 slots, events: 50 slots)
+  - /agentpool/metrics/:instance_id endpoint
+  - BroadcastConsumer.PendingCount (Redis LLEN peek) drives consumer-side
+    auto-wake for dormant agents whose queue has pending events
+  - Fixed dormancy event ordering (record before Terminate, not after)
+  - e2e-real.ps1: 8-step live walk through the full lifecycle
+
+---------------- What works end-to-end ---------------------------
+
+Confirmed by e2e-real.ps1 against real MiniMax-M2.7:
+
+  1. Spawn platform agent with opencode provider = minimax-coding-plan,
+     model = MiniMax-M2.7.
+  2. Platform creates opencode session, binds it to the pool Instance.
+  3. Platform broadcasts a TASK_ASSIGN event via Redis directed queue.
+  4. Pool consumer tick (2s) drains queue, injects as prompt_async with
+     the right provider/model pair.
+  5. Opencode reaches MiniMax and writes an assistant turn back to the
+     session. Observed real reply: "PONG".
+  6. Operator-or-timer triggers Sleep. Pool calls CreateArchiveSession
+     as a recovery point, terminates opencode subprocess, flips status
+     to dormant. Port released. Instance + session metadata preserved.
+  7. New broadcast arrives while dormant (tested by direct Redis RPUSH,
+     bypassing BroadcastDirected, to prove the consumer-side path).
+  8. Next consumer tick sees status=dormant + PendingCount>0, fires
+     EnsureReadyByAgentID. Wake re-spawns opencode on a fresh port,
+     creates a fresh session, flips status back to ready.
+  9. Next tick drains the buffered broadcast into the new session.
+     LLM replies again. Real reply: "WOKEUP".
+ 10. /agentpool/metrics/:id shows three events in correct chronological
+     order: spawn_ready, dormancy, wake.
+
+Log captured:
+  01:36:34 spawn_ready  port=5500 session=ses_24495c89bffehGqbBOrDtU3KJj
+  01:36:49 dormancy     reason=manual pid=13468 port=5500
+  01:36:53 wake         port=5501 session=ses_244957d9effeRC1r0wsZG3bJ0T
+
+---------------- Lessons worth keeping ---------------------------
+
+Mistake log during this sprint — things that cost time and the
+fix that stuck:
+
+1. exec.CommandContext(ctx, ...) with gin's request ctx kills the
+   subprocess the moment the HTTP response returns. Use
+   context.Background() for subprocess lifetimes; let your own
+   Terminate path own the kill.
+
+2. Windows reserves port ranges for Hyper-V / WSL dynamic alloc.
+   On the dev box that was 4091-4290 — right where the pool
+   defaulted. Bun's listen() fails with "Failed to start server
+   on port N" and opencode exits with code 1 within 2 seconds.
+   Check `netsh interface ipv4 show excludedportrange protocol=tcp`
+   before picking a pool range. 5500-5599 is clean.
+
+3. Opencode 1.14.21 silently returns parts=0 (empty assistant turn)
+   when /session/:id/message is posted without a `model` field.
+   Not an error. Easy to spend hours staring at "the prompt went
+   in but no reply came back" before realising. Always pass
+   { provider, model } explicitly; reject empty-model requests
+   at the injector boundary.
+
+4. The UI's /opencode/providers endpoint surfaces LLMEndpoint
+   rows (`llm_xxxx`), not opencode's own provider catalogue.
+   Pool agents need the latter. If you auto-map between them you
+   will eventually ship the wrong id to a spawn. Separate
+   endpoint, separate dropdown.
+
+5. Phase-4 auto-wake at the producer site (BroadcastDirected)
+   misses every caller that writes directly to Redis. Move the
+   detection to the consumer tick — it scans dormant instances
+   and peeks queue length, so auto-wake works regardless of how
+   the event got queued.
+
+6. If an event is recorded after a slow shutdown primitive,
+   downstream consumers can see the new state and record their
+   OWN events before yours lands. Effect: ring trail shows
+   dormancy AFTER wake. Fix: record the event at the status
+   transition moment, not at the end of the cleanup work.
+
+7. docker exec ... redis-cli RPUSH "key" "{...json...}" strips
+   quotes via PowerShell+shell argument parsing. Resulting Redis
+   value is corrupt JSON and the consumer's Unmarshal silently
+   skips it — the queue drains but no events reach the injector.
+   Use `cat payload.json | redis-cli -x RPUSH key` with the
+   payload staged via `docker cp`.
+
+---------------- What's still out ---------------------------------
+
+Not in this sprint but queued in the todo:
+
+  - SSE push instead of 4s-poll for the metrics panel
+  - Token-curve aggregation beyond 60 minutes (persisted ring?)
+  - Native-runner side task dispatcher auto-wake (currently only
+    the broadcast path triggers; if the runner picks an agent it
+    doesn't check pool status first)
