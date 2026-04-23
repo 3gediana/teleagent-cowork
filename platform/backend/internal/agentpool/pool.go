@@ -114,6 +114,24 @@ type Instance struct {
 	SkillsInjected  []string  `json:"skills_injected"`
 	WorkingDir      string    `json:"working_dir"`
 	LastError       string    `json:"last_error,omitempty"`
+
+	// OpencodeProviderID + OpencodeModelID name the provider/model
+	// this agent uses on the opencode side (e.g. "minimax-coding-plan"
+	// / "MiniMax-M2.7"). These are the ids opencode knows about from
+	// its own config; the platform's LLMEndpoint table is a parallel
+	// concept we don't auto-sync yet. Empty = the opencode serve has
+	// to pick a default, which in practice means zero assistant
+	// replies (opencode refuses to route without a model) — so
+	// callers should always supply these on Spawn.
+	OpencodeProviderID string `json:"opencode_provider_id,omitempty"`
+	OpencodeModelID    string `json:"opencode_model_id,omitempty"`
+
+	// OpencodeSessionID is the id of the long-running opencode
+	// session this pool agent is currently attached to. Created
+	// during Spawn (right after the serve goes healthy) and
+	// rotated by the archive loop once the context nears its cap.
+	// Empty while Status="starting" or if session creation failed.
+	OpencodeSessionID string `json:"opencode_session_id,omitempty"`
 }
 
 // ManagerConfig is the runtime knobs. Zero values are sensible, but
@@ -180,6 +198,22 @@ func (c *ManagerConfig) ApplyDefaults() {
 	}
 }
 
+// SessionCreator abstracts "build a fresh opencode session on the
+// agent's serve". Production wires in an adapter around
+// opencode.Client; tests substitute a fake that returns a canned id.
+//
+// Kept as an interface (not a direct dependency on opencode.Client)
+// so agentpool stays free of the opencode HTTP package — otherwise
+// pool_test.go would need a live opencode to unit-test anything.
+type SessionCreator interface {
+	// CreateInitialSession is called once per spawn, after the
+	// agent's opencode serve has passed /global/health. Returns the
+	// session id to persist on the Agent row, or an error. An error
+	// is non-fatal for the spawn (agent still becomes "ready"), it
+	// just means no session is bound yet.
+	CreateInitialSession(ctx context.Context, serveURL, agentName string) (string, error)
+}
+
 // Manager owns the running pool. Methods are goroutine-safe.
 //
 // Thread-safety discipline: mu guards `instances` only. Subprocess
@@ -187,9 +221,10 @@ func (c *ManagerConfig) ApplyDefaults() {
 // instance struct they mutate is owned by the goroutine that owns
 // the subprocess, so no double-locking required.
 type Manager struct {
-	cfg     ManagerConfig
-	spawner Spawner
-	store   Store
+	cfg            ManagerConfig
+	spawner        Spawner
+	store          Store
+	sessionCreator SessionCreator
 
 	mu        sync.Mutex
 	instances map[string]*subprocess
@@ -226,6 +261,15 @@ func (m *Manager) WithStore(s Store) *Manager {
 	return m
 }
 
+// WithSessionCreator installs the component that builds the initial
+// opencode session after a pool agent boots. Production wires in an
+// adapter around opencode.Client (see cmd/server/main.go). Tests
+// pass a fake, or leave it nil to skip session creation entirely.
+func (m *Manager) WithSessionCreator(sc SessionCreator) *Manager {
+	m.sessionCreator = sc
+	return m
+}
+
 // subprocess is the private per-instance state. Wraps the public
 // Instance with the cmd handle and the cancellation channel that
 // shuts down the health-watch goroutine.
@@ -236,11 +280,25 @@ type subprocess struct {
 }
 
 // SpawnRequest bundles the per-spawn inputs: which project the agent
-// joins, optional role hint, an optional display name.
+// joins, optional role hint, an optional display name, and the
+// opencode provider+model pair this agent should use.
 type SpawnRequest struct {
 	ProjectID string
 	RoleHint  agent.Role // cosmetic; the platform's task queue is what actually drives work
 	Name      string     // optional display name; auto-generated if empty
+
+	// OpencodeProviderID / OpencodeModelID are the ids this agent
+	// tells opencode to route prompts through. Must match an entry
+	// in opencode's own config (global ~/.config/opencode/opencode.json
+	// or workspace `.opencode/opencode.json`) — the platform does not
+	// auto-sync these with LLMEndpoint rows yet.
+	//
+	// Empty strings are allowed but mean the initial session is
+	// created without a model lock, and the watch loop has no model
+	// to use for archive prompts. In practice the caller (dashboard)
+	// should always pass both.
+	OpencodeProviderID string
+	OpencodeModelID    string
 }
 
 // Spawn brings up a new platform-hosted agent. Synchronous: returns
@@ -312,18 +370,25 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 	// the MCP poller injects broadcasts into that agent's serve.
 	//
 	// OPENCODE_SERVE_URL points to the agent's own serve so the
-	// A3C MCP poller knows where to inject messages.
+	// A3C MCP poller knows where to inject messages. The provider
+	// + model vars are what the MCP needs when it creates a fresh
+	// opencode session (initial spawn AND archive rotation) —
+	// opencode refuses to route prompts without a model, so we
+	// push those as env rather than asking MCP to re-derive them.
+	serveURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	spawnReq := SpawnerRequest{
 		WorkingDir: workDir,
 		Port:       port,
 		Env: map[string]string{
-			"A3C_PLATFORM_URL":   m.cfg.PlatformURL,
-			"A3C_ACCESS_KEY":     accessKey,
-			"A3C_PROJECT_ID":     req.ProjectID,
-			"A3C_AGENT_ID":       agentID,
-			"A3C_INSTANCE_ID":    instanceID,
-			"A3C_WORK_DIR":       workDir,
-			"OPENCODE_SERVE_URL": fmt.Sprintf("http://127.0.0.1:%d", port),
+			"A3C_PLATFORM_URL":          m.cfg.PlatformURL,
+			"A3C_ACCESS_KEY":            accessKey,
+			"A3C_PROJECT_ID":            req.ProjectID,
+			"A3C_AGENT_ID":              agentID,
+			"A3C_INSTANCE_ID":           instanceID,
+			"A3C_WORK_DIR":              workDir,
+			"A3C_OPENCODE_PROVIDER_ID":  req.OpencodeProviderID,
+			"A3C_OPENCODE_MODEL_ID":     req.OpencodeModelID,
+			"OPENCODE_SERVE_URL":        serveURL,
 		},
 		Command: m.cfg.Command,
 		Args:    m.cfg.Args,
@@ -337,17 +402,19 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 
 	instPort := port
 	inst := Instance{
-		ID:             instanceID,
-		AgentID:        agentID,
-		AgentName:      name,
-		Role:           string(req.RoleHint),
-		ProjectID:      req.ProjectID,
-		Port:           instPort,
-		PID:            handle.PID(),
-		Status:         "starting",
-		StartedAt:      time.Now(),
-		SkillsInjected: skills,
-		WorkingDir:     workDir,
+		ID:                 instanceID,
+		AgentID:            agentID,
+		AgentName:          name,
+		Role:               string(req.RoleHint),
+		ProjectID:          req.ProjectID,
+		Port:               instPort,
+		PID:                handle.PID(),
+		Status:             "starting",
+		StartedAt:          time.Now(),
+		SkillsInjected:     skills,
+		WorkingDir:         workDir,
+		OpencodeProviderID: req.OpencodeProviderID,
+		OpencodeModelID:    req.OpencodeModelID,
 	}
 	sp := &subprocess{inst: inst, handle: handle, stopChan: make(chan struct{})}
 
@@ -365,17 +432,46 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 		return nil, fmt.Errorf("pool: instance %s never became healthy", instanceID)
 	}
 
-	// 7. Flip DB + in-memory state to ready.
+	// 7. Create the initial opencode session. We do this server-side
+	// (rather than letting the MCP poll-lock onto whatever session
+	// might exist) so the archive loop has a single authoritative
+	// place to read and rotate the session id. Failure here doesn't
+	// abort the spawn — the agent is still useful to the operator
+	// via the UI, and a later broadcast can retry. See SessionCreator
+	// for the abstraction boundary (real impl: opencode.Client).
+	//
+	// Note: this is independent of SkipOpencodeEnvPrep. The env-prep
+	// flag exists so tests can skip npm install; session creation
+	// runs whenever a SessionCreator is wired, since tests that care
+	// about session plumbing inject a fake creator and tests that
+	// don't leave it nil.
+	var sessionID string
+	if m.sessionCreator != nil {
+		if sid, err := m.sessionCreator.CreateInitialSession(ctx, serveURL, name); err != nil {
+			log.Printf("[Pool] instance %s: create opencode session failed: %v (agent is still running; archive loop will retry)", instanceID, err)
+		} else {
+			sessionID = sid
+		}
+	}
+
+	// 8. Flip DB + in-memory state to ready, committing the session
+	// id in the same update so operators never see "ready" without a
+	// session.
 	now := time.Now()
-	_ = m.store.UpdateAgent(agentID, map[string]any{
+	agentUpdates := map[string]any{
 		"status":         "online",
 		"last_heartbeat": &now,
-	})
+	}
+	if sessionID != "" {
+		agentUpdates["session_id"] = sessionID
+	}
+	_ = m.store.UpdateAgent(agentID, agentUpdates)
 	m.mu.Lock()
 	sp.inst.Status = "ready"
+	sp.inst.OpencodeSessionID = sessionID
 	m.mu.Unlock()
 
-	// 8. Background watcher — flips status to "crashed" if the
+	// 9. Background watcher — flips status to "crashed" if the
 	// subprocess exits on its own.
 	go m.watch(sp)
 

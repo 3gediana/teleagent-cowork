@@ -6,6 +6,7 @@ package agentpool
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -42,6 +43,9 @@ func (s *memStore) UpdateAgent(id string, updates map[string]any) error {
 	}
 	if v, ok := updates["last_heartbeat"].(*time.Time); ok {
 		a.LastHeartbeat = v
+	}
+	if v, ok := updates["session_id"].(string); ok {
+		a.SessionID = v
 	}
 	return nil
 }
@@ -195,6 +199,102 @@ func TestShutdownAll(t *testing.T) {
 		if inst.Status != "stopped" {
 			t.Errorf("instance %s not stopped: %s", inst.ID, inst.Status)
 		}
+	}
+}
+
+// fakeSessionCreator captures what the pool passes into
+// CreateInitialSession so we can assert Spawn wires it correctly.
+type fakeSessionCreator struct {
+	mu          sync.Mutex
+	calls       int
+	lastServeURL string
+	lastName     string
+	nextID       string
+	nextErr      error
+}
+
+func (f *fakeSessionCreator) CreateInitialSession(_ context.Context, serveURL, agentName string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastServeURL = serveURL
+	f.lastName = agentName
+	if f.nextErr != nil {
+		return "", f.nextErr
+	}
+	if f.nextID == "" {
+		return "ses_fake_" + agentName, nil
+	}
+	return f.nextID, nil
+}
+
+// TestSpawn_CreatesInitialOpencodeSession: the pool must call the
+// SessionCreator once per spawn AND persist the returned id on the
+// instance + agent row. Previously the session was created lazily
+// by the MCP poller, which meant the archive loop had nothing to
+// poll until a first broadcast landed.
+func TestSpawn_CreatesInitialOpencodeSession(t *testing.T) {
+	spawner := &FakeSpawner{HealthDelay: 20 * time.Millisecond}
+	store := newMemStore()
+	sc := &fakeSessionCreator{nextID: "ses_test_xyz"}
+	m := NewManager(ManagerConfig{
+		Root:                t.TempDir(),
+		StartupTimeout:      2 * time.Second,
+		ShutdownGrace:       50 * time.Millisecond,
+		SkipOpencodeEnvPrep: true, // FakeSpawner never runs opencode; skip the npm install
+	}, spawner).WithStore(store).WithSessionCreator(sc)
+
+	inst, err := m.Spawn(context.Background(), SpawnRequest{
+		ProjectID:          "proj_session",
+		Name:               "test-pool-agent",
+		OpencodeProviderID: "minimax-coding-plan",
+		OpencodeModelID:    "MiniMax-M2.7",
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if sc.calls != 1 {
+		t.Errorf("expected SessionCreator called once, got %d", sc.calls)
+	}
+	if sc.lastName != "test-pool-agent" {
+		t.Errorf("session creator got name %q, want test-pool-agent", sc.lastName)
+	}
+	if inst.OpencodeSessionID != "ses_test_xyz" {
+		t.Errorf("expected session id on instance, got %q", inst.OpencodeSessionID)
+	}
+	if inst.OpencodeProviderID != "minimax-coding-plan" {
+		t.Errorf("expected provider id on instance, got %q", inst.OpencodeProviderID)
+	}
+	// And on the agent row via the store contract.
+	a, _ := store.get(inst.AgentID)
+	if a.SessionID != "ses_test_xyz" {
+		t.Errorf("expected session id on agent row, got %q", a.SessionID)
+	}
+}
+
+// TestSpawn_SessionCreatorFailureIsSoft: if the session creator
+// errors (serve not reachable, zod crash, etc.) the spawn should
+// still succeed with OpencodeSessionID empty — the agent is useful
+// even without a session, and the archive loop will retry.
+func TestSpawn_SessionCreatorFailureIsSoft(t *testing.T) {
+	store := newMemStore()
+	sc := &fakeSessionCreator{nextErr: fmt.Errorf("serve unreachable")}
+	m := NewManager(ManagerConfig{
+		Root:                t.TempDir(),
+		StartupTimeout:      2 * time.Second,
+		ShutdownGrace:       50 * time.Millisecond,
+		SkipOpencodeEnvPrep: true,
+	}, &FakeSpawner{HealthDelay: 20 * time.Millisecond}).WithStore(store).WithSessionCreator(sc)
+
+	inst, err := m.Spawn(context.Background(), SpawnRequest{ProjectID: "proj_soft"})
+	if err != nil {
+		t.Fatalf("spawn should succeed even when session creator fails, got %v", err)
+	}
+	if inst.Status != "ready" {
+		t.Errorf("status should flip to ready, got %q", inst.Status)
+	}
+	if inst.OpencodeSessionID != "" {
+		t.Errorf("failed session creation should leave id empty, got %q", inst.OpencodeSessionID)
 	}
 }
 

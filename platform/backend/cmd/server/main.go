@@ -14,6 +14,7 @@ import (
 	"github.com/a3c/platform/internal/llm"
 	"github.com/a3c/platform/internal/middleware"
 	"github.com/a3c/platform/internal/model"
+	opencodepkg "github.com/a3c/platform/internal/opencode"
 	"github.com/a3c/platform/internal/runner"
 	"github.com/a3c/platform/internal/service"
 )
@@ -126,7 +127,7 @@ func main() {
 		PlatformURL: fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
 		Command:     poolCmd,
 		Args:        poolArgs,
-	}, nil)
+	}, nil).WithSessionCreator(opencodepkg.NewPoolSessionCreator(0))
 	agentpool.SetDefault(poolManager)
 	if poolCmd != "" {
 		log.Printf("[Pool] spawner command override: %s %v", poolCmd, poolArgs)
