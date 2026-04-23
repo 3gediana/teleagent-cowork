@@ -111,6 +111,18 @@ func checkExperienceToAnalyze(opts Options, since time.Time) *Check {
 	okQ.Count(&okRuns)
 	failedQ.Count(&failedRuns)
 
+	// For the failure-rate tests below we need enough runs to say
+	// anything with confidence. 10 is arbitrary but matches
+	// analyzeRawThreshold — if the system has run Analyze at least
+	// as many times as it nominally "should have", the sample is
+	// large enough to trust.
+	totalRuns := okRuns + failedRuns
+	var failureRate float64
+	if totalRuns > 0 {
+		failureRate = float64(failedRuns) / float64(totalRuns)
+	}
+	const minRunsForRatio = int64(10)
+
 	status := StatusHealthy
 	var summary string
 	switch {
@@ -123,6 +135,17 @@ func checkExperienceToAnalyze(opts Options, since time.Time) *Check {
 	case failedRuns > 0 && okRuns == 0:
 		status = StatusBroken
 		summary = fmt.Sprintf("All %d Analyze runs in window failed.", failedRuns)
+	case totalRuns >= minRunsForRatio && failureRate > 0.90:
+		// Essentially broken — the few successes are likely noise.
+		status = StatusBroken
+		summary = fmt.Sprintf("%d/%d Analyze runs failed (%.0f%%). Skill/Policy/Refinery downstream cannot advance.",
+			failedRuns, totalRuns, failureRate*100)
+	case totalRuns >= minRunsForRatio && failureRate > 0.50:
+		// Majority-fail — downstream will be starved even if it's
+		// technically producing *something*. Worth alerting.
+		status = StatusStale
+		summary = fmt.Sprintf("%d/%d Analyze runs failed (%.0f%%) — downstream Skill/Policy pipeline is starved.",
+			failedRuns, totalRuns, failureRate*100)
 	case rawCount < analyzeRawThreshold && distilledCount == 0:
 		status = StatusStale
 		summary = fmt.Sprintf("Only %d raw experiences (threshold %d). Analyze has nothing worth running on.", rawCount, analyzeRawThreshold)
@@ -140,6 +163,7 @@ func checkExperienceToAnalyze(opts Options, since time.Time) *Check {
 			"threshold":       analyzeRawThreshold,
 			"runs_ok":         okRuns,
 			"runs_failed":     failedRuns,
+			"failure_rate":    failureRate,
 		},
 		LastActivity: timePtr(lastRun),
 	}

@@ -263,12 +263,38 @@ func checkRetryMechanism(opts Options, since time.Time) *Check {
 	}
 	fQ.Count(&failedAfterRetry)
 
+	// Recovery rate = recovered / (recovered + ultimately-failed).
+	// "sessions_with_retries" (the numerator of retries-that-
+	// happened) can be larger than the other two combined because
+	// some sessions might still be running; exclude those from the
+	// rate to avoid counting them as failures.
+	resolved := succeededAfterRetry + failedAfterRetry
+	var recoveryRate float64
+	if resolved > 0 {
+		recoveryRate = float64(succeededAfterRetry) / float64(resolved)
+	}
+	const minForRatio = int64(10)
+
 	status := StatusHealthy
 	var summary string
 	switch {
 	case sessionsWithRetries == 0:
 		status = StatusHealthy
 		summary = "No retries needed in window — no transient failures (or no traffic)."
+	case resolved >= minForRatio && recoveryRate < 0.10:
+		// <10% of retries eventually succeed — the retry policy is
+		// burning tokens on permanently-failing jobs.
+		status = StatusBroken
+		summary = fmt.Sprintf("%d retries resolved; only %d recovered (%.0f%%). Retry policy is burning tokens on permanently-failing jobs.",
+			resolved, succeededAfterRetry, recoveryRate*100)
+	case resolved >= minForRatio && recoveryRate < 0.40:
+		// 10-40% recovery is noticeably worse than a well-tuned
+		// transient-retry policy should achieve (>70% is typical
+		// for network/timeout-bucket retries). Flag as stale so
+		// the operator investigates.
+		status = StatusStale
+		summary = fmt.Sprintf("%d retries resolved; %d recovered (%.0f%%). Recovery rate is low — retries may be firing on non-transient errors.",
+			resolved, succeededAfterRetry, recoveryRate*100)
 	case succeededAfterRetry == 0 && failedAfterRetry > 0:
 		status = StatusBroken
 		summary = fmt.Sprintf("%d retries, all still failed — retry policy is wasting tokens.", failedAfterRetry)
@@ -284,6 +310,7 @@ func checkRetryMechanism(opts Options, since time.Time) *Check {
 			"sessions_with_retries": sessionsWithRetries,
 			"recovered":             succeededAfterRetry,
 			"still_failed":          failedAfterRetry,
+			"recovery_rate":         recoveryRate,
 		},
 	}
 }
