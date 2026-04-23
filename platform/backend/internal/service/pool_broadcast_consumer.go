@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
 	"github.com/a3c/platform/internal/agentpool"
 	"github.com/a3c/platform/internal/model"
@@ -59,7 +61,15 @@ func (c *PoolBroadcastConsumerImpl) FetchEvents(ctx context.Context, agentID str
 	}
 
 	events := make([]agentpool.BroadcastEvent, 0, len(raws))
-	for _, s := range raws {
+	for idx, s := range raws {
+		// Strip a UTF-8 BOM if someone's producer dropped one at the
+		// front — PowerShell's Set-Content -Encoding UTF8 does this,
+		// and Go's json.Unmarshal rejects the resulting leading EF BB BF
+		// with "invalid character '\ufeff'". Silent-drop-on-parse-fail
+		// made this a 40-minute mystery the first time it bit; better
+		// to normalise here than to eat the event.
+		trimmed := strings.TrimPrefix(s, "\ufeff")
+		trimmed = strings.TrimSpace(trimmed)
 		var env struct {
 			Header struct {
 				Type      string `json:"type"`
@@ -67,7 +77,16 @@ func (c *PoolBroadcastConsumerImpl) FetchEvents(ctx context.Context, agentID str
 			} `json:"header"`
 			Payload map[string]interface{} `json:"payload"`
 		}
-		if err := json.Unmarshal([]byte(s), &env); err != nil {
+		if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+			// Log the parse failure so the next debugging session
+			// isn't blind. Include index + first 60 chars so operators
+			// can identify which producer is misbehaving.
+			preview := trimmed
+			if len(preview) > 60 {
+				preview = preview[:60] + "…"
+			}
+			log.Printf("[PoolBroadcastConsumer] drop malformed entry agent=%s idx=%d err=%v preview=%q",
+				agentID, idx, err, preview)
 			continue
 		}
 		events = append(events, agentpool.BroadcastEvent{

@@ -48,7 +48,14 @@ func StartHeartbeatChecker() {
 
 		for range ticker.C {
 			var agents []model.Agent
-			model.DB.Where("status = 'online'").Find(&agents)
+			// Platform-hosted (pool) agents don't run the MCP poller —
+			// their liveness is governed by the pool manager (subprocess
+			// health check, context watcher, dormancy detector). If we
+			// evaluated them here they'd get falsely offlined after the
+			// 7-minute grace because nothing in their path touches the
+			// LastHeartbeat column. Skip them at the SQL level so the
+			// dormancy/health logic stays the single source of truth.
+			model.DB.Where("status = 'online' AND (is_platform_hosted = ? OR is_platform_hosted IS NULL)", false).Find(&agents)
 
 			now := time.Now()
 			for _, a := range agents {
