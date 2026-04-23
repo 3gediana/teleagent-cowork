@@ -269,12 +269,30 @@ export type PoolInstance = {
   skills_injected?: string[]
   working_dir?: string
   last_error?: string
+  // Opencode session plumbing — populated when the platform pairs
+  // a subprocess with a provider/model and the session-creator
+  // step succeeds on spawn. See @platform/backend/internal/agentpool/pool.go.
+  opencode_provider_id?: string
+  opencode_model_id?: string
+  opencode_session_id?: string
+  // Context-watch bookkeeping: rotation count for how many times
+  // the background watcher has rolled the session to a new one
+  // before the threshold, and the last token footprint the probe
+  // observed. Both drive the "session health" panel on the card.
+  archive_rotation?: number
+  last_context_tokens?: number
 }
 
 export const agentPoolApi = {
   list: () =>
     api.get('/agentpool/list') as Promise<{ success: boolean; data: { instances: PoolInstance[] } }>,
-  spawn: (payload: { project_id?: string; role_hint?: string; name?: string }) =>
+  spawn: (payload: {
+    project_id?: string
+    role_hint?: string
+    name?: string
+    opencode_provider_id?: string
+    opencode_model_id?: string
+  }) =>
     api.post('/agentpool/spawn', payload) as Promise<{ success: boolean; data: PoolInstance; error?: any }>,
   shutdown: (instanceId: string) =>
     api.post('/agentpool/shutdown', { instance_id: instanceId }) as Promise<{ success: boolean; data: any }>,
