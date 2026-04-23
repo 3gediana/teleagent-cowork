@@ -289,9 +289,58 @@ export type PoolInstance = {
   dormant_at?: string
 }
 
+// OpencodeProvider is one entry from ~/.config/opencode/opencode.json
+// surfaced via /agentpool/opencode-providers. IDs are the strings
+// opencode itself accepts in a session body, so the spawn modal
+// can feed them straight through without translation.
+export interface OpencodeProvider {
+  id: string
+  name: string
+  npm?: string
+  models: OpencodeProviderModel[]
+}
+
+export interface OpencodeProviderModel {
+  id: string
+  name: string
+  context?: number
+  output?: number
+}
+
+// PoolTokenSample / PoolEvent mirror the ring-buffer shape in
+// internal/agentpool/metrics.go. at_ms is unix milliseconds.
+export interface PoolTokenSample {
+  at_ms: number
+  tokens: number
+  session_id?: string
+}
+
+export interface PoolEvent {
+  at_ms: number
+  type: 'spawn_ready' | 'rotate' | 'dormancy' | 'wake' | 'crash' | 'shutdown' | string
+  detail?: string
+}
+
+export interface PoolMetrics {
+  tokens: PoolTokenSample[]
+  events: PoolEvent[]
+}
+
 export const agentPoolApi = {
   list: () =>
     api.get('/agentpool/list') as Promise<{ success: boolean; data: { instances: PoolInstance[] } }>,
+
+  // Opencode config.json provider catalogue — NOT the LLMEndpoint
+  // rows returned by /opencode/providers. See the comment on
+  // PoolInstance.opencode_provider_id for why these are different.
+  opencodeProviders: () =>
+    api.get('/agentpool/opencode-providers') as Promise<{ success: boolean; data: { providers: OpencodeProvider[] } }>,
+
+  // Per-instance metric rings: token curve + lifecycle event log.
+  // Safe to poll at the dashboard's refresh cadence; entirely
+  // in-memory on the backend.
+  metrics: (instanceId: string) =>
+    api.get(`/agentpool/metrics/${instanceId}`) as Promise<{ success: boolean; data: PoolMetrics }>,
 
   spawn: (payload: {
     project_id?: string

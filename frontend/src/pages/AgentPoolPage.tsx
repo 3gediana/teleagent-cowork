@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../stores/appStore'
-import { agentPoolApi, type PoolInstance } from '../api/endpoints'
+import {
+  agentPoolApi,
+  type PoolInstance,
+  type OpencodeProvider,
+  type PoolMetrics,
+  type PoolEvent,
+  type PoolTokenSample,
+} from '../api/endpoints'
 
 // ARCHIVE_THRESHOLD_TOKENS mirrors agentpool.ManagerConfig.ApplyDefaults
 // (150_000). Not worth round-tripping — the backend never surfaces it
@@ -56,16 +63,18 @@ function SpawnModal({ onClose, onSpawned }: { onClose: () => void; onSpawned: (i
   const [err, setErr] = useState<string | null>(null)
   // Opencode provider/model pair the pool agent will pin on its
   // session. These are *opencode's* provider ids (e.g.
-  // "minimax-coding-plan"), NOT the platform's LLMEndpoint ids
-  // (`llm_xxxx`). The two systems are parallel: LLMEndpoint drives
-  // the native runner / dialogue pages; pool agents speak directly
-  // to opencode's own config in ~/.config/opencode/opencode.json.
+  // "minimax-coding-plan") served by GET /agentpool/opencode-providers
+  // which reads ~/.config/opencode/opencode.json. NOT the LLMEndpoint
+  // ids (`llm_xxxx`) which drive the native runner.
   //
   // Required for broadcast injection to work — the backend's
   // PoolBroadcastInjector refuses to post to opencode with empty
   // model fields (opencode silently drops the turn otherwise).
   const [providerID, setProviderID] = useState(() => localStorage.getItem('pool.last_provider') || '')
   const [modelID, setModelID] = useState(() => localStorage.getItem('pool.last_model') || '')
+  // Catalogue fetched at modal open. Empty array = fallback to
+  // free-text input (fresh installs or missing config.json).
+  const [providers, setProviders] = useState<OpencodeProvider[]>([])
 
   // Remember the last-used pair so the next spawn doesn't make the
   // operator re-type the same strings. Stored in localStorage rather
@@ -76,6 +85,34 @@ function SpawnModal({ onClose, onSpawned }: { onClose: () => void; onSpawned: (i
   useEffect(() => {
     if (modelID) localStorage.setItem('pool.last_model', modelID)
   }, [modelID])
+
+  // Load opencode config catalogue once on mount. Failure is
+  // non-fatal — the input stays a free-text field.
+  useEffect(() => {
+    agentPoolApi.opencodeProviders()
+      .then((res) => {
+        if (res?.success && res.data?.providers?.length) {
+          setProviders(res.data.providers)
+          // If the operator has no saved preference, seed with the
+          // first provider+model so "just click Spawn" works on a
+          // fresh install.
+          if (!providerID && res.data.providers[0]) {
+            const p0 = res.data.providers[0]
+            setProviderID(p0.id)
+            if (!modelID && p0.models[0]) setModelID(p0.models[0].id)
+          }
+        }
+      })
+      .catch(() => {/* silent fallback */})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Model list narrows once a provider is picked. Free-text when the
+  // catalogue is missing or the selected provider isn't in it.
+  const selectedProvider = useMemo(
+    () => providers.find((p) => p.id === providerID),
+    [providers, providerID],
+  )
 
   const handleSpawn = async () => {
     if (!selectedProjectId) return
@@ -121,39 +158,51 @@ function SpawnModal({ onClose, onSpawned }: { onClose: () => void; onSpawned: (i
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block font-marker text-[10px] uppercase tracking-widest text-[#5d4037]/70 mb-1">Opencode provider *</label>
-              <input
-                list="pool-provider-suggestions"
-                value={providerID}
-                onChange={(e) => setProviderID(e.target.value)}
-                placeholder="minimax-coding-plan"
-                className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] placeholder-[#8b4513]/30 shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
-              />
-              <datalist id="pool-provider-suggestions">
-                <option value="minimax-coding-plan" />
-                <option value="anthropic" />
-                <option value="openai" />
-                <option value="deepseek" />
-              </datalist>
+              {providers.length > 0 ? (
+                <select
+                  value={providerID}
+                  onChange={(e) => setProviderID(e.target.value)}
+                  className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} <span className="text-[#8b4513]/40">— {p.id}</span></option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={providerID}
+                  onChange={(e) => setProviderID(e.target.value)}
+                  placeholder="minimax-coding-plan"
+                  className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] placeholder-[#8b4513]/30 shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
+                />
+              )}
             </div>
             <div>
               <label className="block font-marker text-[10px] uppercase tracking-widest text-[#5d4037]/70 mb-1">Model *</label>
-              <input
-                list="pool-model-suggestions"
-                value={modelID}
-                onChange={(e) => setModelID(e.target.value)}
-                placeholder="MiniMax-M2.7"
-                className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] placeholder-[#8b4513]/30 shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
-              />
-              <datalist id="pool-model-suggestions">
-                <option value="MiniMax-M2.7" />
-                <option value="claude-sonnet-4-5-20250929" />
-                <option value="gpt-4o-mini" />
-                <option value="deepseek-chat" />
-              </datalist>
+              {selectedProvider && selectedProvider.models.length > 0 ? (
+                <select
+                  value={modelID}
+                  onChange={(e) => setModelID(e.target.value)}
+                  className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
+                >
+                  {selectedProvider.models.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={modelID}
+                  onChange={(e) => setModelID(e.target.value)}
+                  placeholder="MiniMax-M2.7"
+                  className="w-full bg-white/70 border border-[#8b4513]/20 rounded-lg px-3 py-2 text-sm font-hand text-[#3e2723] placeholder-[#8b4513]/30 shadow-inner focus:ring-2 focus:ring-[#8b4513]/40 outline-none"
+                />
+              )}
             </div>
           </div>
           <p className="-mt-1 text-[10px] font-hand text-[#8b4513]/50 italic">
-            Required — these must match an entry in opencode's own config (~/.config/opencode/opencode.json). Platform broadcasts drop silently otherwise.
+            {providers.length > 0
+              ? `${providers.length} provider${providers.length === 1 ? '' : 's'} from ~/.config/opencode/opencode.json — edit that file to add more.`
+              : 'Free-text: these must match an entry in ~/.config/opencode/opencode.json. Broadcasts drop silently otherwise.'}
           </p>
 
           <div>
@@ -260,6 +309,166 @@ function dormantDuration(dormantAt?: string): string {
   return `${Math.floor(h / 24)}d`
 }
 
+// eventLabel maps the backend event type to an operator-friendly
+// icon + phrase. Unknown types pass through unchanged so
+// forward-compatible additions show up in the log without a
+// frontend release.
+function eventLabel(t: string): { icon: string; phrase: string } {
+  switch (t) {
+    case 'spawn_ready':
+      return { icon: '🟢', phrase: 'spawned' }
+    case 'rotate':
+      return { icon: '🔁', phrase: 'rotated session' }
+    case 'dormancy':
+      return { icon: '🌙', phrase: 'entered dormancy' }
+    case 'wake':
+      return { icon: '☀️', phrase: 'woke up' }
+    case 'crash':
+      return { icon: '💥', phrase: 'crashed' }
+    case 'shutdown':
+      return { icon: '⏹', phrase: 'shut down' }
+    default:
+      return { icon: '•', phrase: t }
+  }
+}
+
+// formatClock renders a unix-ms timestamp into "HH:MM:SS" — tight
+// enough for a row in the event log without wrapping.
+function formatClock(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+// TokenSparkline renders the recent token curve as a polyline SVG
+// so we don't drag in a chart dependency. Y-axis is normalised
+// against the archive threshold (150K) so the line height maps
+// directly to "how close we are to rotating". Rotations show as
+// vertical dashed markers so the operator can read the history
+// without peeking at the event log.
+function TokenSparkline({ tokens, events }: { tokens: PoolTokenSample[]; events: PoolEvent[] }) {
+  const w = 280
+  const h = 48
+  const pad = 2
+
+  if (tokens.length < 2) {
+    return (
+      <div className="h-12 flex items-center justify-center text-[10px] font-hand text-[#8b4513]/40 italic">
+        collecting samples…
+      </div>
+    )
+  }
+  const xs0 = tokens[0].at_ms
+  const xs1 = tokens[tokens.length - 1].at_ms
+  const span = Math.max(1, xs1 - xs0)
+
+  const points = tokens.map((s) => {
+    const x = pad + ((s.at_ms - xs0) / span) * (w - pad * 2)
+    const yNorm = Math.min(1, Math.max(0, s.tokens / ARCHIVE_THRESHOLD_TOKENS))
+    const y = h - pad - yNorm * (h - pad * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+
+  // Rotation markers sit at the x of any event with type=rotate
+  // whose at_ms falls inside the sample window (older ones drop
+  // off the left edge naturally with the data).
+  const rotateXs: number[] = []
+  for (const e of events) {
+    if (e.type !== 'rotate') continue
+    if (e.at_ms < xs0 || e.at_ms > xs1) continue
+    rotateXs.push(pad + ((e.at_ms - xs0) / span) * (w - pad * 2))
+  }
+
+  // Threshold bands: 60% amber, 85% rose.
+  const thresholdLine = (pct: number, color: string) => {
+    const y = h - pad - pct * (h - pad * 2)
+    return <line x1={pad} x2={w - pad} y1={y} y2={y} stroke={color} strokeDasharray="2 3" strokeWidth={0.5} />
+  }
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-12" preserveAspectRatio="none">
+      {thresholdLine(0.6, '#d97706')}
+      {thresholdLine(0.85, '#e11d48')}
+      {rotateXs.map((x, i) => (
+        <line key={i} x1={x} x2={x} y1={pad} y2={h - pad} stroke="#4338ca" strokeDasharray="1 2" strokeWidth={0.75} opacity={0.7} />
+      ))}
+      <polyline points={points} fill="none" stroke="#059669" strokeWidth={1.25} strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// ExpandedMetricsPanel fetches /agentpool/metrics/:id on mount and
+// polls at 4s while visible. Unmounts stop the poll. The backend
+// keeps rings in-memory so this is the sole way to see them.
+function ExpandedMetricsPanel({ instanceID }: { instanceID: string }) {
+  const [metrics, setMetrics] = useState<PoolMetrics | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let stopped = false
+    const pull = async () => {
+      try {
+        const res = await agentPoolApi.metrics(instanceID)
+        if (stopped) return
+        if (res?.success) {
+          setMetrics(res.data)
+          setErr(null)
+        } else {
+          setErr('metrics fetch failed')
+        }
+      } catch (e) {
+        if (!stopped) setErr(e instanceof Error ? e.message : 'network')
+      }
+    }
+    pull()
+    const t = setInterval(pull, 4000)
+    return () => { stopped = true; clearInterval(t) }
+  }, [instanceID])
+
+  if (err) {
+    return <p className="text-[10px] font-hand text-rose-700 italic">metrics: {err}</p>
+  }
+  if (!metrics) {
+    return <p className="text-[10px] font-hand text-[#8b4513]/40 italic">loading metrics…</p>
+  }
+
+  // Show newest events first, cap at 20 so the card stays compact.
+  const recent = [...metrics.events].reverse().slice(0, 20)
+
+  return (
+    <div className="mt-3 rounded-lg border border-[#8b4513]/15 bg-[#faf6ee] p-3 space-y-2">
+      <div>
+        <p className="text-[9px] font-marker uppercase tracking-widest text-[#8b4513]/50 mb-1">
+          Token curve <span className="text-[#8b4513]/30">({metrics.tokens.length} samples)</span>
+        </p>
+        <TokenSparkline tokens={metrics.tokens} events={metrics.events} />
+      </div>
+      <div>
+        <p className="text-[9px] font-marker uppercase tracking-widest text-[#8b4513]/50 mb-1">
+          Recent events <span className="text-[#8b4513]/30">({metrics.events.length} total)</span>
+        </p>
+        {recent.length === 0 ? (
+          <p className="text-[10px] font-hand text-[#8b4513]/40 italic">no events yet</p>
+        ) : (
+          <ul className="space-y-0.5 max-h-40 overflow-y-auto pr-1">
+            {recent.map((e, i) => {
+              const label = eventLabel(e.type)
+              return (
+                <li key={i} className="flex items-start gap-2 text-[10px] font-mono text-[#3e2723]">
+                  <span className="shrink-0 w-14 text-[#8b4513]/60">{formatClock(e.at_ms)}</span>
+                  <span className="shrink-0">{label.icon}</span>
+                  <span className="shrink-0 w-20 text-[#5d4037]">{label.phrase}</span>
+                  {e.detail && <span className="text-[#8b4513]/70 truncate" title={e.detail}>{e.detail}</span>}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function InstanceCard({ inst, onShutdown, onSleep, onWake, onPurge, pendingAction }: {
   inst: PoolInstance
   onShutdown: (id: string) => void
@@ -273,14 +482,23 @@ function InstanceCard({ inst, onShutdown, onSleep, onWake, onPurge, pendingActio
   const canSleep = inst.status === 'ready'
   const canWake = inst.status === 'dormant'
   const busy = pendingAction === inst.id
+  // Per-card expand toggle for the metrics panel. Not hoisted to
+  // the page — each card polls independently, so one expanded
+  // card doesn't drive the whole grid's fetch volume.
+  const [expanded, setExpanded] = useState(false)
 
   return (
     <div className="parchment rounded-2xl p-5 border border-[#8b4513]/20 shadow-md hover:shadow-lg transition-shadow relative">
-      <div className="flex items-start justify-between gap-3 mb-3">
+      <div
+        className="flex items-start justify-between gap-3 mb-3 cursor-pointer select-none"
+        title={expanded ? 'Collapse metrics' : 'Expand to see token curve + event log'}
+        onClick={() => setExpanded((v) => !v)}
+      >
         <div className="min-w-0">
           <h4 className="font-marker text-base text-[#5d4037] flex items-center gap-2 truncate">
             🏠 {inst.agent_name}
             <span className="text-[10px] font-mono bg-black/5 text-[#8b4513]/50 px-2 py-0.5 rounded">#{inst.id.slice(0, 12)}</span>
+            <span className="text-[10px] text-[#8b4513]/40">{expanded ? '▾' : '▸'}</span>
           </h4>
           <div className="mt-1 flex items-center gap-3 text-[11px] font-hand text-[#8b4513]/60">
             <span>port <span className="font-mono text-[#5d4037]">{inst.port}</span></span>
@@ -360,6 +578,8 @@ function InstanceCard({ inst, onShutdown, onSleep, onWake, onPurge, pendingActio
           <span className="ml-auto text-[10px] font-hand text-[#8b4513]/40">project <span className="font-mono">{inst.project_id}</span></span>
         )}
       </div>
+
+      {expanded && <ExpandedMetricsPanel instanceID={inst.id} />}
     </div>
   )
 }
