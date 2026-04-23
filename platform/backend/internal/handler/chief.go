@@ -2,6 +2,7 @@ package handler
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/a3c/platform/internal/llm"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/service"
 )
@@ -39,10 +40,27 @@ func (h *ChiefHandler) Chat(c *gin.Context) {
 		return
 	}
 
+	// Pre-flight: without at least one LLM endpoint the dispatcher
+	// has nothing to route to. Previously we would still 200 OK and
+	// spin a goroutine that immediately failed inside resolveEndpoint
+	// — the error got logged and the dashboard saw nothing but a
+	// sad empty chat. Fail loudly here so the frontend can show the
+	// "configure an endpoint first" hint instead of silently hanging.
+	if len(llm.DefaultRegistry.List()) == 0 {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{
+			"code":    "NO_LLM_ENDPOINTS",
+			"message": "No LLM endpoint is registered — add one in Settings → LLM Endpoints before chatting with the Chief",
+		}})
+		return
+	}
+
 	// Kick off async Chief session. TriggerChiefChat persists the
 	// user turn to DialogueMessage before dispatch; the assistant
 	// turn is written when the session completes via
-	// service.HandleSessionCompletion.
+	// service.HandleSessionCompletion. If dispatch still fails after
+	// the pre-flight (e.g. the sole endpoint rejects the API key)
+	// the failure hook wired at startup broadcasts AGENT_ERROR over
+	// SSE so the chat UI can render it inline.
 	go service.TriggerChiefChat(projectID, req.Message)
 
 	c.JSON(200, gin.H{

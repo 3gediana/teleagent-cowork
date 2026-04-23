@@ -84,22 +84,63 @@ var DefaultManager = &AgentManager{
 
 type SessionDispatcher func(session *Session) error
 
-var dispatcher SessionDispatcher
+// SessionFailureHook is invoked whenever DispatchSession's dispatcher
+// returns an error. Lives here (rather than in the service package
+// that owns SSE) so the agent package stays import-cycle-free; the
+// service layer registers a concrete broadcast implementation at
+// startup via RegisterFailureHook. Runs on the dispatch goroutine
+// after the session has already been flipped to status=failed in
+// memory + DB, so hooks only need to worry about observer-side
+// effects (SSE event, dialogue message append, metrics).
+type SessionFailureHook func(session *Session, err error)
+
+var (
+	dispatcher  SessionDispatcher
+	failureHook SessionFailureHook
+)
 
 func RegisterDispatcher(d SessionDispatcher) {
 	dispatcher = d
 }
 
+// RegisterFailureHook wires in the observer side-effects (SSE broadcast
+// etc.) invoked when the dispatcher returns an error. Calling with nil
+// clears the hook, which is only useful in tests. Safe to call before
+// any session is dispatched; the hook is read on each dispatch.
+func RegisterFailureHook(h SessionFailureHook) {
+	failureHook = h
+}
+
 func DispatchSession(session *Session) {
-	if dispatcher != nil {
-		go func() {
-			if err := dispatcher(session); err != nil {
-				log.Printf("[Agent] Failed to dispatch session %s: %v", session.ID, err)
-			}
-		}()
-	} else {
+	if dispatcher == nil {
 		log.Printf("[Agent] No dispatcher registered, session %s stays pending", session.ID)
+		return
 	}
+	go func() {
+		err := dispatcher(session)
+		if err == nil {
+			return
+		}
+		// Previously dispatch errors were logged and swallowed, which
+		// made e.g. "no LLM endpoints registered" invisible to anyone
+		// chatting with the Chief — the session would stay pending
+		// forever and the client saw a 200 OK from the handler. Now
+		// we flip the in-memory session + DB row to failed and stash
+		// the error message on Output so operators can see it in the
+		// session browser, then let the failure hook broadcast.
+		log.Printf("[Agent] Failed to dispatch session %s: %v", session.ID, err)
+		session.Status = "failed"
+		session.Output = err.Error()
+		model.DB.Model(&model.AgentSession{}).
+			Where("id = ?", session.ID).
+			Updates(map[string]interface{}{
+				"status": "failed",
+				"output": err.Error(),
+			})
+		if failureHook != nil {
+			failureHook(session, err)
+		}
+	}()
 }
 
 func (m *AgentManager) CreateSession(role Role, projectID string, ctx *SessionContext, trigger string) *Session {

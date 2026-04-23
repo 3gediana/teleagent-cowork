@@ -48,6 +48,15 @@ func main() {
 	runner.SessionCompletionHandler = service.HandleSessionCompletion
 	agent.RegisterDispatcher(runner.Dispatch)
 
+	// Observer-side effects for dispatch failures. Before this hook,
+	// a broken dispatch (no LLM endpoints, provider rejects key, etc.)
+	// only hit stderr and left the session stuck in pending, with no
+	// signal reaching the dashboard. service.HandleDispatchFailure
+	// broadcasts AGENT_ERROR over SSE and, for Chief/Maintain chat
+	// sessions, appends a system-role row to dialogue history so the
+	// failure shows up inline in the chat tab.
+	agent.RegisterFailureHook(service.HandleDispatchFailure)
+
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 

@@ -122,6 +122,13 @@ func BuildDialogueHistoryForPrompt(projectID, channel string) string {
 	var sb strings.Builder
 	sb.WriteString("## Conversation history\n\n")
 	for _, m := range msgs {
+		// "system" rows are surfaced to the dashboard (e.g. dispatch
+		// failures via HandleDispatchFailure) but must not leak into
+		// the next prompt — otherwise the model sees its own infra
+		// failure notes as if they were part of the user's turn.
+		if m.Role != DialogueRoleUser && m.Role != DialogueRoleAssistant {
+			continue
+		}
 		label := "Human"
 		if m.Role == DialogueRoleAssistant {
 			label = "You"
