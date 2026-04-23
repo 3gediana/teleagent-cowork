@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -326,6 +327,40 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
 		return
+	}
+
+	// is_human bootstrap guard. Before this check, anyone could claim
+	// is_human=true on register and instantly bypass every
+	// requireHuman() gate (Chief chat, LLM endpoint CRUD, tag
+	// lifecycle, etc.). Now:
+	//   - If no human exists yet, allow is_human=true so the very
+	//     first caller can bootstrap the dashboard.
+	//   - Otherwise require the caller to prove they are already a
+	//     human by sending a valid Bearer token whose agent has
+	//     IsHuman=true. Register lives outside AuthMiddleware so we
+	//     do this inline.
+	if req.IsHuman {
+		var humanCount int64
+		model.DB.Model(&model.Agent{}).Where("is_human = ?", true).Count(&humanCount)
+		if humanCount > 0 {
+			authHeader := c.GetHeader("Authorization")
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if authHeader == "" || token == authHeader || token == "" {
+				c.JSON(403, gin.H{"success": false, "error": gin.H{
+					"code":    "HUMAN_APPROVAL_REQUIRED",
+					"message": "is_human=true requires a Bearer token for an existing human agent; bootstrap is already done",
+				}})
+				return
+			}
+			caller, err := repo.GetAgentByKey(token)
+			if err != nil || caller == nil || !caller.IsHuman {
+				c.JSON(403, gin.H{"success": false, "error": gin.H{
+					"code":    "HUMAN_APPROVAL_REQUIRED",
+					"message": "only an existing human agent can promote another agent to human",
+				}})
+				return
+			}
+		}
 	}
 
 	if req.ProjectID != "" {
