@@ -132,7 +132,7 @@ type ManagerConfig struct {
 	Args    []string
 
 	// PortRange the pool picks from when assigning a subprocess port.
-	// Defaults to 47000-47999.
+	// Defaults to 4097-4199 (just above the operator's default 4096).
 	PortMin int
 	PortMax int
 
@@ -158,10 +158,10 @@ func (c *ManagerConfig) ApplyDefaults() {
 		c.Root = filepath.Join("data", "pool")
 	}
 	if c.PortMin == 0 {
-		c.PortMin = 47000
+		c.PortMin = 4097
 	}
 	if c.PortMax == 0 {
-		c.PortMax = 47999
+		c.PortMax = 4199
 	}
 	if c.StartupTimeout == 0 {
 		c.StartupTimeout = 30 * time.Second
@@ -284,16 +284,25 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 		return nil, fmt.Errorf("pool: register agent row: %w", err)
 	}
 
-	// 5. Start the subprocess. Env vars wire authentication + URL.
+	// 5. Start the subprocess. Each pool agent gets its own
+	// opencode serve so it has an isolated MCP process with its
+	// own A3C_AGENT_ID and A3C_WORK_DIR. This lets file_sync
+	// pull project files into the agent's own workspace, and
+	// the MCP poller injects broadcasts into that agent's serve.
+	//
+	// OPENCODE_SERVE_URL points to the agent's own serve so the
+	// A3C MCP poller knows where to inject messages.
 	spawnReq := SpawnerRequest{
 		WorkingDir: workDir,
 		Port:       port,
 		Env: map[string]string{
-			"A3C_PLATFORM_URL": m.cfg.PlatformURL,
-			"A3C_ACCESS_KEY":   accessKey,
-			"A3C_PROJECT_ID":   req.ProjectID,
-			"A3C_AGENT_ID":     agentID,
-			"A3C_INSTANCE_ID":  instanceID,
+			"A3C_PLATFORM_URL":   m.cfg.PlatformURL,
+			"A3C_ACCESS_KEY":     accessKey,
+			"A3C_PROJECT_ID":     req.ProjectID,
+			"A3C_AGENT_ID":       agentID,
+			"A3C_INSTANCE_ID":    instanceID,
+			"A3C_WORK_DIR":       workDir,
+			"OPENCODE_SERVE_URL": fmt.Sprintf("http://127.0.0.1:%d", port),
 		},
 		Command: m.cfg.Command,
 		Args:    m.cfg.Args,
@@ -305,13 +314,14 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 		return nil, fmt.Errorf("pool: spawn subprocess: %w", err)
 	}
 
+	instPort := port
 	inst := Instance{
 		ID:             instanceID,
 		AgentID:        agentID,
 		AgentName:      name,
 		Role:           string(req.RoleHint),
 		ProjectID:      req.ProjectID,
-		Port:           port,
+		Port:           instPort,
 		PID:            handle.PID(),
 		Status:         "starting",
 		StartedAt:      time.Now(),
@@ -325,6 +335,8 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 	m.mu.Unlock()
 
 	// 6. Wait for health.
+	// Virtual agents always report healthy (they share the operator's
+	// opencode serve). Subprocess agents wait for their own health.
 	healthy := handle.WaitHealthy(ctx, m.cfg.StartupTimeout)
 	if !healthy {
 		log.Printf("[Pool] instance %s failed to go healthy in %s; tearing down", instanceID, m.cfg.StartupTimeout)

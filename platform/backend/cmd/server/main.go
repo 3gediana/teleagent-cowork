@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agent"
@@ -106,11 +108,29 @@ func main() {
 	// client agents. See internal/agentpool/pool.go. The pool is
 	// opt-in: if no handler ever calls Spawn, zero subprocesses
 	// are created.
+	// Allow operators to pin the spawner command explicitly. The pool's
+	// default is "opencode" resolved against PATH, which doesn't help
+	// on Windows deployments where opencode ships as opencode.cmd under
+	// a non-PATH directory like D:\openclaw\npm. A3C_OPENCODE_CMD is
+	// the absolute path (or basename) to invoke; A3C_OPENCODE_ARGS is
+	// a whitespace-separated prefix such as "serve" — the pool still
+	// appends "--port <N>" automatically when the operator did not
+	// already include one.
+	poolCmd := strings.TrimSpace(os.Getenv("A3C_OPENCODE_CMD"))
+	var poolArgs []string
+	if raw := strings.TrimSpace(os.Getenv("A3C_OPENCODE_ARGS")); raw != "" {
+		poolArgs = strings.Fields(raw)
+	}
 	poolManager := agentpool.NewManager(agentpool.ManagerConfig{
 		Root:        fmt.Sprintf("%s/pool", cfg.DataDir),
 		PlatformURL: fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		Command:     poolCmd,
+		Args:        poolArgs,
 	}, nil)
 	agentpool.SetDefault(poolManager)
+	if poolCmd != "" {
+		log.Printf("[Pool] spawner command override: %s %v", poolCmd, poolArgs)
+	}
 
 	// Unauthenticated bootstrap endpoints only. Anything that mutates
 	// or reads project state now lives in the auth group below — previously
