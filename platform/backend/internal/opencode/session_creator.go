@@ -100,3 +100,64 @@ func (p *PoolSessionCreator) createSessionWithTitle(ctx context.Context, serveUR
 	}
 	return info.ID, nil
 }
+
+// ---------------------------------------------------------------
+// BroadcastInjector adapter
+// ---------------------------------------------------------------
+
+// NewPoolBroadcastInjector returns an adapter that satisfies
+// agentpool.BroadcastInjector by posting to the opencode serve's
+// /session/:id/prompt_async endpoint. We pick async over sync
+// (/message) because the pool's broadcast consumer is a single
+// goroutine per agent and the injection should fan out fast — the
+// assistant reply lands on opencode's own timeline and the
+// context watcher picks up the resulting token growth on its
+// next poll. Caller hands us provider+model per call since the
+// pool agent's model can in principle change between events
+// (dashboard edits the opencode provider/model on an existing
+// instance).
+//
+// `injectTimeout` bounds each HTTP call. Zero falls back to 20s,
+// which is comfortably above opencode 1.14.21's observed latency
+// for accepting a prompt_async (~1s) but short enough that a
+// wedged serve doesn't stall every subsequent broadcast.
+func NewPoolBroadcastInjector(injectTimeout time.Duration) *PoolBroadcastInjector {
+	if injectTimeout == 0 {
+		injectTimeout = 20 * time.Second
+	}
+	return &PoolBroadcastInjector{timeout: injectTimeout}
+}
+
+// PoolBroadcastInjector is a stateless adapter; the timeout is
+// the only configuration. Exported so main.go can thread it
+// into agentpool.Manager.WithBroadcastInjector.
+type PoolBroadcastInjector struct {
+	timeout time.Duration
+}
+
+// InjectMessage is the agentpool.BroadcastInjector contract.
+// Empty provider or model is rejected up-front: opencode silently
+// returns parts=0 in that case, which means the message lands in
+// the session as an empty turn and the LLM happily hallucinates
+// a reply without ever having seen the broadcast text. Hard-fail
+// here so the caller can log it instead.
+func (i *PoolBroadcastInjector) InjectMessage(ctx context.Context, serveURL, sessionID, text, providerID, modelID string) error {
+	if serveURL == "" {
+		return fmt.Errorf("pool broadcast injector: empty serveURL")
+	}
+	if sessionID == "" {
+		return fmt.Errorf("pool broadcast injector: empty sessionID")
+	}
+	if providerID == "" || modelID == "" {
+		return fmt.Errorf("pool broadcast injector: empty provider/model (would produce parts=0)")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, i.timeout)
+		defer cancel()
+	}
+	return New(serveURL).PromptAsync(ctx, sessionID, text, Model{
+		ProviderID: providerID,
+		ModelID:    modelID,
+	})
+}

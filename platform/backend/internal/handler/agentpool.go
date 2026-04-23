@@ -50,9 +50,11 @@ func (h *AgentPoolHandler) Spawn(c *gin.Context) {
 		return
 	}
 	var req struct {
-		ProjectID string `json:"project_id"`
-		RoleHint  string `json:"role_hint"`
-		Name      string `json:"name"`
+		ProjectID          string `json:"project_id"`
+		RoleHint           string `json:"role_hint"`
+		Name               string `json:"name"`
+		OpencodeProviderID string `json:"opencode_provider_id"`
+		OpencodeModelID    string `json:"opencode_model_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": err.Error()}})
@@ -65,9 +67,11 @@ func (h *AgentPoolHandler) Spawn(c *gin.Context) {
 	defer cancel()
 
 	inst, err := m.Spawn(ctx, agentpool.SpawnRequest{
-		ProjectID: req.ProjectID,
-		RoleHint:  agent.Role(req.RoleHint),
-		Name:      req.Name,
+		ProjectID:          req.ProjectID,
+		RoleHint:           agent.Role(req.RoleHint),
+		Name:               req.Name,
+		OpencodeProviderID: req.OpencodeProviderID,
+		OpencodeModelID:    req.OpencodeModelID,
 	})
 	if err != nil {
 		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SPAWN_FAILED", "message": err.Error()}})

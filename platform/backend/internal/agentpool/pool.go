@@ -164,7 +164,12 @@ type ManagerConfig struct {
 	Args    []string
 
 	// PortRange the pool picks from when assigning a subprocess port.
-	// Defaults to 4097-4199 (just above the operator's default 4096).
+	// Defaults to 5500-5599. Earlier defaults sat at 4097-4199 "just
+	// above opencode's 4096", but Windows reserves 4091-4290 for
+	// Hyper-V / WSL dynamic port allocations — any opencode serve
+	// we spawn there dies immediately with "Failed to start server
+	// on port NNNN". 5500-5599 sits below the ephemeral range and
+	// well away from known reservations on both Windows and Linux.
 	PortMin int
 	PortMax int
 
@@ -210,10 +215,10 @@ func (c *ManagerConfig) ApplyDefaults() {
 		c.Root = filepath.Join("data", "pool")
 	}
 	if c.PortMin == 0 {
-		c.PortMin = 4097
+		c.PortMin = 5500
 	}
 	if c.PortMax == 0 {
-		c.PortMax = 4199
+		c.PortMax = 5599
 	}
 	if c.StartupTimeout == 0 {
 		c.StartupTimeout = 30 * time.Second
@@ -281,12 +286,14 @@ type ArchiveNotifier interface {
 // instance struct they mutate is owned by the goroutine that owns
 // the subprocess, so no double-locking required.
 type Manager struct {
-	cfg             ManagerConfig
-	spawner         Spawner
-	store           Store
-	sessionCreator  SessionCreator
-	contextProbe    ContextProbe
-	archiveNotifier ArchiveNotifier
+	cfg               ManagerConfig
+	spawner           Spawner
+	store             Store
+	sessionCreator    SessionCreator
+	contextProbe      ContextProbe
+	archiveNotifier   ArchiveNotifier
+	broadcastConsumer BroadcastConsumer
+	broadcastInjector BroadcastInjector
 
 	mu        sync.Mutex
 	instances map[string]*subprocess
@@ -298,6 +305,12 @@ type Manager struct {
 	// watchStop, once non-nil, signals the context-watch goroutine
 	// to exit. Set by StartContextWatcher / cleared by Stop.
 	watchStop chan struct{}
+
+	// broadcastStop is the same story for the directed-broadcast
+	// consumer loop. Both are kept nil until the respective
+	// Start*() method is called so a Manager built without any
+	// background goroutines stays purely synchronous (tests).
+	broadcastStop chan struct{}
 }
 
 // NewManager builds a Manager with the given config. Spawner may be
@@ -670,10 +683,12 @@ func (m *Manager) Purge(id string) error {
 }
 
 // ShutdownAll stops every instance — useful on server shutdown so we
-// don't leak subprocesses. Also stops the context watcher so the
-// probe goroutine doesn't keep hitting dying serves.
+// don't leak subprocesses. Also stops the context watcher AND the
+// directed-broadcast consumer so no background goroutine keeps
+// hitting Redis or dying opencode serves after we've killed them.
 func (m *Manager) ShutdownAll() {
 	m.stopContextWatcher()
+	m.StopBroadcastConsumer()
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.instances))
 	for id := range m.instances {

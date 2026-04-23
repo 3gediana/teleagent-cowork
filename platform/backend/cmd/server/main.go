@@ -129,6 +129,7 @@ func main() {
 	// needs the one wire-up here rather than two parallel clients
 	// pointing at the same opencode serves.
 	poolOC := opencodepkg.NewPoolSessionCreator(0)
+	poolInject := opencodepkg.NewPoolBroadcastInjector(0)
 	poolManager := agentpool.NewManager(agentpool.ManagerConfig{
 		Root:                 fmt.Sprintf("%s/pool", cfg.DataDir),
 		PlatformURL:          fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
@@ -139,15 +140,25 @@ func main() {
 	}, nil).
 		WithSessionCreator(poolOC).
 		WithContextProbe(poolOC).
-		WithArchiveNotifier(service.NewPoolArchiveNotifier())
+		WithArchiveNotifier(service.NewPoolArchiveNotifier()).
+		WithBroadcastConsumer(service.NewPoolBroadcastConsumer()).
+		WithBroadcastInjector(poolInject)
 	agentpool.SetDefault(poolManager)
 	if poolCmd != "" {
 		log.Printf("[Pool] spawner command override: %s %v", poolCmd, poolArgs)
 	}
-	// Start the context watcher goroutine once the pool manager is
-	// wired. context.Background() gives it a server-lifetime ceiling;
-	// pool.ShutdownAll() stops it cleanly on graceful shutdown.
+	// Start the context watcher AND the directed-broadcast consumer
+	// once the pool manager is wired. context.Background() gives both
+	// a server-lifetime ceiling; pool.ShutdownAll() stops them cleanly
+	// on graceful shutdown.
+	//
+	// The broadcast consumer is what replaces the external MCP node
+	// process for platform-hosted agents: it drains Redis queue
+	// a3c:directed:<agentID> and injects events as prompt_async turns
+	// into the agent's opencode session. See agentpool/broadcast_consumer.go.
 	poolManager.StartContextWatcher(context.Background())
+	poolManager.StartBroadcastConsumer(context.Background(), 0)
+	log.Printf("[Pool] broadcast consumer started (watching Redis a3c:directed:*)")
 
 	// Unauthenticated bootstrap endpoints only. Anything that mutates
 	// or reads project state now lives in the auth group below — previously

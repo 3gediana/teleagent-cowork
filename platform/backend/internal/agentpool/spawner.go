@@ -67,6 +67,21 @@ type Spawner interface {
 type execSpawner struct{}
 
 func (s *execSpawner) Spawn(ctx context.Context, req SpawnerRequest) (SpawnerHandle, error) {
+	// Intentionally ignore `ctx` for the subprocess lifetime.
+	//
+	// Background: Manager.Spawn is called from an HTTP handler that
+	// threads gin's request context through as `ctx`. If we piped
+	// that into exec.CommandContext, the subprocess would be killed
+	// the moment the HTTP response returned — a textbook "we just
+	// spawned a server and then immediately murdered it" bug, which
+	// manifested as the pool agent exiting with code 1 ~2s after a
+	// successful `/agentpool/spawn` response.
+	//
+	// The subprocess's real lifetime is governed by
+	// execHandle.Terminate + ShutdownAll, not the caller's request
+	// context, so we use context.Background() at Start time and
+	// rely on our own signalling path for teardown.
+	_ = ctx
 	if err := os.MkdirAll(req.WorkingDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir workdir: %w", err)
 	}
@@ -93,7 +108,9 @@ func (s *execSpawner) Spawn(ctx context.Context, req SpawnerRequest) (SpawnerHan
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, cmdPath, args...)
+	// Use a pool-lifetime context so the subprocess survives the
+	// caller's request. Terminate path closes this explicitly.
+	cmd := exec.CommandContext(context.Background(), cmdPath, args...)
 	cmd.Dir = req.WorkingDir
 
 	// Merge env so child inherits PATH etc. but gets our overrides.
