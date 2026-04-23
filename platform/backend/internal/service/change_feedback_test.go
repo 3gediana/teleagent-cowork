@@ -4,13 +4,15 @@ package service
 // client-agent self-evolution loop.
 //
 // Scenarios:
-//   * L0 → success_count++ on each injected artifact
-//   * L2 → failure_count++ on each injected artifact
-//   * L1 → neither counter moves, but FeedbackApplied becomes true
+//   * L0 → success_count++ on the top-K attributed artifacts
+//   * L1 → success_count++ on the top-1 attributed (partial credit)
+//   * L2 → failure_count++ on the top-K attributed artifacts
 //   * Second call with same changeID → no-op (idempotency)
 //   * Change without injected_artifacts → no-op, no panic
 //   * Unknown change → no-op, no panic
 //   * Malformed injected_artifacts JSON → no-op, no panic
+//   * With InjectedRefs carrying Score → top-by-score credited, not first-K
+//   * Many artifacts injected → attribution cap (3) enforced
 
 import (
 	"fmt"
@@ -82,19 +84,25 @@ func seedChangeWithArtifacts(t *testing.T, changeID string, artifactIDs []string
 
 func TestHandleChangeAudit_L0_BumpsSuccess(t *testing.T) {
 	defer setupChangeFBDB(t)()
+	// 3 injected → attributionK=2 → top-2 get credit, tail stays at 0.
+	// Without refs the fallback picks the first two (selector already
+	// stored them in rank order), so a1/a2 get +1 and a3 stays 0.
 	seedChangeWithArtifacts(t, "chg1", []string{"a1", "a2", "a3"})
 
 	HandleChangeAudit("chg1", "L0")
 
-	var arts []model.KnowledgeArtifact
-	model.DB.Where("id IN ?", []string{"a1", "a2", "a3"}).Find(&arts)
-	for _, a := range arts {
-		if a.SuccessCount != 1 {
-			t.Errorf("%s: expected success_count=1, got %d", a.ID, a.SuccessCount)
-		}
-		if a.FailureCount != 0 {
-			t.Errorf("%s: expected failure_count=0, got %d", a.ID, a.FailureCount)
-		}
+	var a1, a2, a3 model.KnowledgeArtifact
+	model.DB.Where("id = ?", "a1").First(&a1)
+	model.DB.Where("id = ?", "a2").First(&a2)
+	model.DB.Where("id = ?", "a3").First(&a3)
+	if a1.SuccessCount != 1 || a2.SuccessCount != 1 {
+		t.Errorf("top-2 should be credited: got a1=%d a2=%d", a1.SuccessCount, a2.SuccessCount)
+	}
+	if a3.SuccessCount != 0 {
+		t.Errorf("tail artifact (a3) should NOT be credited under rank-based attribution, got %d", a3.SuccessCount)
+	}
+	if a1.FailureCount != 0 || a2.FailureCount != 0 || a3.FailureCount != 0 {
+		t.Error("L0 must not touch failure_count")
 	}
 
 	var ch model.Change
@@ -122,25 +130,33 @@ func TestHandleChangeAudit_L2_BumpsFailure(t *testing.T) {
 	}
 }
 
-func TestHandleChangeAudit_L1_NeitherCounterBumps(t *testing.T) {
+func TestHandleChangeAudit_L1_GivesPartialCredit(t *testing.T) {
 	defer setupChangeFBDB(t)()
-	seedChangeWithArtifacts(t, "chg1", []string{"a1"})
+	// 3 injected, L1 → only top-1 should get success_count=1. Partial
+	// credit reflects "direction was right" without over-rewarding the
+	// tail. Previously L1 dropped the signal entirely.
+	seedChangeWithArtifacts(t, "chg1", []string{"a1", "a2", "a3"})
 
 	HandleChangeAudit("chg1", "L1")
 
-	var a model.KnowledgeArtifact
-	model.DB.Where("id = ?", "a1").First(&a)
-	if a.SuccessCount != 0 || a.FailureCount != 0 {
-		t.Errorf("L1 should leave both counters at 0; got success=%d failure=%d",
-			a.SuccessCount, a.FailureCount)
+	var a1, a2, a3 model.KnowledgeArtifact
+	model.DB.Where("id = ?", "a1").First(&a1)
+	model.DB.Where("id = ?", "a2").First(&a2)
+	model.DB.Where("id = ?", "a3").First(&a3)
+	if a1.SuccessCount != 1 {
+		t.Errorf("top-1 (a1) should get partial credit on L1, got success=%d", a1.SuccessCount)
+	}
+	if a2.SuccessCount != 0 || a3.SuccessCount != 0 {
+		t.Errorf("only top-1 gets L1 partial credit; got a2=%d a3=%d", a2.SuccessCount, a3.SuccessCount)
+	}
+	if a1.FailureCount+a2.FailureCount+a3.FailureCount != 0 {
+		t.Error("L1 must not touch failure_count")
 	}
 
-	// But FeedbackApplied still flips — without that a followup L0/L2
-	// for the same change (e.g. from a retry path) would double-count.
 	var ch model.Change
 	model.DB.Where("id = ?", "chg1").First(&ch)
 	if !ch.FeedbackApplied {
-		t.Error("L1 should still flip FeedbackApplied to guard against double-fire")
+		t.Error("L1 should flip FeedbackApplied")
 	}
 }
 
@@ -158,7 +174,80 @@ func TestHandleChangeAudit_Idempotent(t *testing.T) {
 		t.Errorf("expected success_count=1 after 3 calls; got %d (double-firing!)", a.SuccessCount)
 	}
 	if a.FailureCount != 0 {
-		t.Errorf("expected failure_count=0 (idempotency should block second verdict)", )
+		t.Errorf("expected failure_count=0 (idempotency should block second verdict)")
+	}
+}
+
+// TestHandleChangeAudit_L0_WithRefs_UsesScoreRanking verifies that when
+// the Change row stores the rich InjectedRefs payload with scores, the
+// attribution picks the top-by-Score artifacts instead of the first-K
+// by list order. Seeds scores inversely to list order so the test
+// fails if the ranking falls through to the fallback.
+func TestHandleChangeAudit_L0_WithRefs_UsesScoreRanking(t *testing.T) {
+	defer setupChangeFBDB(t)()
+
+	// Seed artifacts a1..a3; inject with refs where a3 > a2 > a1 by score.
+	// Expectation: attributionK(3)=2, top-2 by score = a3, a2. a1 stays 0.
+	seedArtifactsOnly(t, []string{"a1", "a2", "a3"})
+	richRefs := `[{"id":"a1","reason":"semantic=0.20","score":0.20},` +
+		`{"id":"a2","reason":"semantic=0.50","score":0.50},` +
+		`{"id":"a3","reason":"semantic=0.90","score":0.90}]`
+	if err := model.DB.Create(&model.Change{
+		ID: "chg1", ProjectID: "p1", AgentID: "a1", Version: "v1",
+		InjectedArtifacts: richRefs,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	HandleChangeAudit("chg1", "L0")
+
+	var a1, a2, a3 model.KnowledgeArtifact
+	model.DB.Where("id = ?", "a1").First(&a1)
+	model.DB.Where("id = ?", "a2").First(&a2)
+	model.DB.Where("id = ?", "a3").First(&a3)
+	if a2.SuccessCount != 1 || a3.SuccessCount != 1 {
+		t.Errorf("top-2 by Score (a2, a3) should be credited; got a2=%d a3=%d", a2.SuccessCount, a3.SuccessCount)
+	}
+	if a1.SuccessCount != 0 {
+		t.Errorf("lowest-scoring artifact (a1) should NOT be credited; got %d", a1.SuccessCount)
+	}
+}
+
+// TestHandleChangeAudit_ManyInjected_CapsAt3 verifies attributionK caps
+// at 3 even when the injection pool is larger. With 6 injected the old
+// "bump all" behaviour would credit 6; the new policy credits only 3.
+func TestHandleChangeAudit_ManyInjected_CapsAt3(t *testing.T) {
+	defer setupChangeFBDB(t)()
+	ids := []string{"a1", "a2", "a3", "a4", "a5", "a6"}
+	seedChangeWithArtifacts(t, "chg1", ids)
+
+	HandleChangeAudit("chg1", "L0")
+
+	var arts []model.KnowledgeArtifact
+	model.DB.Where("id IN ?", ids).Find(&arts)
+	credited := 0
+	for _, a := range arts {
+		if a.SuccessCount == 1 {
+			credited++
+		}
+	}
+	if credited != 3 {
+		t.Errorf("attributionK cap=3; expected 3 artifacts credited out of 6, got %d", credited)
+	}
+}
+
+// seedArtifactsOnly seeds the artifact rows without creating a Change
+// — used when the test needs to craft a custom InjectedArtifacts
+// payload instead of the default flat-id list.
+func seedArtifactsOnly(t *testing.T, ids []string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := model.DB.Create(&model.KnowledgeArtifact{
+			ID: id, ProjectID: "p1", Kind: "pattern", Name: id,
+			Status: "active", Version: 1, UsageCount: 1,
+		}).Error; err != nil {
+			t.Fatalf("seed artifact: %v", err)
+		}
 	}
 }
 

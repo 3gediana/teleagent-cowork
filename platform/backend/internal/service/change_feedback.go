@@ -24,6 +24,7 @@ package service
 import (
 	"encoding/json"
 	"log"
+	"sort"
 
 	"github.com/a3c/platform/internal/model"
 	"gorm.io/gorm"
@@ -34,10 +35,20 @@ import (
 // audit level (including unknown ones — it becomes a no-op).
 //
 // Behaviour summary:
-//   - L0     → artifacts get success_count += 1
-//   - L1     → no counter change (mixed signal; skipping avoids noise)
-//   - L2     → artifacts get failure_count += 1
+//   - L0     → top-K attributed artifacts get success_count += 1
+//   - L1     → top-1 attributed artifact gets success_count += 1 (partial credit)
+//   - L2     → top-K attributed artifacts get failure_count += 1
 //   - empty  → early return, no work
+//
+// Attribution (rank-based, no LLM): when refs carry Score, we pick the
+// K highest-scoring IDs to credit/punish. When refs is empty (legacy
+// flat-id payload) we fall back to the original order — the selector
+// already stored IDs in rank order. See attributionK for the K policy.
+// Rationale: blanket-crediting every injected artifact on L0 inflates
+// noise artifacts' success counters; with 5-10 artifacts injected per
+// task usually only 1-3 actually drove the decision. L1 similarly gets
+// treated as "direction was right" — the single best-matching item
+// gets partial credit rather than dropping the signal on the floor.
 //
 // Always marks FeedbackApplied=true on the Change so the next call with
 // the same ID is a no-op.
@@ -87,18 +98,35 @@ func HandleChangeAudit(changeID, auditLevel string) {
 	var (
 		column  string
 		verdict string
+		bumpIDs []string
 	)
 	switch auditLevel {
 	case "L0":
 		column = "success_count"
 		verdict = "success"
+		bumpIDs = topKByRank(ids, refs, attributionK(len(ids)))
+	case "L1":
+		// Partial credit: L1 means "direction mostly right, execution
+		// detail off" — crediting the single top-ranked artifact
+		// captures that without over-rewarding noise alongside it.
+		column = "success_count"
+		verdict = "partial"
+		bumpIDs = topKByRank(ids, refs, 1)
 	case "L2":
 		column = "failure_count"
 		verdict = "failure"
+		bumpIDs = topKByRank(ids, refs, attributionK(len(ids)))
 	default:
-		// L1 or unknown — mark applied but don't bump anything. L1
-		// means "small issue, fixable" which is neither clean success
-		// nor outright failure, so we skip rather than guess.
+		// Unknown level — mark applied but don't bump anything.
+		model.DB.Model(&model.Change{}).Where("id = ?", changeID).
+			Update("feedback_applied", true)
+		return
+	}
+
+	// Defensive: if attribution policy returned zero IDs (shouldn't
+	// happen when len(ids) > 0, but guard anyway), still flip the
+	// applied flag so this row isn't rescanned.
+	if len(bumpIDs) == 0 {
 		model.DB.Model(&model.Change{}).Where("id = ?", changeID).
 			Update("feedback_applied", true)
 		return
@@ -109,7 +137,7 @@ func HandleChangeAudit(changeID, auditLevel string) {
 	// given the FeedbackApplied guard we checked above.
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.KnowledgeArtifact{}).
-			Where("id IN ?", ids).
+			Where("id IN ?", bumpIDs).
 			Update(column, gorm.Expr(column+" + 1")).Error; err != nil {
 			return err
 		}
@@ -120,8 +148,8 @@ func HandleChangeAudit(changeID, auditLevel string) {
 		log.Printf("[ChangeFeedback] failed to apply feedback for change %s: %v", changeID, err)
 		return
 	}
-	log.Printf("[ChangeFeedback] change=%s audit=%s → %s++ on %d artifacts",
-		changeID, auditLevel, verdict, len(ids))
+	log.Printf("[ChangeFeedback] change=%s audit=%s → %s on %d/%d injected artifacts",
+		changeID, auditLevel, verdict, len(bumpIDs), len(ids))
 
 	// Per-reason breakdown (PR 5): aggregate bumps by the *dominant*
 	// retrieval signal so operators / dashboards can later compute
@@ -129,11 +157,103 @@ func HandleChangeAudit(changeID, auditLevel string) {
 	// driven ones only 41%". Logged (not persisted) on purpose — cheap
 	// observability today, real storage when the signal is proven
 	// useful. Empty reasons (legacy payloads) show up as "unknown".
+	// Restricted to the attributed subset so the tally reflects what we
+	// actually credited, not the full injection.
 	if len(refs) > 0 {
-		tally := aggregateByDominantSignal(refs)
+		attributedRefs := filterRefsByIDs(refs, bumpIDs)
+		tally := aggregateByDominantSignal(attributedRefs)
 		log.Printf("[ChangeFeedback] change=%s %s by dominant-signal: %s",
 			changeID, verdict, formatSignalTally(tally))
 	}
+}
+
+// attributionK decides how many of the N injected artifacts deserve
+// credit/punishment for a non-L1 audit verdict. Rationale: small
+// injections (n≤2) are almost always "all drove the decision"; medium
+// injections (n=3..4) partial-credit the top 2; larger pools cap at 3.
+// L1 always uses 1 — handled at the call site, not here.
+//
+// The cap of 3 is intentional: with a budget of 10 artifacts per
+// injection the long tail is almost certainly noise; crediting the
+// bottom half of the list pollutes the success-rate signal for those
+// artifacts. 3 matches our empirical guess at "how many did the agent
+// likely lean on?" — tune by log data once we've shipped.
+func attributionK(n int) int {
+	switch {
+	case n <= 0:
+		return 0
+	case n <= 2:
+		return n
+	case n <= 4:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// topKByRank returns the IDs of the top-K artifacts by Score.
+//
+//   - When refs carry usable scores (Score > 0 for at least one entry),
+//     orders by Score DESC and returns the k highest.
+//   - When refs is empty or all-zero scores (legacy flat-id payload, or
+//     older clients that never emitted scores), falls back to the
+//     caller's original order — the retrieval selector already stored
+//     IDs in rank order, so "first K" is still a reasonable proxy.
+//
+// Returns nil when k ≤ 0 or the input list is empty; returns the
+// original slice unchanged when k ≥ len(ids).
+func topKByRank(ids []string, refs []InjectedRef, k int) []string {
+	if k <= 0 || len(ids) == 0 {
+		return nil
+	}
+	if k >= len(ids) {
+		return ids
+	}
+	if len(refs) == len(ids) && hasUsableScores(refs) {
+		sorted := make([]InjectedRef, len(refs))
+		copy(sorted, refs)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return sorted[i].Score > sorted[j].Score
+		})
+		out := make([]string, 0, k)
+		for i := 0; i < k; i++ {
+			out = append(out, sorted[i].ID)
+		}
+		return out
+	}
+	return ids[:k]
+}
+
+// hasUsableScores returns true when at least one ref has a non-zero
+// Score. Zero-only payloads are treated as "scores missing" so we fall
+// back to order-based ranking rather than returning a random subset.
+func hasUsableScores(refs []InjectedRef) bool {
+	for _, r := range refs {
+		if r.Score > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// filterRefsByIDs returns the subset of refs whose ID is in keepIDs.
+// Used by the dominant-signal logger so the tally reflects what we
+// actually credited, not what was injected.
+func filterRefsByIDs(refs []InjectedRef, keepIDs []string) []InjectedRef {
+	if len(refs) == 0 || len(keepIDs) == 0 {
+		return nil
+	}
+	keep := make(map[string]struct{}, len(keepIDs))
+	for _, id := range keepIDs {
+		keep[id] = struct{}{}
+	}
+	out := make([]InjectedRef, 0, len(keepIDs))
+	for _, r := range refs {
+		if _, ok := keep[r.ID]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // parseInjectedArtifacts accepts either the legacy `["id1","id2"]` shape
