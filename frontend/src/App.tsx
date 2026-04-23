@@ -13,10 +13,21 @@ import LLMEndpointsPage from './pages/LLMEndpointsPage'
 import AgentPoolPage from './pages/AgentPoolPage'
 import LoopCheckPage from './pages/LoopCheckPage'
 import WorkspacePickerPage from './pages/WorkspacePickerPage'
+import FirstRunBootstrapPage from './pages/FirstRunBootstrapPage'
 import { Layout } from './components/Layout'
 
 function AuthenticatedApp() {
+  const accessKey = useAppStore((s) => s.accessKey)
   const selectedProjectId = useAppStore((s) => s.selectedProjectId)
+
+  // No access key in localStorage → we haven't bootstrapped on this
+  // browser yet.  The workspace picker used to cover this state by
+  // accident (pre-auth /project/list returned [] for unauthed callers)
+  // but after the auth tightening every request now 401s, leaving the
+  // user at a dead end.  Route them through the bootstrap panel first.
+  if (!accessKey) {
+    return <FirstRunBootstrapPage />
+  }
 
   // No project selected → render the picker INSIDE the normal shell so
   // the first-contact UI shares the same chrome (sidebar, header) as

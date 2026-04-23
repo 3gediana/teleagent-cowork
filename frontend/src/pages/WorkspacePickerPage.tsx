@@ -61,6 +61,11 @@ export default function WorkspacePickerPage() {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [hoverId, setHoverId] = useState<string | null>(null)
+  const [showCreate, setShowCreate] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newDesc, setNewDesc] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   useEffect(() => {
     projectApi.list().then((res) => {
@@ -71,6 +76,36 @@ export default function WorkspacePickerPage() {
 
   const select = (id: string) => {
     setSelectedProjectId(id)
+  }
+
+  const openCreate = () => {
+    setNewName('')
+    setNewDesc('')
+    setCreateError(null)
+    setShowCreate(true)
+  }
+
+  const submitCreate = async () => {
+    const n = newName.trim()
+    if (!n) { setCreateError('Name is required'); return }
+    setCreating(true)
+    setCreateError(null)
+    try {
+      const res = await projectApi.create(n, newDesc.trim() || undefined)
+      if (!res.success) throw new Error('create failed')
+      const newID = (res.data as any)?.id
+      if (!newID) throw new Error('server returned no project id')
+      // Refresh the list so the new card shows up if the user dismisses
+      // instead of auto-selecting, then auto-select into the workspace.
+      const listed = await projectApi.list()
+      if (listed.success) setProjects((listed.data as Project[]) || [])
+      setShowCreate(false)
+      select(newID)
+    } catch (e: any) {
+      setCreateError(e?.response?.data?.error?.message || e?.message || 'create failed')
+    } finally {
+      setCreating(false)
+    }
   }
 
   return (
@@ -105,7 +140,7 @@ export default function WorkspacePickerPage() {
         ) : (
           <>
             {projects.length === 0 ? (
-              <EmptyState />
+              <EmptyState onCreate={openCreate} />
             ) : (
               <>
                 <div className="flex items-center justify-between mb-4">
@@ -186,6 +221,7 @@ export default function WorkspacePickerPage() {
 
                   {/* Create new card */}
                   <button
+                    onClick={openCreate}
                     className="relative rounded-[10px] border border-dashed p-4 text-left transition-all group flex flex-col items-center justify-center min-h-[148px]"
                     style={{ borderColor: 'var(--border)', color: 'var(--text-2)' }}
                     onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)' }}
@@ -211,6 +247,18 @@ export default function WorkspacePickerPage() {
         <span>Tip: press <kbd className="px-1.5 py-0.5 mx-0.5 rounded bg-white/5 text-[10px] font-mono-jb border border-[#2a2a2e]">↑↓</kbd> to navigate, <kbd className="px-1.5 py-0.5 mx-0.5 rounded bg-white/5 text-[10px] font-mono-jb border border-[#2a2a2e]">Enter</kbd> to open</span>
         <a href="#" className="hover:text-white transition-colors">Docs</a>
       </div>
+
+      <CreateWorkspaceModal
+        open={showCreate}
+        name={newName}
+        desc={newDesc}
+        busy={creating}
+        error={createError}
+        onName={setNewName}
+        onDesc={setNewDesc}
+        onCancel={() => setShowCreate(false)}
+        onSubmit={submitCreate}
+      />
     </div>
   )
 }
@@ -232,7 +280,7 @@ function GridSkeleton() {
   )
 }
 
-function EmptyState() {
+function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <div className="w-14 h-14 rounded-full flex items-center justify-center mb-4"
@@ -247,11 +295,89 @@ function EmptyState() {
       <p className="text-[12.5px] max-w-[360px]" style={{ color: 'var(--text-1)' }}>
         Create your first workspace to start coordinating agents, tasks, and reviews from one place.
       </p>
-      <button className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-[12.5px] font-medium transition-all"
-              style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)', color: 'white', boxShadow: '0 4px 12px -4px rgba(99,102,241,0.5)' }}>
+      <button
+        onClick={onCreate}
+        className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-[12.5px] font-medium transition-all"
+        style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)', color: 'white', boxShadow: '0 4px 12px -4px rgba(99,102,241,0.5)' }}>
         <IconPlus />
         Create workspace
       </button>
+    </div>
+  )
+}
+
+function CreateWorkspaceModal({
+  open, name, desc, busy, error, onName, onDesc, onCancel, onSubmit,
+}: {
+  open: boolean
+  name: string
+  desc: string
+  busy: boolean
+  error: string | null
+  onName: (v: string) => void
+  onDesc: (v: string) => void
+  onCancel: () => void
+  onSubmit: () => void
+}) {
+  if (!open) return null
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onCancel() }}
+    >
+      <div className="surface-1 p-6 w-full max-w-[440px]">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="chip chip-blue font-mono-jb text-[10.5px]">new workspace</span>
+        </div>
+        <h2 className="text-[18px] font-semibold tracking-tight text-white leading-tight">
+          Create a workspace
+        </h2>
+        <p className="text-[12.5px] mt-1" style={{ color: 'var(--text-1)' }}>
+          A workspace is a project with its own agents, tasks, policies and repo.
+        </p>
+        <div className="mt-5 grid gap-3">
+          <label className="grid gap-1.5">
+            <span className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-2)' }}>Name</span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => onName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !busy) onSubmit() }}
+              disabled={busy}
+              placeholder="my-project"
+              className="px-3 py-2 rounded-md text-[13px] text-white outline-none"
+              style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border, #27272a)' }}
+            />
+          </label>
+          <label className="grid gap-1.5">
+            <span className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-2)' }}>Description <span className="opacity-60">(optional)</span></span>
+            <textarea
+              value={desc}
+              onChange={(e) => onDesc(e.target.value)}
+              disabled={busy}
+              placeholder="Short summary. Can be edited later."
+              rows={3}
+              className="px-3 py-2 rounded-md text-[13px] text-white outline-none resize-none"
+              style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border, #27272a)' }}
+            />
+          </label>
+          {error && <div className="text-[12px]" style={{ color: '#fda4af' }}>{error}</div>}
+          <div className="flex gap-2 justify-end mt-1">
+            <button onClick={onCancel} disabled={busy} className="px-3 py-2 rounded-md text-[12.5px]" style={{ color: 'var(--text-1)' }}>
+              Cancel
+            </button>
+            <button
+              onClick={onSubmit}
+              disabled={busy}
+              className="px-4 py-2 rounded-md text-[13px] font-medium text-white transition-all"
+              style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)', opacity: busy ? 0.6 : 1, boxShadow: '0 4px 12px -4px rgba(99,102,241,0.5)' }}
+            >
+              {busy ? 'Creating\u2026' : 'Create workspace'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
