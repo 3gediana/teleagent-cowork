@@ -384,6 +384,12 @@ type Manager struct {
 	// (StartDormancyDetector). Same story as the other two: nil
 	// until started, closed on shutdown / replaced on re-start.
 	dormancyStop chan struct{}
+
+	// metrics is the per-instance ring-buffer store driving the
+	// dashboard's token sparkline + lifecycle event log. See
+	// metrics.go. Populated lazily on first write so Manager
+	// startup cost stays flat.
+	metrics map[string]*instanceMetrics
 }
 
 // NewManager builds a Manager with the given config. Spawner may be
@@ -402,6 +408,7 @@ func NewManager(cfg ManagerConfig, spawner Spawner) *Manager {
 		spawner:   spawner,
 		store:     DefaultStore,
 		instances: map[string]*subprocess{},
+		metrics:   map[string]*instanceMetrics{},
 		lastPort:  cfg.PortMin - 1,
 	}
 }
@@ -646,6 +653,8 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 	sp.inst.LastActivityAt = time.Now()
 	m.mu.Unlock()
 
+	m.recordEvent(instanceID, "spawn_ready", fmt.Sprintf("port=%d session=%s", port, sessionID))
+
 	// 9. Background watcher — flips status to "crashed" if the
 	// subprocess exits on its own.
 	go m.watch(sp)
@@ -692,6 +701,7 @@ func (m *Manager) watch(sp *subprocess) {
 		// whatever state they set.
 		if !planned {
 			_ = m.store.UpdateAgent(sp.inst.AgentID, map[string]any{"status": "offline"})
+			m.recordEvent(sp.inst.ID, "crash", fmt.Sprintf("exit code=%d", code))
 		}
 	case <-sp.stopChan:
 		// Explicit shutdown path handled elsewhere.
@@ -716,11 +726,16 @@ func (m *Manager) shutdownLocked(instanceID string, cause error) error {
 		return nil // already going / gone
 	}
 	sp.inst.Status = "stopping"
+	handle := sp.handle
 	m.mu.Unlock()
 
-	// Tear down outside the lock.
+	// Tear down outside the lock. Guard against nil handle too —
+	// dormancy nils it on transition, so a Shutdown called on a
+	// dormant instance has nothing to terminate.
 	close(sp.stopChan)
-	sp.handle.Terminate(m.cfg.ShutdownGrace)
+	if handle != nil {
+		handle.Terminate(m.cfg.ShutdownGrace)
+	}
 
 	// Flip DB state.
 	now := time.Now()
@@ -735,6 +750,11 @@ func (m *Manager) shutdownLocked(instanceID string, cause error) error {
 		sp.inst.LastError = cause.Error()
 	}
 	m.mu.Unlock()
+	detail := ""
+	if cause != nil {
+		detail = cause.Error()
+	}
+	m.recordEvent(instanceID, "shutdown", detail)
 	return nil
 }
 
@@ -776,6 +796,9 @@ func (m *Manager) Purge(id string) error {
 		return fmt.Errorf("pool: instance %s is %s — shut down first", id, sp.inst.Status)
 	}
 	delete(m.instances, id)
+	// Drop metrics ring too — no point keeping history around for an
+	// id the operator just asked us to forget.
+	delete(m.metrics, id)
 	// Also drop the orphan agent row so the dashboard stops showing it.
 	_ = m.store.DeleteAgent(sp.inst.AgentID)
 	return nil

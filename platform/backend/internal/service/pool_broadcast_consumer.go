@@ -78,3 +78,20 @@ func (c *PoolBroadcastConsumerImpl) FetchEvents(ctx context.Context, agentID str
 	}
 	return events, nil
 }
+
+// PendingCount is a cheap LLEN peek used by the pool's consumer loop
+// to spot dormant agents that have queued broadcasts. Never drains;
+// the real Fetch still happens once the agent is back to ready.
+// Returns (0, nil) when the queue key is missing so callers don't
+// need to special-case absent keys.
+func (c *PoolBroadcastConsumerImpl) PendingCount(ctx context.Context, agentID string) (int, error) {
+	if model.RDB == nil {
+		return 0, nil
+	}
+	key := fmt.Sprintf("a3c:directed:%s", agentID)
+	n, err := model.RDB.LLen(ctx, key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redis LLen %s: %w", key, err)
+	}
+	return int(n), nil
+}

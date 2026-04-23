@@ -40,6 +40,14 @@ type BroadcastConsumer interface {
 	// try again later" — no error. Errors should be returned only
 	// for infrastructure failures (Redis unreachable etc.).
 	FetchEvents(ctx context.Context, agentID string) ([]BroadcastEvent, error)
+
+	// PendingCount peeks the queue length without draining. Used
+	// by the consumer loop to decide whether a dormant agent
+	// should be woken (any positive count → kick Wake and let the
+	// next tick drain after wake completes). Infrastructure errors
+	// return -1 so the caller treats them as "don't know, skip";
+	// benign "queue empty" returns 0.
+	PendingCount(ctx context.Context, agentID string) (int, error)
 }
 
 // BroadcastEvent is the decoded shape of one directed broadcast,
@@ -147,25 +155,45 @@ func (m *Manager) consumeOnce(ctx context.Context) {
 
 	m.mu.Lock()
 	targets := make([]target, 0, len(m.instances))
+	// Dormant agents with queued broadcasts need an auto-wake so
+	// the pending work doesn't sit indefinitely. We only record
+	// their agent ids here (consumeAgent gets called only for
+	// ready ones). The per-tick peek is cheap — Redis LLEN is
+	// O(1) and the pool stays small in practice.
+	dormantAgentIDs := make([]string, 0)
 	for _, sp := range m.instances {
-		if sp.inst.Status != "ready" {
-			continue
+		switch sp.inst.Status {
+		case "ready":
+			if sp.inst.OpencodeSessionID == "" {
+				// No session yet → nowhere to inject. Broadcasts for
+				// this agent will sit in the queue until a session
+				// binds (spawn retry or the next round of auth).
+				continue
+			}
+			targets = append(targets, target{
+				agentID:    sp.inst.AgentID,
+				sessionID:  sp.inst.OpencodeSessionID,
+				port:       sp.inst.Port,
+				providerID: sp.inst.OpencodeProviderID,
+				modelID:    sp.inst.OpencodeModelID,
+			})
+		case "dormant":
+			dormantAgentIDs = append(dormantAgentIDs, sp.inst.AgentID)
 		}
-		if sp.inst.OpencodeSessionID == "" {
-			// No session yet → nowhere to inject. Broadcasts for
-			// this agent will sit in the queue until a session
-			// binds (spawn retry or the next round of auth).
-			continue
-		}
-		targets = append(targets, target{
-			agentID:    sp.inst.AgentID,
-			sessionID:  sp.inst.OpencodeSessionID,
-			port:       sp.inst.Port,
-			providerID: sp.inst.OpencodeProviderID,
-			modelID:    sp.inst.OpencodeModelID,
-		})
 	}
 	m.mu.Unlock()
+
+	// Kick auto-wake for any dormant agent whose queue has pending
+	// events. Goroutines so a slow Redis doesn't stall the normal
+	// inject path. EnsureReadyByAgentID is idempotent.
+	for _, aid := range dormantAgentIDs {
+		n, err := m.broadcastConsumer.PendingCount(ctx, aid)
+		if err != nil || n <= 0 {
+			continue
+		}
+		log.Printf("[Pool] dormant agent %s has %d pending broadcasts → auto-wake", aid, n)
+		_ = m.EnsureReadyByAgentID(aid)
+	}
 
 	var wg sync.WaitGroup
 	for _, tg := range targets {

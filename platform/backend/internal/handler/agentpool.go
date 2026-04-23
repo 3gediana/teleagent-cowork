@@ -106,6 +106,38 @@ func (h *AgentPoolHandler) Shutdown(c *gin.Context) {
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"instance_id": req.InstanceID, "status": "stopped"}})
 }
 
+// Metrics returns the ring-buffered token-usage samples and
+// lifecycle events for a single pool instance. Shape:
+//
+//	{ tokens: [{at_ms, tokens, session_id}], events: [{at_ms, type, detail}] }
+//
+// Read-only; any authenticated agent can fetch (same gating as
+// List). Dashboard polls this on card expand to render the
+// sparkline and event log. Unknown instance id → 200 with
+// empty arrays so the UI can render "no data yet" cleanly.
+func (h *AgentPoolHandler) Metrics(c *gin.Context) {
+	id := c.Param("instance_id")
+	if id == "" {
+		c.JSON(400, gin.H{"success": false, "error": gin.H{"code": "INVALID_PARAMS", "message": "instance_id required"}})
+		return
+	}
+	m := agentpool.GetDefault()
+	if m == nil {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{"code": "POOL_NOT_READY", "message": "agent pool not initialised"}})
+		return
+	}
+	snap := m.MetricsFor(id)
+	// Always return slices (not null) so the frontend doesn't have
+	// to special-case empty history.
+	if snap.Tokens == nil {
+		snap.Tokens = []agentpool.TokenSample{}
+	}
+	if snap.Events == nil {
+		snap.Events = []agentpool.PoolEvent{}
+	}
+	c.JSON(200, gin.H{"success": true, "data": snap})
+}
+
 // OpencodeProviders surfaces the provider/model catalogue opencode
 // itself carries in ~/.config/opencode/opencode.json. This is what
 // pool agents pin when Spawn puts A3C_OPENCODE_PROVIDER_ID /

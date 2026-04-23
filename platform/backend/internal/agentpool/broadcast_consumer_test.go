@@ -53,6 +53,22 @@ func (f *fakeBroadcastConsumer) FetchEvents(_ context.Context, agentID string) (
 	return head, nil
 }
 
+// PendingCount is the non-destructive peek used by the consumer's
+// dormant-scan path. Returns the total number of events queued
+// across all pending batches.
+func (f *fakeBroadcastConsumer) PendingCount(_ context.Context, agentID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, f.err
+	}
+	total := 0
+	for _, batch := range f.queues[agentID] {
+		total += len(batch)
+	}
+	return total, nil
+}
+
 // fakeBroadcastInjector records every InjectMessage call in order.
 // Exposes helpers so tests can assert shape + counts.
 type fakeBroadcastInjector struct {

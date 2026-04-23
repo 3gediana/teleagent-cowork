@@ -26,6 +26,7 @@ package agentpool
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"time"
@@ -144,7 +145,12 @@ func (m *Manager) checkAndMaybeArchive(ctx context.Context, sp *subprocess) {
 	if tokens > prev {
 		sp.inst.LastActivityAt = time.Now()
 	}
+	instID := sp.inst.ID
 	m.mu.Unlock()
+	// Record the reading regardless of direction — a flat line on
+	// the sparkline is still a useful "agent is idle but alive"
+	// signal.
+	m.recordTokenReading(instID, sessionID, tokens)
 
 	if tokens < m.cfg.ArchiveThresholdTokens {
 		return
@@ -205,6 +211,8 @@ func (m *Manager) rotateSession(ctx context.Context, sp *subprocess, tokens int,
 
 	log.Printf("[Pool] archived session agent=%s %s -> %s (tokens=%d reason=%s rotation=%d)",
 		agentID, oldSessionID, newID, tokens, reason, nextRotation)
+	m.recordEvent(sp.inst.ID, "rotate",
+		fmt.Sprintf("%s → %s (tokens=%d, reason=%s)", oldSessionID, newID, tokens, reason))
 	return nil
 }
 

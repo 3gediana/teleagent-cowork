@@ -305,6 +305,7 @@ func main() {
 		// can bring pool agents up / tear them down.
 		auth.GET("/agentpool/list", agentPoolHandler.List)
 		auth.GET("/agentpool/opencode-providers", agentPoolHandler.OpencodeProviders)
+		auth.GET("/agentpool/metrics/:instance_id", agentPoolHandler.Metrics)
 		auth.POST("/agentpool/spawn", agentPoolHandler.Spawn)
 		auth.POST("/agentpool/shutdown", agentPoolHandler.Shutdown)
 		auth.POST("/agentpool/sleep", agentPoolHandler.Sleep)

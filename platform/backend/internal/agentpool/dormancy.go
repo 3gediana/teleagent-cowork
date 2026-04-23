@@ -203,6 +203,15 @@ func (m *Manager) enterDormancy(ctx context.Context, sp *subprocess, reason stri
 	sp.handle = nil
 	m.mu.Unlock()
 
+	// Record dormancy BEFORE Terminate so the event ring shows the
+	// transition at the operator-visible moment (status flip) rather
+	// than when the subprocess actually stops. Terminate holds up
+	// to ShutdownGrace (10s by default) waiting for a clean exit,
+	// which is long enough that the consumer's dormant-scan can
+	// see the new state and fire auto-wake before the dormancy
+	// event ever lands in the ring.
+	m.recordEvent(instID, "dormancy", fmt.Sprintf("reason=%s pid=%d port=%d", reason, oldPID, oldPort))
+
 	if handle != nil {
 		handle.Terminate(m.cfg.ShutdownGrace)
 	}
@@ -366,6 +375,7 @@ func (m *Manager) Wake(ctx context.Context, instanceID string) (*Instance, error
 	go m.watch(sp)
 
 	log.Printf("[Pool] woke instance=%s agent=%s on port=%d session=%s", instanceID, agentID, port, newSession)
+	m.recordEvent(instanceID, "wake", fmt.Sprintf("port=%d session=%s", port, newSession))
 	return &sp.inst, nil
 }
 
