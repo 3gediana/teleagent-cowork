@@ -148,6 +148,12 @@ type ManagerConfig struct {
 	// reach this platform. Defaults to http://localhost:8080 — good
 	// for the same-machine case. Override in Docker deployments.
 	PlatformURL string
+
+	// SkipOpencodeEnvPrep disables the automatic `.opencode/`
+	// template hydration that guards against the zod v4 crash.
+	// Set this in tests (FakeSpawner never actually runs opencode)
+	// and in deployments where operators hand-manage the template.
+	SkipOpencodeEnvPrep bool
 }
 
 // ApplyDefaults fills in zeroes with sensible runtime values. Kept
@@ -257,7 +263,22 @@ func (m *Manager) Spawn(ctx context.Context, req SpawnRequest) (*Instance, error
 
 	workDir := filepath.Join(m.cfg.Root, instanceID)
 
-	// 3. Materialise skills on disk so the spawned opencode picks
+	// 3a. Prime `.opencode/` inside workDir so opencode serve boots
+	// with the expected provider npm packages (`@ai-sdk/openai-
+	// compatible` + zod v3) and *without* `@opencode-ai/plugin` —
+	// the latter pulls in zod v4, which crashes opencode 1.14.21's
+	// resolveTools() and causes every prompt to come back with
+	// parts=0. See opencode_env.go for the full rationale.
+	//
+	// Tests and headless deployments can skip this by setting
+	// SkipOpencodeEnvPrep, since FakeSpawner never runs opencode.
+	if !m.cfg.SkipOpencodeEnvPrep {
+		if err := prepareOpencodeDir(workDir, m.cfg.Root); err != nil {
+			return nil, fmt.Errorf("pool: prepare .opencode: %w", err)
+		}
+	}
+
+	// 3b. Materialise skills on disk so the spawned opencode picks
 	// them up at startup. Skills are read from the SkillCandidate
 	// table where status='active' — the same lifecycle humans see
 	// in ChiefPage > Skills.

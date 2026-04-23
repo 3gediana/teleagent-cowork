@@ -69,9 +69,10 @@ func newTestManager(t *testing.T, spawner Spawner) (*Manager, *memStore) {
 	}
 	store := newMemStore()
 	m := NewManager(ManagerConfig{
-		Root:           t.TempDir(),
-		StartupTimeout: 2 * time.Second,
-		ShutdownGrace:  50 * time.Millisecond,
+		Root:                t.TempDir(),
+		StartupTimeout:      2 * time.Second,
+		ShutdownGrace:       50 * time.Millisecond,
+		SkipOpencodeEnvPrep: true, // FakeSpawner never runs opencode — skip the npm+copy.
 	}, spawner).WithStore(store)
 	return m, store
 }
@@ -160,10 +161,11 @@ func TestPurge_RequiresStopped(t *testing.T) {
 func TestPickPort_CyclesInRange(t *testing.T) {
 	store := newMemStore()
 	m := NewManager(ManagerConfig{
-		Root:           t.TempDir(),
-		PortMin:        49000,
-		PortMax:        49005,
-		StartupTimeout: 2 * time.Second,
+		Root:                t.TempDir(),
+		PortMin:             49000,
+		PortMax:             49005,
+		StartupTimeout:      2 * time.Second,
+		SkipOpencodeEnvPrep: true,
 	}, &FakeSpawner{HealthDelay: 10 * time.Millisecond}).WithStore(store)
 	seen := map[int]bool{}
 	for i := 0; i < 5; i++ {
