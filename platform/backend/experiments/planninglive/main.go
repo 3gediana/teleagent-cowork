@@ -1,5 +1,5 @@
 // Command planninglive — the full-platform integration test but with
-// a REAL LLM in the loop. Same scenario as cmd/planningsmoke (Chief
+// a REAL LLM in the loop. Same scenario as experiments/planningsmoke (Chief
 // chat → Maintain → Audit_1 → Fix → Audit_2 → PR → Evaluate →
 // BizReview → Merge → Analyze) except every agent's brain is driven
 // by the provider configured under `llm.<provider>` in
@@ -20,7 +20,7 @@
 //   mysql -uroot -e "DROP DATABASE IF EXISTS a3c_live; CREATE DATABASE a3c_live CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 //
 // Run:
-//   cd platform/backend && go run ./cmd/planninglive [--provider minimax]
+//   cd platform/backend && go run ./experiments/planninglive [--provider minimax]
 package main
 
 import (

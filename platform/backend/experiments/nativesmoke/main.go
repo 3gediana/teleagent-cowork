@@ -1,7 +1,7 @@
 // Command nativesmoke — standalone end-to-end smoke test for the
 // native agent runtime.
 //
-// This binary exists because cmd/e2erun (which includes Stage 13
+// This binary exists because experiments/e2erun (which includes Stage 13
 // covering the same ground) requires the Python embedder sidecar at
 // :3011 for earlier stages. `nativesmoke` has zero external
 // dependencies — pure SQLite in-memory + a local httptest server —
@@ -26,7 +26,7 @@
 // banner output so CI logs stay readable when this fails in the
 // unlikely event a regression lands.
 //
-// Run:   cd platform/backend && go run ./cmd/nativesmoke
+// Run:   cd platform/backend && go run ./experiments/nativesmoke
 
 package main
 

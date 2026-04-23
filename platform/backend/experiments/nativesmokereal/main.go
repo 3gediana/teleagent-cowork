@@ -1,5 +1,5 @@
 // Command nativesmokereal — end-to-end smoke test against a REAL LLM
-// provider. Same harness as cmd/nativesmoke but instead of an
+// provider. Same harness as experiments/nativesmoke but instead of an
 // httptest mock, it points the runner at the provider whose
 // credentials live in configs/config.yaml under `llm.minimax`
 // (default) or whichever provider is selected via --provider.
@@ -13,9 +13,9 @@
 // source. The user spec:  "写config里头，别硬编码了".
 //
 // Usage:
-//   go run ./cmd/nativesmokereal                  # default: minimax
-//   go run ./cmd/nativesmokereal --provider deepseek
-//   go run ./cmd/nativesmokereal --provider anthropic
+//   go run ./experiments/nativesmokereal                  # default: minimax
+//   go run ./experiments/nativesmokereal --provider deepseek
+//   go run ./experiments/nativesmokereal --provider anthropic
 
 package main
 

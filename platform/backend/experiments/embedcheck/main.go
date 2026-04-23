@@ -21,7 +21,7 @@
 //
 // Run:
 //   cd platform/backend
-//   go run ./cmd/embedcheck
+//   go run ./experiments/embedcheck
 //
 // Requires the embedder sidecar running at http://127.0.0.1:3011
 // (or A3C_EMBEDDER_URL).

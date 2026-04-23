@@ -46,7 +46,7 @@ D:\mysql\bin\mysql.exe -uroot -e "DROP DATABASE IF EXISTS a3c_live; CREATE DATAB
 
 # 2. Run from platform/backend.
 cd platform\backend
-go run ./cmd/platformlive
+go run ./experiments/platformlive
 ```
 
 Typical runtime on MiniMax-M2.7: **3–6 minutes** end-to-end.

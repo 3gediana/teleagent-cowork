@@ -19,8 +19,9 @@ type Config struct {
 	// key here is a bootstrap convenience — the same credentials
 	// normally live in the llm_endpoint DB table (registered via the
 	// dashboard). The config slots are used by:
-	//   * cmd/nativesmoke-real: real end-to-end smoke test against the
-	//     provider, so we verify the runtime without a dashboard UI.
+	//   * experiments/nativesmokereal: real end-to-end smoke test
+	//     against the provider, so we verify the runtime without a
+	//     dashboard UI.
 	//   * First-boot bootstrap on a fresh DB (future work).
 	LLM     LLMConfig `yaml:"llm"`
 	DataDir string    `yaml:"data_dir"`

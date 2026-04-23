@@ -20,7 +20,7 @@
 // Setup:
 //   mysql -uroot -e "DROP DATABASE IF EXISTS a3c_smoke; CREATE DATABASE a3c_smoke CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 //
-// Run:  cd platform/backend && go run ./cmd/planningsmoke
+// Run:  cd platform/backend && go run ./experiments/planningsmoke
 //
 // Exit code: 0 on pass, 1 if any assertion fails.
 package main

@@ -26,7 +26,7 @@
 //   D:\mysql\bin\mysql.exe -uroot -e "DROP DATABASE IF EXISTS a3c_live; CREATE DATABASE a3c_live CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 //
 // Run:
-//   cd platform/backend && go run ./cmd/platformlive
+//   cd platform/backend && go run ./experiments/platformlive
 package main
 
 import (

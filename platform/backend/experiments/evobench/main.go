@@ -13,8 +13,8 @@ package main
 //   4. Feedback convergence: do success/failure counts diverge over rounds?
 //
 // Usage:
-//   go run ./cmd/evobench
-//   go run ./cmd/evobench -rounds 50 -artifacts 80 -seed 42
+//   go run ./experiments/evobench
+//   go run ./experiments/evobench -rounds 50 -artifacts 80 -seed 42
 
 import (
 	"context"

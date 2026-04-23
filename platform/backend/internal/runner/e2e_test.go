@@ -1,11 +1,12 @@
 package runner
 
-// End-to-end smoke test — same shape as cmd/nativesmoke but as a
-// `go test` so CI and `go test ./...` catch regressions.
+// End-to-end smoke test — same shape as experiments/nativesmoke but
+// as a `go test` so CI and `go test ./...` catch regressions.
 //
-// The standalone binary at cmd/nativesmoke exists for operators to
-// run against a real staging DB + Redis + endpoint; this test covers
-// the same wire path using SQLite-in-memory + a mock HTTP server.
+// The standalone binary at experiments/nativesmoke exists for
+// operators to run against a real staging DB + Redis + endpoint;
+// this test covers the same wire path using SQLite-in-memory + a
+// mock HTTP server.
 
 import (
 	"fmt"

@@ -32,7 +32,7 @@
 // Prereqs: platform/embedder/app.py running on :3011 (set A3C_EMBEDDER_URL
 // to override).
 //
-// Run:   cd platform/backend && go run ./cmd/e2erun
+// Run:   cd platform/backend && go run ./experiments/e2erun
 
 package main
 

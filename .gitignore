@@ -48,7 +48,7 @@ stream_result.txt
 test_req.json
 debug_*.md
 platform/backend/bin/
-platform/backend/cmd/dbquery/
+platform/backend/cmd/tools/dbquery/
 
 # Agent tooling scratch dirs
 .omc/

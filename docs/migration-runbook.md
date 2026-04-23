@@ -40,7 +40,7 @@ go test ./internal/llm/... ./internal/runner/...
 #           ok  .../internal/runner
 
 # End-to-end smoke with a mock LLM (no external deps)
-go run ./cmd/nativesmoke
+go run ./experiments/nativesmoke
 # Expect:   ✔ ALL GREEN — native runtime is production-ready for audit_1
 #           exit code 0
 ```
@@ -114,10 +114,10 @@ across runtimes without hand-eyeballing the DB:
 ```sh
 # Compare the last 20 audit_1 sessions on this project
 cd platform/backend
-go run ./cmd/shadowdiff --project $PROJECT_ID --role audit_1 --limit 20
+go run ./experiments/shadowdiff --project $PROJECT_ID --role audit_1 --limit 20
 
 # Full-fidelity pair diff between one native session and one opencode
-go run ./cmd/shadowdiff --session-a sess_native_abc --session-b sess_legacy_xyz --show-output
+go run ./experiments/shadowdiff --session-a sess_native_abc --session-b sess_legacy_xyz --show-output
 ```
 
 Population mode prints:
