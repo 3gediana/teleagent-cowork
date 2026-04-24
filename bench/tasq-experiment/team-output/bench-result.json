@@ -1,0 +1,35 @@
+﻿{
+    "label":  "team",
+    "dir":  "D:\\claude-code\\coai2\\bench\\tasq-experiment\\team-output",
+    "graded_at":  "2026-04-24T08:18:22.0835122+08:00",
+    "loc":  1455,
+    "test_loc":  1202,
+    "pytest":  {
+                   "passed":  141,
+                   "ran":  true,
+                   "failed":  15,
+                   "pct":  90.4,
+                   "total":  156,
+                   "stderr":  ""
+               },
+    "coverage":  {
+                     "ran":  false,
+                     "pct":  0
+                 },
+    "ruff":  {
+                 "ran":  false,
+                 "issues":  -1
+             },
+    "mypy":  {
+                 "errors":  -1,
+                 "ran":  false
+             },
+    "scenario":  {
+                     "pass_count":  0,
+                     "last_fail":  "",
+                     "fail_count":  0,
+                     "ran":  false,
+                     "exit":  -1
+                 },
+    "score":  0
+}

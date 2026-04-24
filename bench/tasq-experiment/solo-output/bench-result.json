@@ -1,0 +1,35 @@
+﻿{
+    "label":  "solo",
+    "dir":  "D:\\claude-code\\coai2\\bench\\tasq-experiment\\solo-output",
+    "graded_at":  "2026-04-24T08:18:18.3666754+08:00",
+    "loc":  1920,
+    "test_loc":  829,
+    "pytest":  {
+                   "passed":  144,
+                   "ran":  true,
+                   "failed":  2,
+                   "pct":  98.6,
+                   "total":  146,
+                   "stderr":  ""
+               },
+    "coverage":  {
+                     "ran":  false,
+                     "pct":  0
+                 },
+    "ruff":  {
+                 "ran":  false,
+                 "issues":  -1
+             },
+    "mypy":  {
+                 "errors":  -1,
+                 "ran":  false
+             },
+    "scenario":  {
+                     "pass_count":  0,
+                     "last_fail":  "",
+                     "fail_count":  0,
+                     "ran":  false,
+                     "exit":  -1
+                 },
+    "score":  0
+}
