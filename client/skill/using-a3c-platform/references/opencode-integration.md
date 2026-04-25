@@ -73,7 +73,7 @@ Place this `opencode.json` at the root of `<workdir>`:
       "command": ["a3c-mcp"],
       "enabled": true,
       "environment": {
-        "A3C_PLATFORM_URL": "http://localhost:8080"
+        "A3C_PLATFORM_URL": "http://localhost:3003"
       }
     }
   }
@@ -104,7 +104,7 @@ If your launcher does anything non-trivial with `cwd` (CI, IDE plugins,
       "enabled": true,
       "environment": {
         "A3C_HOME": "{env:A3C_WORKDIR}",
-        "A3C_PLATFORM_URL": "http://localhost:8080"
+        "A3C_PLATFORM_URL": "http://localhost:3003"
       }
     }
   }
@@ -117,6 +117,58 @@ profile sets `A3C_WORKDIR` before launching opencode.
 
 Avoid baking an absolute path into `A3C_HOME` directly — the whole point of
 this document is that `opencode.json` should travel between machines.
+
+## Public deployment via a tunnel
+
+When the A3C platform is exposed publicly through a tunnel (ngrok,
+Cloudflared, frp, vite-allowed-hosts entry, etc.), MCP clients and browser
+users hit the same URL.
+
+The frontend currently owns the public hostname (vite dev server, port
+3303 by default), and vite's built-in proxy forwards every `/api/*` request
+to the local backend on port 3003. The MCP server speaks HTTP over
+`A3C_PLATFORM_URL` — it does not route through React, but it does land on
+the frontend's host because that's where the proxy lives. So MCP and
+browser users share one tunnel; the proxy multiplexes them onto the
+backend.
+
+Set `A3C_PLATFORM_URL` to the tunnel URL in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "a3c": {
+      "type": "local",
+      "command": ["a3c-mcp"],
+      "environment": {
+        "A3C_PLATFORM_URL": "https://your-tunnel.example.com"
+      }
+    }
+  }
+}
+```
+
+Only one tunnel is needed: the one that fronts the React UI. Both browser
+and MCP call `https://your-tunnel.example.com/api/v1/...`; vite (or your
+reverse proxy in production) routes those calls to the local backend.
+
+Things to double-check:
+
+- **SSE compatibility.** The platform uses Server-Sent Events for real-time
+  broadcasts (`/api/v1/.../events`). Some tunneling services buffer or
+  close long-lived connections — verify your provider keeps SSE open before
+  relying on it.
+- **Allowed hosts.** vite refuses unknown hostnames by default. Add your
+  tunnel domain to `frontend/vite.config.ts::server.allowedHosts`.
+- **Production hosting.** vite's dev server is fine for personal or
+  small-team tunnels. For production, build the frontend (`vite build`)
+  and serve `dist/` from nginx / Caddy / Traefik, with `/api/v1/*` proxied
+  to the backend port (default 3003). The MCP-side config does not change.
+- **The frontend does not handle MCP.** MCP is a stdio protocol that runs
+  locally inside each user's OpenCode process and dials the backend
+  directly. The React UI and the MCP server are independent clients of the
+  same backend — neither knows about the other.
 
 ## Useful env vars
 
