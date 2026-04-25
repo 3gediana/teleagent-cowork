@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { dashboardApi, changeApi, projectApi } from '../api/endpoints'
 
@@ -146,26 +147,68 @@ export function ChatPanel() {
     setPendingInput(null)
   }
 
-  const handleApproveChange = async (changeId: string) => {
+  // Inline reject form state — only one change can be in "writing reject
+  // reason" mode at a time. Matches the visual model of the pending card
+  // expanding in place rather than opening a modal.
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectReason, setRejectReason] = useState('')
+
+  // submitVerdict is the single backend call for both approve and reject.
+  // We omit `level` so the server applies its defaults (L0 on approve,
+  // L2 on reject). The same endpoint handles both `pending` (legacy
+  // autopilot) and `pending_human_confirm` (collaboration-hub) source
+  // statuses, so this works regardless of A3C_AUTOPILOT.
+  const submitVerdict = async (changeId: string, approved: boolean, reason: string) => {
     try {
-      const res = await changeApi.approveForReview(changeId)
+      const res = await changeApi.review(changeId, '', approved, reason)
       if (res.success) {
         removePendingChange(changeId)
         addChatMessage({
           id: Date.now().toString(),
           role: 'system',
-          content: `Change ${changeId} approved for review. Audit started.`,
+          content: approved
+            ? `Change ${changeId.slice(0, 8)} approved and committed.`
+            : `Change ${changeId.slice(0, 8)} rejected.`,
+          timestamp: Date.now(),
+        })
+      } else {
+        addChatMessage({
+          id: Date.now().toString(),
+          role: 'system',
+          content: `Failed to ${approved ? 'approve' : 'reject'} change.`,
           timestamp: Date.now(),
         })
       }
-    } catch {
+    } catch (e: any) {
       addChatMessage({
         id: Date.now().toString(),
         role: 'system',
-        content: 'Failed to approve change for review.',
+        content: `Failed to ${approved ? 'approve' : 'reject'} change: ${e?.response?.data?.error?.message || 'unknown error'}.`,
         timestamp: Date.now(),
       })
     }
+  }
+
+  const handleApproveChange = async (changeId: string) => {
+    await submitVerdict(changeId, true, 'Approved')
+  }
+
+  const handleStartReject = (changeId: string) => {
+    setRejectingId(changeId)
+    setRejectReason('')
+  }
+
+  const handleCancelReject = () => {
+    setRejectingId(null)
+    setRejectReason('')
+  }
+
+  const handleSubmitReject = async (changeId: string) => {
+    const reason = rejectReason.trim()
+    if (!reason) return
+    await submitVerdict(changeId, false, reason)
+    setRejectingId(null)
+    setRejectReason('')
   }
 
   const handleToggleAutoMode = async () => {
@@ -319,22 +362,75 @@ export function ChatPanel() {
           <p className="text-[10.5px] uppercase tracking-[0.08em] font-semibold mb-2" style={{ color: '#fcd34d' }}>
             Pending Human Confirmation
           </p>
-          {pendingChanges.map((c) => (
-            <div key={c.change_id} className="flex items-center gap-2 mb-1.5 last:mb-0">
-              <span className="text-[12.5px] flex-1 truncate" style={{ color: 'var(--text-0)' }}>
-                {c.description || c.change_id}
-              </span>
-              <button
-                onClick={() => handleApproveChange(c.change_id)}
-                className="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
-                style={{ background: '#10b981', color: 'white' }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = '#059669' }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = '#10b981' }}
-              >
-                Approve
-              </button>
-            </div>
-          ))}
+          {pendingChanges.map((c) => {
+            const isRejecting = rejectingId === c.change_id
+            return (
+              <div key={c.change_id} className="mb-2 last:mb-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[12.5px] flex-1 truncate" style={{ color: 'var(--text-0)' }}>
+                    {c.description || c.change_id}
+                  </span>
+                  {!isRejecting && (
+                    <>
+                      <button
+                        onClick={() => handleApproveChange(c.change_id)}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
+                        style={{ background: '#10b981', color: 'white' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = '#059669' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = '#10b981' }}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => handleStartReject(c.change_id)}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
+                        style={{ background: '#dc2626', color: 'white' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = '#b91c1c' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = '#dc2626' }}
+                      >
+                        Reject
+                      </button>
+                    </>
+                  )}
+                </div>
+                {isRejecting && (
+                  <div className="mt-2 flex flex-col gap-2">
+                    <textarea
+                      autoFocus
+                      value={rejectReason}
+                      onChange={(e) => setRejectReason(e.target.value)}
+                      placeholder="Why are you rejecting? The submitter will see this verbatim."
+                      rows={3}
+                      className="text-[12px] px-2.5 py-2 rounded resize-y outline-none"
+                      style={{
+                        background: 'rgba(0,0,0,0.25)',
+                        border: '1px solid var(--border)',
+                        color: 'var(--text-0)',
+                      }}
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={handleCancelReject}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded chip"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => handleSubmitReject(c.change_id)}
+                        disabled={!rejectReason.trim()}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ background: '#dc2626', color: 'white' }}
+                        onMouseEnter={(e) => { if (!e.currentTarget.disabled) e.currentTarget.style.background = '#b91c1c' }}
+                        onMouseLeave={(e) => { if (!e.currentTarget.disabled) e.currentTarget.style.background = '#dc2626' }}
+                      >
+                        Submit Rejection
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 
