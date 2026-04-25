@@ -1,6 +1,7 @@
 package service
 
 import (
+	_ "embed"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,17 @@ import (
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
 )
+
+// initialOverviewMarkdown is the canonical OVERVIEW.md the platform writes
+// into every freshly-initialised project repo. The body lives in a sibling
+// .md file so it can use markdown code fences directly (Go raw strings
+// can't contain backticks). The file is part of the agent protocol — see
+// client/skill/using-a3c-platform/references/overview-template.md for the
+// writing guide. Section headings are stable; do not rename them without
+// also updating the skill reference.
+//
+//go:embed templates/initial_overview.md
+var initialOverviewMarkdown string
 
 func getRepoPath(projectID string) string {
 	return filepath.Join(DataPath, projectID, "repo")
@@ -73,46 +85,14 @@ func GitInit(projectID string) error {
 	return nil
 }
 
-// initialOverviewTemplate returns the stub OVERVIEW.md shipped with every
-// newly-initialised project repo. It is intentionally short and prescriptive:
-// the first Maintain pass fills in Summary/Structure, and every change_submit
-// that touches structural code is expected to append to Recent Structural
-// Changes. Agents read this file at session start (project-overview-read
-// skill), so its shape is also part of the agent protocol — keep field
-// headings stable when editing.
+// initialOverviewTemplate returns the OVERVIEW.md body written into every
+// newly-initialised project repo. The template is a fixed 10-section schema
+// (Why / Run / Stack / Map / Key Files / Conventions / Danger Zones /
+// Active Focus / Pitfalls / Recent Structural Changes). The body itself
+// lives in templates/initial_overview.md and is embedded at build time —
+// edit that file, not this function, when changing the template.
 func initialOverviewTemplate() string {
-	return `# Project Overview
-
-> Living map of this codebase. Every agent reads this file at session start.
-> When you change structure (add/move/remove files, refactor modules, rename
-> exported symbols), update this file in the **same** ` + "`change_submit`" + ` call that
-> ships the code change. The audit pipeline emits an ` + "`overview_reminder`" + ` when
-> structural code changes without an OVERVIEW update.
-
-## Summary
-
-_Pending first Maintain agent pass. Describe the project's purpose in 2-3
-sentences._
-
-## Structure
-
-_Top-level directories and their purpose. Example format:_
-
-- ` + "`src/`" + ` — source code
-- ` + "`tests/`" + ` — test suite
-- ` + "`docs/`" + ` — documentation
-
-## Key Files
-
-_Files other agents routinely touch, with their purpose. Example format:_
-
-- ` + "`src/main.go`" + ` — entry point, wires config + server
-- ` + "`src/config.go`" + ` — configuration loading from env + yaml
-
-## Recent Structural Changes
-
-_Newest first. Append one line per significant structural update._
-`
+	return initialOverviewMarkdown
 }
 
 func GitAddAndCommit(projectID string, taskName string, taskDesc string) error {

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { ApiClient } from './api-client.js'
 import { Poller } from './poller.js'
 import { OpenCodeClient } from './opencode-client.js'
-import { loadConfig, saveConfig } from './config.js'
+import { loadConfig, saveConfig, workdirRoot } from './config.js'
 import * as fs from 'fs'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename)
 
 const PLATFORM_URL = process.env.A3C_PLATFORM_URL || 'http://localhost:3003'
 const ACCESS_KEY = process.env.A3C_ACCESS_KEY || ''
-const PROJECT = process.env.A3C_PROJECT || ''
+const PROJECT = process.env.A3C_PROJECT_ID || process.env.A3C_PROJECT || ''
 const OPENCODE_SERVE_URL = process.env.OPENCODE_SERVE_URL || 'http://127.0.0.1:4096'
 
 /**
@@ -241,7 +241,7 @@ async function main() {
   })
 
   server.tool('file_sync', 'Sync platform files to local staging area', {
-    version: z.string().describe('Current local version'),
+    version: z.string().optional().default('').describe('Current local version'),
   }, async ({ version }) => {
     const data = await api.syncFiles(version)
     
@@ -249,27 +249,30 @@ async function main() {
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
     }
 
-    const projectId = api.projectId
+    const projectId = data.data?.project_id || api.projectId
     if (!projectId) {
       return { content: [{ type: 'text', text: 'Error: No project selected' }] }
     }
 
     // Staging root selection order:
-    //   1. A3C_STAGING_DIR env var (absolute path)
-    //   2. Agent's current working directory (what the OpenCode agent sees)
-    //   3. Fallback to MCP install dir (legacy behavior)
+    //   1. A3C_STAGING_DIR env var (absolute path; useful in tests / CI)
+    //   2. workdirRoot() - A3C_HOME or process.cwd(); see config.ts
+    //
+    // The legacy __dirname/.. fallback used to leak the MCP install
+    // directory across workdirs whenever the launcher forgot to set
+    // cwd; removed so failures fail loud instead of silently scribbling
+    // into the package.
     const stagingRoot = process.env.A3C_STAGING_DIR
       ? path.resolve(process.env.A3C_STAGING_DIR)
-      : process.cwd() || path.join(__dirname, '..', '..')
+      : workdirRoot()
     const clientRoot = stagingRoot
     const stagingDir = path.resolve(path.join(clientRoot, '.a3c_staging', projectId, 'full'))
 
     fs.mkdirSync(stagingDir, { recursive: true })
 
-    const files: Array<{ path: string; content: string; locked: boolean; status?: string }> = data.data?.files
-    if (!Array.isArray(files)) {
-      return { content: [{ type: 'text', text: 'Error: Invalid response format from server' }] }
-    }
+    const files: Array<{ path: string; content: string; locked: boolean; status?: string }> = Array.isArray(data.data?.files)
+      ? data.data.files
+      : []
     const deletedPaths: string[] = Array.isArray(data.data?.deleted) ? data.data.deleted : []
     const incremental: boolean = !!data.data?.incremental
 

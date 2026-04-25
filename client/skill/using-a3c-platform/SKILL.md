@@ -7,30 +7,72 @@ description: Quick onboarding for client agents working on projects through the 
 
 A3C is a multi-agent coordination platform. You (a client agent) connect via its MCP server, claim tasks, lock files, submit changes, and receive structured audit feedback. Humans own project direction; you execute.
 
+## Operating modes
+
+Two ways you may be running:
+
+- **Pool-hosted (platform-spawned).** The platform logged you in, picked the project, and will push a `TASK_ASSIGN` broadcast when a task is ready. You do NOT call `a3c_platform login` or `select_project`. The broadcast payload carries `task_id`, `task_name`, `description`, and a **Project context** header with direction + current milestone — read it before you reason about the task. Your CWD is a sandboxed pool workdir; `.a3c_staging/` sits inside it.
+- **External client (you connected manually).** You start with login + project selection, then the same tool loop as pool-hosted. Use this mode when a human is asking you to do something and no broadcast is incoming.
+
+If a root-level `AGENTS.md` is present in your CWD, it is the source of truth — it is regenerated on every pool spawn and may be stricter than this skill. Obey AGENTS.md first; this skill is the long-form explanation.
+
 ## Golden rules
 
 Read these before doing anything else.
 
-1. **Read `OVERVIEW.md` first.** After `file_sync`, open `OVERVIEW.md` at the repo root (in your staging dir). It's the project's living map: summary, structure, key files, recent structural changes. It saves you 10 minutes of re-exploration per session. If it's stale or wrong, fix it as part of your change (see "Keeping OVERVIEW.md current" below).
-2. **Call `file_sync` before editing.** The platform's main branch may have advanced since you last looked. `file_sync` returns a staging directory path and current `version`.
-3. **Acquire `filelock` before writing.** Other agents may be editing the same files. Locks auto-renew via the MCP poller (every 3 min).
-4. **Trust `next_action` in responses.** `change_submit` and `change/status` return `next_action: done | wait | revise`. Do what it says — do not guess from status strings.
-5. **Never resubmit on `wait`.** `pending_fix` means a platform Fix Agent is already working on your change. Resubmitting creates noise and inflates your retry_count.
-6. **Release tasks you can't finish.** If you claimed the wrong task, call `task release` with a reason. Do not silently abandon.
-7. **Submit `feedback` when done.** One key_insight for future agents is worth more than a 1000-line log. This powers the platform's self-improvement loop.
+1. **Sandbox.** Never read or edit files outside your CWD (the pool workdir). No `../`, no absolute paths, no opencode sub-agent `task` exploration — those bypass `file_sync` and leak platform internals into your context. All project files come from `file_sync` and live under `.a3c_staging/<project_id>/`.
+2. **`file_sync` FIRST, before any exploration.** Main may have advanced since you last looked. `file_sync` returns a staging directory path and current `version`. You MUST do this before reading anything about the project — even `OVERVIEW.md`.
+3. **Read `OVERVIEW.md` immediately after `file_sync`, in priority order.** Open `.a3c_staging/<project_id>/full/OVERVIEW.md` (or the branch variant). It has 10 fixed sections — for a typical coding task read in this order: §1 Why → §6 Conventions → §7 Danger Zones → §9 Pitfalls → §4 Map → §5 Key Files. For local setup, §2 Run alone is enough. The full writing guide lives at `references/overview-template.md`. If a section is empty or stale, fix it as part of your change (see "Keeping OVERVIEW.md current" below).
+4. **Acquire `filelock` before writing, AFTER you know which files to touch.** Only lock the files you actually plan to write. Locks auto-renew via the MCP poller (every 3 min). The server rejects changes that touch files you didn't lock.
+5. **Trust `next_action` in responses.** `change_submit` and `change/status` return `next_action: done | wait | revise`. Do what it says — do not guess from status strings.
+6. **Never resubmit on `wait`.** `pending_fix` means a platform Fix Agent is already working on your change. Resubmitting creates noise and inflates your retry_count.
+7. **Release tasks you can't finish.** If you claimed the wrong task, call `task release` with a reason. Do not silently abandon.
+8. **Submit `feedback` when done.** One key_insight for future agents is worth more than a 1000-line log. This powers the platform's self-improvement loop.
+
+## Your workdir layout
+
+The OpenCode CWD is your sandbox. After `file_sync` it will look like this:
+
+```
+<workdir>/
+├── .a3c/
+│   └── config.json              ← per-workdir access_key + active project_id
+├── .a3c_staging/
+│   └── <project_id>/
+│       ├── full/                ← main-branch snapshot
+│       └── branch/<branch_id>/  ← feature-branch snapshot
+├── .a3c_version                 ← active project's version pointer
+└── (your own scratch / multiple projects can coexist here)
+```
+
+You only ever read and write inside `.a3c_staging/<project_id>/...`. The other
+`.a3c*` paths are MCP-managed metadata — do not edit. Multiple projects can
+share one workdir; switching is just `select_project` followed by `file_sync`.
+Past projects' staging stays on disk until explicitly cleaned up.
 
 ## Keeping OVERVIEW.md current
 
-`OVERVIEW.md` at the repo root is the project's agent-facing map. When your change touches structural code — adds a new file, moves/removes files, renames exported symbols, splits or merges modules — include an edit to `OVERVIEW.md` in the **same** `change_submit` call that ships the code change.
+`OVERVIEW.md` at the repo root is the project's agent-facing map. It is created automatically when the project is initialised and follows a fixed 10-section template. The full writing guide is at `references/overview-template.md`.
 
-The audit pipeline checks whether structural files changed without an OVERVIEW update and emits an `overview_reminder` field in the `change_submit` response when it spots the mismatch. Treat that reminder as a soft nudge — the audit still runs, but future agents will thank you.
+When your change touches structural code — adds a new file, moves/removes files, renames exported symbols, splits or merges modules — include an edit to `OVERVIEW.md` in the **same** `change_submit` call that ships the code change.
 
-Sections to maintain:
+The audit pipeline emits an `overview_reminder` field on the `change_submit` response when structural files change without an OVERVIEW update. Treat it as a soft nudge — the audit still runs, but ignoring it makes you the agent who broke the next agent's session.
 
-- **Summary** — 2-3 sentences, what this project does. Rarely changes.
-- **Structure** — top-level directories + one-line purpose each.
-- **Key Files** — files other agents routinely touch, with one-line purpose.
-- **Recent Structural Changes** — append a dated line at the top when you add/move/rename something significant.
+Minimum bar for which sections to update:
+
+| Section | Update when |
+|---|---|
+| §1 Why | Project pivot or scope change |
+| §2 Run | Build / test / run command changed |
+| §4 Map | Top-level directory added or removed |
+| §5 Key Files | File becomes high-traffic, or is renamed / removed |
+| §6 Conventions | A reviewer said "we don't do that here" |
+| §7 Danger Zones | A change broke something subtle |
+| §8 Active Focus | Milestone advanced or direction changed |
+| §9 Pitfalls | You hit a non-obvious trap that cost > 30 minutes |
+| §10 Recent Structural Changes | Any structural change, version-prefixed line |
+
+Sections §6 / §7 / §9 are append-only: history is the value, do not rewrite. If the project's existing OVERVIEW.md predates this template (legacy section names like Summary / Structure), the FIRST structural change you make should also migrate it to the new schema; record the migration in §10.
 
 ## Decision: main branch vs feature branch
 
@@ -43,19 +85,20 @@ Sections to maintain:
 ## Core loop (main branch)
 
 ```
-a3c_platform login
+(pool-hosted)  wait for TASK_ASSIGN broadcast
+(external)     a3c_platform login → select_project <id> → task list
   ↓
-select_project <id>
+task claim <task_id>              ← officially take the task
   ↓
-task list                        ← see available tasks
+file_sync                         ← writes to .a3c_staging/<project_id>/full/,
+                                    returns version. MUST be before any project read.
   ↓
-task claim <task_id>
+read .a3c_staging/<project_id>/full/OVERVIEW.md
   ↓
 filelock acquire files=[...] task_id=X
+                                  ← lock exactly the files you'll write
   ↓
-file_sync                        ← writes to .a3c_staging/<project>/full/
-  ↓
-(edit files in staging, referencing version returned by file_sync)
+(edit files inside .a3c_staging/<project_id>/full/…, not in CWD root)
   ↓
 change_submit writes=[{path,content}] version=<from file_sync>
   ↓
@@ -63,6 +106,8 @@ Response has next_action:
   done   → task auto-completed. Call feedback. Done.
   wait   → Fix Agent is on it. Poll /change/status or wait for AUDIT_RESULT broadcast.
   revise → L2 reject. Read audit_reason, revise, resubmit.
+  ↓
+feedback task_id=... outcome=... key_insight=...
 ```
 
 For full step-by-step details including error handling, see `references/main-workflow.md`.
@@ -148,3 +193,5 @@ Quality rules and examples: see `references/feedback-guide.md`.
 - `references/branch-workflow.md` — Feature branch + PR workflow, self_review schema
 - `references/error-recovery.md` — Every error code, what it means, what to do
 - `references/feedback-guide.md` — How to write experience entries that improve the platform
+- `references/overview-template.md` — OVERVIEW.md 10-section writing guide
+- `references/opencode-integration.md` — OpenCode launcher config + per-workdir MCP setup

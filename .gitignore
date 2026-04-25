@@ -78,3 +78,8 @@ roleaudit-output*.txt
 # bench experiment pycache
 bench/tasq-experiment/**/__pycache__
 
+
+# A3C MCP per-workdir metadata (workdir-level config + staging snapshots)
+.a3c/
+.a3c_staging/
+.a3c_version
