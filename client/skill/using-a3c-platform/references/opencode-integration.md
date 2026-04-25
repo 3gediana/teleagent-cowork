@@ -120,9 +120,8 @@ this document is that `opencode.json` should travel between machines.
 
 ## Public deployment via a tunnel
 
-When the A3C platform is exposed publicly through a tunnel (ngrok,
-Cloudflared, frp, vite-allowed-hosts entry, etc.), MCP clients and browser
-users hit the same URL.
+When the A3C platform is exposed publicly through any HTTP/HTTPS tunneling
+service, MCP clients and browser users hit the same URL.
 
 The frontend currently owns the public hostname (vite dev server, port
 3303 by default), and vite's built-in proxy forwards every `/api/*` request
@@ -159,8 +158,10 @@ Things to double-check:
   broadcasts (`/api/v1/.../events`). Some tunneling services buffer or
   close long-lived connections — verify your provider keeps SSE open before
   relying on it.
-- **Allowed hosts.** vite refuses unknown hostnames by default. Add your
-  tunnel domain to `frontend/vite.config.ts::server.allowedHosts`.
+- **Allowed hosts.** vite refuses unknown hostnames by default. Set
+  `A3C_ALLOWED_HOSTS` (comma-separated) in `frontend/.env.local` to the
+  tunnel hostname(s) the dev server should accept. See
+  `frontend/.env.local.example` for the full list of supported keys.
 - **Production hosting.** vite's dev server is fine for personal or
   small-team tunnels. For production, build the frontend (`vite build`)
   and serve `dist/` from nginx / Caddy / Traefik, with `/api/v1/*` proxied
