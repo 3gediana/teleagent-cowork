@@ -2,33 +2,65 @@
 
 How to wire the A3C MCP server into [OpenCode](https://opencode.ai) so that
 each workdir gets its own A3C configuration, active project, and staging
-snapshots — without cross-pollution between workdirs on the same machine.
+snapshots — without cross-pollution between workdirs on the same machine,
+and without anyone having to hard-code their machine's filesystem layout into
+shared config.
 
 This is a deployment-side document. Agents do not read it; humans setting up
 A3C for their team do.
 
-## Why workdir-level
+## Install the client
 
-A3C tracks the active project and access key **per workdir**. Two workdirs
-on the same machine can hold two different projects, and the MCP client
-will not let them overwrite each other's `project_id`. For this to work,
-OpenCode must launch the a3c MCP server with one of:
+The A3C MCP server is shipped as an npm package whose `bin` exposes the
+`a3c-mcp` command. Pick whichever install flow matches how you got the code.
 
-- Its `cwd` set to the workdir (the default behaviour, see Option A), **or**
-- An explicit `A3C_HOME` env var pointing at the workdir (Option B)
+### From a checkout (recommended for now)
 
-Internally, a3c resolves the workdir via `workdirRoot()` in
-`client/mcp/src/config.ts`: `A3C_HOME` wins; otherwise `process.cwd()`.
+If you cloned this repo:
 
-## Option A — cwd-based (simplest)
+```sh
+cd client/mcp
+npm install        # installs deps; the prepare hook also runs `npm run build`
+npm link           # registers `a3c-mcp` on this machine's PATH
+```
 
-OpenCode launches MCP child processes in its own `cwd` by default. So if you:
+Verify:
+
+```sh
+a3c-mcp --version  # any output (or stdio idle, which is normal for MCP)
+which a3c-mcp      # POSIX
+Get-Command a3c-mcp # PowerShell
+```
+
+`npm link` is idempotent — re-run it after pulling new commits to refresh the
+linked dist. To remove: `npm unlink -g @a3c/mcp-server`.
+
+### From an npm-published tarball (future)
+
+```sh
+npm install -g @a3c/mcp-server
+```
+
+This is what your `opencode.json` should target once the package is published.
+Until then, use `npm link` from a checkout — the resulting `a3c-mcp` command
+behaves identically.
+
+## Wire it into OpenCode
+
+A3C tracks the active project and access key **per workdir**: two workdirs
+on the same machine can hold two different projects without overwriting each
+other's `project_id`. To make this work, OpenCode just needs to launch the
+a3c MCP server in the right cwd; the bin shim handles the rest.
+
+### Option A — cwd-based (simplest, recommended)
+
+OpenCode launches MCP child processes in its own `cwd` by default, so:
 
 1. `cd <workdir>`
 2. Run `opencode`
 
 …then the a3c MCP server's `process.cwd()` is `<workdir>`, and a3c reads/writes
-config and staging inside `<workdir>/.a3c/…`.
+config and staging inside `<workdir>/.a3c/…` and `<workdir>/.a3c_staging/…`.
 
 Place this `opencode.json` at the root of `<workdir>`:
 
@@ -38,7 +70,7 @@ Place this `opencode.json` at the root of `<workdir>`:
   "mcp": {
     "a3c": {
       "type": "local",
-      "command": ["node", "/absolute/path/to/a3c/client/mcp/dist/index.js"],
+      "command": ["a3c-mcp"],
       "enabled": true,
       "environment": {
         "A3C_PLATFORM_URL": "http://localhost:8080"
@@ -49,19 +81,18 @@ Place this `opencode.json` at the root of `<workdir>`:
 ```
 
 OpenCode looks for `opencode.json` starting from the directory you launched
-it in and walks up to the nearest git repo. Putting the file in your workdir
-root means it is picked up automatically and can be checked into git.
+it in and walks up to the nearest git repo. Putting the file in the workdir
+root (or repo root) means it's picked up automatically and can be checked
+into git for the team.
 
-The path inside `command` is the absolute filesystem path of the built MCP
-server (`client/mcp/dist/index.js`). If you bundle a3c via `npm pack` or
-publish it, swap it for `["npx", "-y", "@a3c/mcp-server"]` or whatever your
-distribution uses.
+No paths to the MCP install location anywhere in this config — `a3c-mcp`
+is resolved through PATH, so this same `opencode.json` works on every
+teammate's machine regardless of where they cloned the A3C repo.
 
-## Option B — explicit `A3C_HOME` (most robust)
+### Option B — explicit `A3C_HOME` (most robust)
 
 If your launcher does anything non-trivial with `cwd` (CI, IDE plugins,
-`opencode run` from a different directory, multiplexed terminals), pin a3c's
-workdir explicitly via env:
+`opencode run` from a different directory), pin a3c's workdir explicitly:
 
 ```json
 {
@@ -69,10 +100,10 @@ workdir explicitly via env:
   "mcp": {
     "a3c": {
       "type": "local",
-      "command": ["node", "/absolute/path/to/a3c/client/mcp/dist/index.js"],
+      "command": ["a3c-mcp"],
       "enabled": true,
       "environment": {
-        "A3C_HOME": "/absolute/path/to/this/workdir",
+        "A3C_HOME": "{env:A3C_WORKDIR}",
         "A3C_PLATFORM_URL": "http://localhost:8080"
       }
     }
@@ -81,9 +112,13 @@ workdir explicitly via env:
 ```
 
 `A3C_HOME` overrides `process.cwd()` and locks all per-workdir state to that
-absolute path regardless of how OpenCode was started.
+absolute path, regardless of how OpenCode was started. Source whatever shell
+profile sets `A3C_WORKDIR` before launching opencode.
 
-## Other useful env vars
+Avoid baking an absolute path into `A3C_HOME` directly — the whole point of
+this document is that `opencode.json` should travel between machines.
+
+## Useful env vars
 
 | Var | Default | What it does |
 |---|---|---|
@@ -93,6 +128,8 @@ absolute path regardless of how OpenCode was started.
 | `A3C_PROJECT_ID` | (config file) | Pre-select a project on startup |
 | `A3C_STAGING_DIR` | `workdirRoot()` | Override staging root only (rare; tests / CI) |
 | `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | Where this client's local opencode serve listens (for broadcast injection) |
+
+All of these can be set in the `environment` block of the MCP entry.
 
 ## Verifying the integration
 
@@ -110,8 +147,8 @@ should look like:
 └── .a3c_version                 # appears after the first file_sync
 ```
 
-If you instead see `~/.a3c/config.json` getting *modified* (rather than just
-read), the launcher is starting the MCP in the wrong cwd and not passing
+If you instead see `~/.a3c/config.json` getting *modified* (not just read),
+the launcher is starting the MCP in the wrong cwd and not passing
 `A3C_HOME` either — switch to Option B.
 
 ## Migrating from the old global config
@@ -137,7 +174,7 @@ a3c in one workdir without ripping out the config:
 ```json
 {
   "mcp": {
-    "a3c": { "enabled": false, ... }
+    "a3c": { "enabled": false }
   }
 }
 ```

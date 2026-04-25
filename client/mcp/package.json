@@ -1,10 +1,22 @@
 {
   "name": "@a3c/mcp-server",
   "version": "0.1.0",
+  "description": "MCP server for the A3C multi-agent collaboration platform",
   "type": "module",
+  "bin": {
+    "a3c-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "prepare": "npm run build",
     "start": "node dist/index.js"
   },
   "dependencies": {
