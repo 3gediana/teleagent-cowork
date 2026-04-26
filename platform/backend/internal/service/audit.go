@@ -80,13 +80,50 @@ func notifyAuditCompletion(changeID string, status, level, reason string) {
 	done, ok := pendingChanges[changeID]
 	pendingChangesMutex.RUnlock()
 
+	comp := &AuditCompletion{
+		Status:      status,
+		AuditLevel:  level,
+		AuditReason: reason,
+	}
 	if ok {
-		done <- &AuditCompletion{
-			Status:      status,
-			AuditLevel:  level,
-			AuditReason: reason,
+		// Non-blocking send — if the handler already gave up and
+		// drained the channel, the buffered slot is still open
+		// (capacity 1). If it somehow isn't, we'd rather log and
+		// move on than deadlock the audit worker goroutine.
+		select {
+		case done <- comp:
+		default:
+			log.Printf("[Audit] notifyAuditCompletion: waiter channel for %s full or closed; dropping sync notify and relying on broadcast", changeID)
 		}
 	}
+
+	// Always broadcast, even if a waiter received it above — the
+	// pool-injector path is idempotent (agent seeing the same
+	// verdict twice is fine, and in practice the handler hands
+	// over to the broadcast path precisely when the waiter is
+	// gone). The small cost of one extra broadcast is far cheaper
+	// than the "agent sits idle for 15+ minutes" failure mode we
+	// observed without it.
+	var change model.Change
+	if err := model.DB.Where("id = ?", changeID).First(&change).Error; err != nil {
+		log.Printf("[Audit] broadcast skip: cannot load change %s: %v", changeID, err)
+		return
+	}
+	if change.AgentID == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"change_id":    changeID,
+		"status":       status,
+		"audit_level":  level,
+		"audit_reason": reason,
+	}
+	if change.TaskID != nil {
+		payload["task_id"] = *change.TaskID
+	}
+	BroadcastDirected(change.AgentID, "AUDIT_RESULT", payload)
+	log.Printf("[Audit] broadcast AUDIT_RESULT → agent=%s change=%s status=%s level=%s",
+		change.AgentID, changeID, status, level)
 }
 
 func StartAuditWorkflow(changeID string) error {
@@ -105,6 +142,17 @@ func StartAuditWorkflow(changeID string) error {
 	agent.DispatchSession(session)
 
 	return nil
+}
+
+// ApproveAndCommitChange is the public entry point used by the
+// /change/review handler in collaboration-hub mode. It is the same
+// implementation as the (still package-private) approveChange that
+// the autopilot audit pipeline calls — exported so handlers outside
+// this package can drive the approval side-effects (git commit,
+// version bump, task auto-complete, VERSION_UPDATE broadcast)
+// without having to re-implement them.
+func ApproveAndCommitChange(change *model.Change) error {
+	return approveChange(change)
 }
 
 func approveChange(change *model.Change) error {
@@ -255,7 +303,6 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 		}()
 
 		notifyAuditCompletion(changeID, "rejected", "L2", result.RejectReason)
-
 		log.Printf("[Audit] Change %s rejected (L2)", changeID)
 	}
 
@@ -268,12 +315,37 @@ func ProcessFixOutput(changeID string, result *FixResult) error {
 		return fmt.Errorf("change not found: %w", err)
 	}
 
+	// Idempotency guard: a fix-agent session occasionally emits
+	// fix_output multiple times in a row (observed 7x on chg_2885f4de
+	// during Run B5). Without this short-circuit each repeat fires
+	// approveChange -> git commit -> version bump -> VERSION_UPDATE
+	// broadcast again, spamming the transcript and inflating
+	// version numbers. Once the change is in a terminal state we
+	// re-broadcast the same AUDIT_RESULT (cheap, idempotent on
+	// agent side) but skip the side-effect heavy re-approval.
+	if change.Status == "approved" || change.Status == "rejected" {
+		log.Printf("[Audit] fix_output for %s ignored: already %s", changeID, change.Status)
+		level := "L1"
+		if change.AuditLevel != nil {
+			level = *change.AuditLevel
+		}
+		notifyAuditCompletion(changeID, change.Status, level, change.AuditReason)
+		return nil
+	}
+
 	switch result.Action {
 	case "fix":
 		if err := approveChange(&change); err != nil {
 			return err
 		}
 		log.Printf("[Audit] Change %s fixed and approved", changeID)
+		// L1 → Fix-agent → approved is the other terminal
+		// state the submitting agent needs to hear about. Without
+		// this notify the agent would have seen "pending_fix" in
+		// its earlier broadcast/HTTP response and then never get
+		// the closing "finally approved" update — they'd sit in
+		// status=wait forever. Observed on Run B4.
+		notifyAuditCompletion(changeID, "approved", "L1", "fixed by fix-agent")
 
 	case "delegate":
 		ctx := BuildChangeContext(&change)

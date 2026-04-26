@@ -15,6 +15,7 @@ import (
 
 	"github.com/a3c/platform/internal/agent"
 	"github.com/a3c/platform/internal/agentpool"
+	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/opencode"
 )
 
@@ -45,6 +46,21 @@ func (h *AgentPoolHandler) Spawn(c *gin.Context) {
 		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "agent pool is human-controlled"}})
 		return
 	}
+	// Pool spawn is meaningless when autopilot is off: the
+	// background broadcast consumer + dormancy detector + context
+	// watcher are NOT running (cmd/server/main.go gates them on
+	// config.IsAutopilotEnabled), so a freshly spawned pool agent
+	// would never receive directed messages, never get task
+	// assignments, and just burn a subprocess. Refuse spawn
+	// explicitly with the path forward (set A3C_AUTOPILOT=1 and
+	// restart) so operators don't end up debugging silent zombies.
+	if !config.IsAutopilotEnabled() {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{
+			"code":    "AUTOPILOT_DISABLED",
+			"message": "Agent pool is disabled (collaboration-hub mode). To use server-spawned agents, set A3C_AUTOPILOT=1 and restart the server.",
+		}})
+		return
+	}
 	m := agentpool.GetDefault()
 	if m == nil {
 		c.JSON(503, gin.H{"success": false, "error": gin.H{"code": "POOL_NOT_READY", "message": "agent pool not initialised"}})
@@ -67,12 +83,28 @@ func (h *AgentPoolHandler) Spawn(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// If the caller didn't pin a provider/model, fall back to the
+	// config.yaml `opencode.default_model_*` pair. Without this every
+	// spawn that omits those fields would come up with an empty
+	// provider/model which the broadcast injector hard-fails on
+	// ("parts=0"), stalling TASK_ASSIGN delivery silently.
+	providerID := req.OpencodeProviderID
+	modelID := req.OpencodeModelID
+	if cfg := config.Get(); cfg != nil {
+		if providerID == "" {
+			providerID = cfg.OpenCode.DefaultModelProvider
+		}
+		if modelID == "" {
+			modelID = cfg.OpenCode.DefaultModelID
+		}
+	}
+
 	inst, err := m.Spawn(ctx, agentpool.SpawnRequest{
 		ProjectID:          req.ProjectID,
 		RoleHint:           agent.Role(req.RoleHint),
 		Name:               req.Name,
-		OpencodeProviderID: req.OpencodeProviderID,
-		OpencodeModelID:    req.OpencodeModelID,
+		OpencodeProviderID: providerID,
+		OpencodeModelID:    modelID,
 	})
 	if err != nil {
 		c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "SPAWN_FAILED", "message": err.Error()}})
@@ -196,6 +228,13 @@ func (h *AgentPoolHandler) Sleep(c *gin.Context) {
 func (h *AgentPoolHandler) Wake(c *gin.Context) {
 	if !callerIsHuman(c) {
 		c.JSON(403, gin.H{"success": false, "error": gin.H{"code": "HUMAN_ONLY", "message": "agent pool is human-controlled"}})
+		return
+	}
+	if !config.IsAutopilotEnabled() {
+		c.JSON(503, gin.H{"success": false, "error": gin.H{
+			"code":    "AUTOPILOT_DISABLED",
+			"message": "Agent pool wake is disabled (collaboration-hub mode). To use server-spawned agents, set A3C_AUTOPILOT=1 and restart the server.",
+		}})
 		return
 	}
 	m := agentpool.GetDefault()

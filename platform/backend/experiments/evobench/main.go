@@ -15,6 +15,26 @@ package main
 // Usage:
 //   go run ./experiments/evobench
 //   go run ./experiments/evobench -rounds 50 -artifacts 80 -seed 42
+//
+// Backlog (post-2026-04 audit):
+//
+//   * Audit-only training is too coarse to validate learned weights.
+//     With random L0/L1/L2 verdicts, BCE-style pair loss flatlines
+//     because the gradient sees no consistent winner. The trainer
+//     reports "Loss: 0.6928 → 0.6928 over 200 epochs" — that's
+//     unweighted log(2), i.e. random. Two ways out: (a) hand-craft
+//     a quality oracle (e.g. "L0 iff top-1 artifact's TrueTopic ==
+//     query topic") and treat learned weights as ground-truth-aware,
+//     or (b) flip on EVOBENCH_JUDGE=<provider> with a real LLM judge
+//     so each round gets a defensible top-1 label. Until one of
+//     those lands, the "Learned weights" line is descriptive of the
+//     audit noise and nothing more.
+//
+//   * Cluster cooldown is wired (EVOBENCH_COOLDOWN=1) but evaluated
+//     only on cluster distribution stddev, not on retrieval quality.
+//     The right answer needs a judge to score "would a smarter agent
+//     have picked the cooldown-displaced top-1 over the original?"
+//     — same blocker as the trainer above.
 
 import (
 	"context"
@@ -76,6 +96,36 @@ var (
 	// Train the per-signal RRF weights on the collected feedback
 	// + judge pairs. Set to 0 to disable.
 	flagTrain = envInt("EVOBENCH_TRAIN", 1)
+
+	// Cross-round cluster cooldown. 1 = enable opt-in cooldown via
+	// ArtifactQuery.RecentTopClusters; 0 = legacy (no cross-round
+	// diversification). The window holds the last N top-1 cluster
+	// IDs and slides one slot per round. ClusterCooldownDecay is
+	// applied to RRF score per occurrence inside the selector.
+	flagCooldown       = envInt("EVOBENCH_COOLDOWN", 0)
+	flagCooldownWindow = envInt("EVOBENCH_COOLDOWN_WINDOW", 5)
+
+	// Cluster trust signal — opt-in cumulative judge agreement
+	// counter. EVOBENCH_TRUST=1 turns it on:
+	//   - At startup, load any prior counts from EVOBENCH_TRUST_FILE
+	//     (default ./evobench_trust.json). Missing file = clean start.
+	//   - During simulation, populate ArtifactQuery.TrustedClusters
+	//     with the top-N clusters whose count >= threshold so the
+	//     selector's cooldown skips them.
+	//   - During judge result processing, RecordClusterAgreement is
+	//     called once per top-1 agreement.
+	//   - At end, write the in-memory tracker back to the file so
+	//     subsequent invocations can build on the accumulated trust.
+	//
+	// First run: trust is empty so behaviour is identical to the
+	// cooldown-only path. Second run: trust populated from first
+	// run's judge agreements; cooldown skips proven gold clusters.
+	// Net effect over 2-3 runs: cluster diversity stays high but
+	// the most-corroborated clusters stop being haircut.
+	flagTrust          = envInt("EVOBENCH_TRUST", 0)
+	flagTrustFile      = envStr("EVOBENCH_TRUST_FILE", "evobench_trust.json")
+	flagTrustThreshold = envInt("EVOBENCH_TRUST_THRESHOLD", 2)
+	flagTrustLimit     = envInt("EVOBENCH_TRUST_LIMIT", 5)
 )
 
 func envInt(key string, def int) int {
@@ -126,6 +176,11 @@ func main() {
 			fmt.Printf("LLM judge requested (%s) but no API key in config.yaml; disabled\n", flagJudge)
 		}
 	}
+	if flagTrust > 0 {
+		fmt.Printf("Cluster trust signal: enabled (file=%s, threshold=%d, limit=%d)\n",
+			flagTrustFile, flagTrustThreshold, flagTrustLimit)
+		loadTrustFile(flagTrustFile)
+	}
 	fmt.Println()
 
 	initDB()
@@ -142,6 +197,15 @@ func main() {
 
 	// Phase 3: print retrieval / feedback report
 	printReport(stats)
+
+	// Phase 3b: persist accumulated cluster-trust counts so a
+	// follow-up invocation can use them via TrustedClusters. Only
+	// runs when trust is enabled — otherwise the file would be
+	// rewritten with an empty array, clobbering any prior state.
+	if flagTrust > 0 {
+		printTrustReport()
+		saveTrustFile(flagTrustFile)
+	}
 
 	// Phase 4: train per-signal RRF weights on the collected data
 	if flagTrain > 0 && len(dataset.Pairs) >= 8 {
@@ -419,6 +483,12 @@ func runSimulation(rng *rand.Rand, rounds int, judge JudgeConfig,
 		ClusterCounts: map[string]int{},
 	}
 
+	// Sliding window of the last N top-1 cluster IDs. Empty when
+	// EVOBENCH_COOLDOWN=0 (the default), so the selector runs in
+	// legacy mode. window[0] is oldest; we append on the right and
+	// shift on the left when len > flagCooldownWindow.
+	var recentClusters []string
+
 	judgeBudget := flagJudgeRounds
 	if !judge.Enabled {
 		judgeBudget = 0
@@ -454,19 +524,48 @@ func runSimulation(rng *rand.Rand, rounds int, judge JudgeConfig,
 			{Tag: tag, Weight: 0.6 + rng.Float64()*0.4}, // 0.6-1.0
 		}
 
-		// Retrieve artifacts
-		result := service.SelectArtifactsForInjection(context.Background(), service.ArtifactQuery{
+		// Retrieve artifacts. When cooldown is enabled, hand the
+		// selector a copy of the rolling window so the cluster that
+		// dominated the last few rounds gets RRF-penalised this round.
+		query := service.ArtifactQuery{
 			ProjectID:      "p1",
 			Audience:       service.AudienceCoder,
 			QueryEmbedding: queryVec,
 			WeightedTags:   weightedTags,
-		})
+		}
+		if flagCooldown > 0 && len(recentClusters) > 0 {
+			windowCopy := make([]string, len(recentClusters))
+			copy(windowCopy, recentClusters)
+			query.RecentTopClusters = windowCopy
+		}
+		// Trust signal: when enabled, hand the selector the
+		// top-N currently-trusted clusters for "p1". Empty on
+		// the first run (clean trust file); populated from
+		// previous runs' judge agreements thereafter.
+		if flagTrust > 0 {
+			query.TrustedClusters = service.TopTrustedClusters("p1", flagTrustThreshold, flagTrustLimit)
+		}
+		result := service.SelectArtifactsForInjection(context.Background(), query)
 
 		stats.TotalInjected += len(result)
 		stats.Rounds++
 
 		if len(result) == 0 {
 			continue
+		}
+
+		// Slide the cooldown window forward — top-1 cluster from this
+		// round becomes the next round's penalty target. Empty cluster
+		// keys (legacy artifacts without SourceEvents) are skipped so
+		// they don't poison the window with no-op entries.
+		if flagCooldown > 0 {
+			topCluster := clusterKey(result[0].Artifact)
+			if topCluster != "" {
+				recentClusters = append(recentClusters, topCluster)
+				if len(recentClusters) > flagCooldownWindow {
+					recentClusters = recentClusters[1:]
+				}
+			}
 		}
 
 		// Track dominant signal of top-1
@@ -650,6 +749,18 @@ func runSimulation(rng *rand.Rand, rounds int, judge JudgeConfig,
 			stats.JudgeCalls++
 			if tr.Result.BestID == tr.Task.Ranked[0].Artifact.ID {
 				stats.JudgeTop1Agree++
+				// Cumulative trust: the judge agreed with our
+				// top-1 pick for this cluster. Bump the trust
+				// counter so future runs can exempt it from
+				// cooldown via TrustedClusters. Skipped when
+				// trust is disabled to keep behaviour identical
+				// to the cooldown-only path.
+				if flagTrust > 0 {
+					cluster := clusterKey(tr.Task.Ranked[0].Artifact)
+					if cluster != "" {
+						service.RecordClusterAgreement("p1", cluster)
+					}
+				}
 			}
 			for i := 0; i < 3 && i < len(tr.Task.Ranked); i++ {
 				if tr.Result.BestID == tr.Task.Ranked[i].Artifact.ID {
@@ -720,6 +831,96 @@ func clusterKey(a model.KnowledgeArtifact) string {
 		return ""
 	}
 	return ids[0]
+}
+
+// trustFileEntry is the persisted shape of one (project, cluster)
+// agreement count. Versionless on purpose — when we need a schema
+// bump, add a wrapper object with a `version` field.
+type trustFileEntry struct {
+	ProjectID   string `json:"project_id"`
+	ClusterID   string `json:"cluster_id"`
+	AgreedCount int    `json:"agreed_count"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+}
+
+// loadTrustFile reads the trust file at path and replays its
+// counts into the in-memory tracker. Missing files are not an
+// error: a clean run is the legitimate first iteration of the
+// bootstrap loop. Malformed JSON aborts loading but doesn't
+// fatal — better to start clean than to crash the bench.
+func loadTrustFile(path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var entries []trustFileEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		fmt.Printf("trust file at %s is malformed (%v); starting clean\n", path, err)
+		return
+	}
+	for _, e := range entries {
+		// Replay each count individually so the tracker's internal
+		// timestamps and sort keys are populated naturally rather
+		// than imported wholesale (would require exposing internal
+		// map shape on the service package).
+		for i := 0; i < e.AgreedCount; i++ {
+			service.RecordClusterAgreement(e.ProjectID, e.ClusterID)
+		}
+	}
+	fmt.Printf("loaded trust from %s (%d entries)\n", path, len(entries))
+}
+
+// printTrustReport surfaces the accumulated trust state at the end
+// of a run so the operator can decide whether to bump the trust
+// threshold or clear the file. Quiet when no trust has been
+// recorded so the report doesn't grow noisy on first run.
+func printTrustReport() {
+	snap := service.ClusterTrustSnapshot()
+	if len(snap) == 0 {
+		fmt.Println()
+		fmt.Println("Cluster trust: no agreements recorded this run.")
+		return
+	}
+	fmt.Println()
+	fmt.Println("┌─────────────────────────────────────────────┐")
+	fmt.Println("│  CLUSTER TRUST (cumulative judge agree)     │")
+	fmt.Println("├─────────────────────────────────────────────┤")
+	for _, e := range snap {
+		fmt.Printf("│  %-12s %-10s  count=%-4d              │\n",
+			e.ProjectID, e.ClusterID, e.AgreedCount)
+	}
+	fmt.Println("└─────────────────────────────────────────────┘")
+	fmt.Printf("Threshold for cooldown exemption: count >= %d (top %d)\n",
+		flagTrustThreshold, flagTrustLimit)
+	fmt.Printf("Currently exempt: %v\n",
+		service.TopTrustedClusters("p1", flagTrustThreshold, flagTrustLimit))
+}
+
+// saveTrustFile dumps the current tracker state to path so that
+// the next invocation can pick up where this one left off. Errors
+// are reported but don't fatal — the simulation has already
+// completed and losing the persisted trust is a soft failure.
+func saveTrustFile(path string) {
+	snap := service.ClusterTrustSnapshot()
+	out := make([]trustFileEntry, len(snap))
+	for i, s := range snap {
+		out[i] = trustFileEntry{
+			ProjectID:   s.ProjectID,
+			ClusterID:   s.ClusterID,
+			AgreedCount: s.AgreedCount,
+			UpdatedAt:   s.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+	raw, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Printf("trust marshal error: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		fmt.Printf("trust write error to %s: %v\n", path, err)
+		return
+	}
+	fmt.Printf("saved trust to %s (%d entries)\n", path, len(out))
 }
 
 func dominantSignal(reason string) string {

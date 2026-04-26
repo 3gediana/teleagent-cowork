@@ -1,0 +1,34 @@
+﻿{
+    "done_agents":  3,
+    "elapsed_seconds":  1094.9,
+    "arm":  "team",
+    "instances":  [
+                      {
+                          "port":  5504,
+                          "instance_id":  "pool_44cd9882",
+                          "working_dir":  "D:\\claude-code\\coai2\\platform\\data\\pool\\pool_44cd9882",
+                          "session_id":  "ses_24333df5dffelyr0J1lpjdk0p2",
+                          "role":  "tasq-foundation",
+                          "agent_id":  "agent_77ab3dfe"
+                      },
+                      {
+                          "port":  5505,
+                          "instance_id":  "pool_5fc59cb8",
+                          "working_dir":  "D:\\claude-code\\coai2\\platform\\data\\pool\\pool_5fc59cb8",
+                          "session_id":  "ses_24333d60dffe8WdB14eWx40m7n",
+                          "role":  "tasq-cli-core",
+                          "agent_id":  "agent_166c3300"
+                      },
+                      {
+                          "port":  5506,
+                          "instance_id":  "pool_f5b2fd43",
+                          "working_dir":  "D:\\claude-code\\coai2\\platform\\data\\pool\\pool_f5b2fd43",
+                          "session_id":  "ses_24333cc6affevcasnUGst2L5Sc",
+                          "role":  "tasq-cli-advanced",
+                          "agent_id":  "agent_eae60376"
+                      }
+                  ],
+    "conflicts":  [
+
+                  ]
+}

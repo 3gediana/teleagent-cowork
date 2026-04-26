@@ -8,23 +8,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/a3c/platform/internal/agentpool"
+	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/model"
+	"github.com/gin-gonic/gin"
 )
 
 type SSEMessage struct {
 	Header  SSEHeader `json:"header"`
-	Payload gin.H      `json:"payload"`
-	Meta    gin.H      `json:"meta"`
+	Payload gin.H     `json:"payload"`
+	Meta    gin.H     `json:"meta"`
 }
 
 type SSEHeader struct {
-	MessageID       string `json:"messageId"`
-	Type            string `json:"type"`
-	Version         string `json:"version"`
-	Timestamp       string `json:"timestamp"`
-	TargetAgentID   string `json:"target_agent_id,omitempty"` // empty = all agents in project
+	MessageID     string `json:"messageId"`
+	Type          string `json:"type"`
+	Version       string `json:"version"`
+	Timestamp     string `json:"timestamp"`
+	TargetAgentID string `json:"target_agent_id,omitempty"` // empty = all agents in project
 }
 
 type SSEClient struct {
@@ -35,8 +36,8 @@ type SSEClient struct {
 }
 
 type SSEManagerStruct struct {
-	clients   map[string]*SSEClient // keyed by unique client ID, NOT by projectID
-	mu        sync.RWMutex
+	clients map[string]*SSEClient // keyed by unique client ID, NOT by projectID
+	mu      sync.RWMutex
 }
 
 var SSEManager = &SSEManagerStruct{
@@ -204,43 +205,42 @@ func (m *SSEManagerStruct) GetUnackedBroadcasts(projectID string, agentID string
 	// State events: only keep latest per type (e.g. MILESTONE_UPDATE)
 	// Incremental events: keep all (e.g. CHAT_UPDATE, TOOL_CALL)
 	stateEventTypes := map[string]bool{
-		"MILESTONE_UPDATE":  true,
-		"DIRECTION_CHANGE":  true,
-		"VERSION_UPDATE":    true,
-		"VERSION_ROLLBACK":  true,
-		"MILESTONE_SWITCH":  true,
+		"MILESTONE_UPDATE": true,
+		"DIRECTION_CHANGE": true,
+		"VERSION_UPDATE":   true,
+		"VERSION_ROLLBACK": true,
+		"MILESTONE_SWITCH": true,
 	}
 
 	seen := map[string]bool{}
 	var result []SSEMessage
 	for _, d := range data {
 		var msg SSEMessage
-		if json.Unmarshal([]byte(d), &msg) != nil {
-			continue
-		}
-		if stateEventTypes[msg.Header.Type] {
-			if seen[msg.Header.Type] {
+		if json.Unmarshal([]byte(d), &msg) == nil {
+			if stateEventTypes[msg.Header.Type] {
+				if seen[msg.Header.Type] {
+					continue
+				}
+				seen[msg.Header.Type] = true
+			}
+
+			ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
+			acked, _ := model.RDB.SIsMember(ctx, ackKey, agentID).Result()
+			if acked {
 				continue
 			}
-			seen[msg.Header.Type] = true
-		}
 
-		ackKey := fmt.Sprintf("a3c:broadcast:%s:%s:acked", projectID, msg.Header.MessageID)
-		acked, _ := model.RDB.SIsMember(ctx, ackKey, agentID).Result()
-		if acked {
-			continue
-		}
+			// Filter by target agent: if target_agent_id is set, only deliver to that agent
+			if msg.Header.TargetAgentID != "" && msg.Header.TargetAgentID != agentID {
+				continue
+			}
 
-		// Filter by target agent: if target_agent_id is set, only deliver to that agent
-		if msg.Header.TargetAgentID != "" && msg.Header.TargetAgentID != agentID {
-			continue
+			result = append(result, msg)
+			model.RDB.SAdd(ctx, ackKey, agentID)
+			// Set TTL on the set each time we add to it. Without this, the key
+			// created by SAdd has no expiry and leaks in Redis forever.
+			model.RDB.Expire(ctx, ackKey, 24*time.Hour)
 		}
-
-		result = append(result, msg)
-		model.RDB.SAdd(ctx, ackKey, agentID)
-		// Set TTL on the set each time we add to it. Without this, the key
-		// created by SAdd has no expiry and leaks in Redis forever.
-		model.RDB.Expire(ctx, ackKey, 24*time.Hour)
 	}
 	return result
 }
@@ -286,8 +286,10 @@ func BroadcastDirected(agentID string, eventType string, payload gin.H) {
 	// is back to ready; this call just shortens the stall window
 	// from "next manual wake" to "immediately". No-op for external
 	// agents (not in the pool) or agents already running.
-	if pm := agentpool.GetDefault(); pm != nil {
-		_ = pm.EnsureReadyByAgentID(agentID)
+	if config.IsAutopilotEnabled() {
+		if pm := agentpool.GetDefault(); pm != nil {
+			_ = pm.EnsureReadyByAgentID(agentID)
+		}
 	}
 }
 

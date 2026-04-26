@@ -83,3 +83,20 @@ bench/tasq-experiment/**/__pycache__
 .a3c/
 .a3c_staging/
 .a3c_version
+
+# evobench cluster-trust accumulator files (runtime artifact, regenerated
+# per run; see internal/service/cluster_trust.go header for format)
+platform/backend/evobench_trust*.json
+
+# server PID lockfile (runtime)
+platform/backend/.server.pid
+
+# pytest / coverage artefacts
+**/.coverage
+**/coverage.json
+**/__pycache__/
+
+# bench experiment runtime output
+misc/bench/tasq-experiment/obs/
+misc/bench/tasq-experiment/solo-output/scenario-home/
+misc/bench/tasq-experiment/solo-output/scenarios/

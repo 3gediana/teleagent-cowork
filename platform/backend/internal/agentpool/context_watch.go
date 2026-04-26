@@ -3,7 +3,7 @@ package agentpool
 // Context watcher — the goroutine that polls each pool agent's
 // current opencode session for its accumulated token footprint and
 // rotates to a fresh session before opencode's own 80% auto-compact
-// kicks in. See the user-facing rationale in docs/archive-design.md
+// kicks in. See the user-facing rationale in misc/docs/archive-design.md
 // (to be written) and the bug that made this necessary in
 // internal/agentpool/opencode_env.go (zod v4 incompatibility).
 //
@@ -208,6 +208,14 @@ func (m *Manager) rotateSession(ctx context.Context, sp *subprocess, tokens int,
 	if m.archiveNotifier != nil {
 		m.archiveNotifier.NotifyArchive(agentID, oldSessionID, newID, tokens, reason)
 	}
+
+	// If this agent had a task in status=claimed at rotation time,
+	// the fresh session has no transcript of it and the dispatcher
+	// won't re-broadcast (task is not "pending"). Without this
+	// nudge the agent goes dormant forever on the stuck claim.
+	// See session_resume.go for the full rationale.
+	m.maybeInjectResumePrompt(ctx, serveURL, newID, agentID,
+		sp.inst.OpencodeProviderID, sp.inst.OpencodeModelID, reason)
 
 	log.Printf("[Pool] archived session agent=%s %s -> %s (tokens=%d reason=%s rotation=%d)",
 		agentID, oldSessionID, newID, tokens, reason, nextRotation)

@@ -60,12 +60,12 @@ platform/backend/
     repo/             # ContentBlock + project metadata helpers
 client/mcp/           # external MCP server (TypeScript)
 client/skill/         # agent skill protocols (markdown contracts)
-frontend/src/
+platform/frontend/src/
   pages/              # one route = one page
   components/         # shared UI
   api/                # typed backend API wrappers
-docs/dev/             # internal architecture notes
-bench/                # benchmark scenarios + outputs
+misc/docs/dev/        # internal architecture notes
+misc/bench/           # benchmark scenarios + outputs
 ```
 
 ---

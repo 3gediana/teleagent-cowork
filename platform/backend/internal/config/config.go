@@ -4,9 +4,36 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// IsAutopilotEnabled reports whether the platform should run in
+// "autopilot" mode (server spawns its own LLM agent pool, runs
+// dispatcher, and auto-runs audit/fix workflows on every change
+// submission).
+//
+// The default is OFF. The platform's primary value proposition is
+// remote multi-developer + AI collaboration — a shared project /
+// task / change / review hub where each developer's local AI is
+// their own tool, not a server-spawned subprocess. Run B5
+// benchmarking confirmed that the auto-pool path adds protocol
+// overhead without beating the solo-agent baseline (Run A: 22 min
+// for 15 tasks; Run B5: stalled at 7/15 in 14 min). The autopilot
+// mode is preserved for legacy demos and for users who explicitly
+// want server-managed agents.
+//
+// Recognised truthy values: "1", "true", "yes", "on" (case-insensitive).
+// Anything else (including unset) is false.
+func IsAutopilotEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("A3C_AUTOPILOT")))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
@@ -85,6 +112,13 @@ type ProviderCreds struct {
 	Model    string `yaml:"model,omitempty"` // optional default model id
 }
 
+// loaded holds the most recently parsed config. Set by Load on success
+// and retrieved via Get() by packages that need a stable reference to
+// the active config without re-parsing the YAML (e.g. HTTP handlers
+// that can't accept a *Config in their constructor). Never mutate
+// through the returned pointer — treat it as read-only.
+var loaded *Config
+
 func Load(path string) *Config {
 	searchPaths := []string{
 		path,
@@ -107,9 +141,17 @@ func Load(path string) *Config {
 			if cfg.DataDir != "" && !filepath.IsAbs(cfg.DataDir) {
 				cfg.DataDir = filepath.Join(filepath.Dir(p), "..", cfg.DataDir)
 			}
-			return &cfg
+			loaded = &cfg
+			return loaded
 		}
 	}
 
 	panic("config file not found in search paths")
+}
+
+// Get returns the process-wide Config last loaded by Load. Returns nil
+// if Load has never been called successfully (e.g. in unit tests that
+// don't bootstrap through main.go). Callers must nil-check.
+func Get() *Config {
+	return loaded
 }

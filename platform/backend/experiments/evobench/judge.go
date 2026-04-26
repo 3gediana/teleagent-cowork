@@ -134,7 +134,16 @@ func JudgeRank(ctx context.Context, cfg JudgeConfig, queryDesc string, candidate
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	// Cap at 1 MB. The original 8 KB cap fired *constantly* on
+	// reasoning models — MiniMax-M2.7 emits reasoning_content (chain
+	// of thought) plus content (the JSON answer) in the same response,
+	// and the combined payload regularly hits 20-50 KB. The 8 KB
+	// LimitReader was clipping it mid-stream, leaving truncated JSON
+	// that produced the "decode: unexpected end of JSON input" skips
+	// we saw in evobench: ~5-15 % of judge calls were lost to body
+	// truncation alone. 1 MB is comfortably larger than any plausible
+	// reasoning response and small enough to bound runaway memory.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		return JudgeResult{Skipped: true, Err: err.Error(), LatencyMs: latencyMs}

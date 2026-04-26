@@ -120,6 +120,14 @@ func BuildTaskClaimHints(ctx context.Context, taskID string) (*TaskClaimHints, e
 		// proposed TaskTag rows and weights them in tagScore so the
 		// client gets hints that actually match the task's topic.
 		TaskID: task.ID,
+		// Cross-round cluster cooldown: pass whichever clusters
+		// dominated this project's last few claims. Empty when this
+		// is the first claim for the project (or the window has been
+		// reset by a server restart). The selector applies a
+		// multiplicative penalty per occurrence so a newly-emergent
+		// cluster doesn't have to outscore a self-reinforced legacy
+		// monopoly by orders of magnitude.
+		RecentTopClusters: recentClustersFor(task.ProjectID),
 	}
 	hadEmbedding := len(query.QueryEmbedding) > 0
 
@@ -129,6 +137,14 @@ func BuildTaskClaimHints(ctx context.Context, taskID string) (*TaskClaimHints, e
 	pool := countCandidates(task.ProjectID, AudienceCoder)
 
 	results := SelectArtifactsForInjection(ctx, query)
+
+	// Record the chosen top-1's cluster so the next claim on this
+	// project sees it in its cooldown window. Skipped for empty
+	// results (no top-1 to record) and for legacy artifacts whose
+	// clusterKey resolves to "" (recordTopCluster handles both).
+	if len(results) > 0 {
+		recordTopCluster(task.ProjectID, results[0].Artifact)
+	}
 
 	hints := &TaskClaimHints{
 		InjectedIDs:  make([]string, 0, len(results)),

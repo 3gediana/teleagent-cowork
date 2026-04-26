@@ -24,25 +24,18 @@ def tasks():
 @click.option("-t", "--tag", "tags", multiple=True, help="Tag(s)")
 def add(title: str, project_name: Optional[str], priority: str, due_date: Optional[str], tags: tuple):
     """Add a new task"""
-    import sys
-    print(f"DEBUG: add called with title={title}", file=sys.stderr)
     store = _resolve_store()
-    print(f"DEBUG: store={store}", file=sys.stderr)
 
     due: Optional[date] = None
     if due_date:
         due = datetime.strptime(due_date, "%Y-%m-%d").date()
-        print(f"DEBUG: due date parsed: {due}", file=sys.stderr)
 
     project_id = None
     if project_name:
-        print(f"DEBUG: looking up project {project_name}", file=sys.stderr)
         project = store.get_project_by_name(project_name)
         if project:
             project_id = project.id
-        print(f"DEBUG: project_id={project_id}", file=sys.stderr)
 
-    print(f"DEBUG: about to create Task with title={title}, priority={priority}", file=sys.stderr)
     task = Task(
         id=None,
         title=title,
@@ -56,10 +49,8 @@ def add(title: str, project_name: Optional[str], priority: str, due_date: Option
         completed_at=None,
         tags=list(tags),
     )
-    print(f"DEBUG: task created: {task}", file=sys.stderr)
 
     task_id = store.add_task(task)
-    print(f"DEBUG: task_id={task_id}", file=sys.stderr)
     click.echo(f"Created task {task_id}: {title}")
 
 

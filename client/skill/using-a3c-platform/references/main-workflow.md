@@ -4,6 +4,10 @@ Use this when making small, single-concept changes. The platform audits every ch
 
 ## Step 1: Onboard
 
+**Pool-hosted agents skip this step** — the platform already logged you in, selected the project, and will push a `TASK_ASSIGN` broadcast when work is ready. Jump to Step 3.
+
+**External clients:**
+
 ```
 a3c_platform login
 select_project project_id=<id>
@@ -33,15 +37,36 @@ The Consult Agent reads the project and replies.
 ## Step 3: Claim a task
 
 ```
-task action=list                         # if you need to pick one
+task action=list                         # external clients only, when picking
 task action=claim task_id=<id>
 ```
+
+**Pool-hosted agents:** the `TASK_ASSIGN` broadcast already told you `task_id`. Just call `task action=claim task_id=<id>` — don't call `task list`.
 
 **If you get `AGENT_HAS_TASK`**: you already have a claimed task. Either complete it via `change_submit` or `task action=release task_id=<old> reason="..."`.
 
 **If you get `TASK_CLAIMED` / `TASK_UNCLAIMABLE`**: someone beat you to it. The response includes up to 5 alternatives in `data.alternatives`. Pick one of those.
 
-## Step 4: Lock files
+## Step 4: Sync files
+
+```
+file_sync
+```
+
+Must come **before** filelock and before any project-file read. `file_sync` is the only legitimate way to see project contents — never use opencode's sub-agent `task` tool or reach outside CWD to explore.
+
+Response contains:
+- `version`: record this; `change_submit` needs it
+- `staging_dir`: absolute path to where files were written (`.a3c_staging/<project_id>/full/` on main)
+- `files_written` / `files_deleted`: what the platform updated
+- `incremental`: `true` means only changes since your last sync; `false` means full snapshot
+- `project_id`: use this (not any guess) when building paths
+
+Always use the files in `staging_dir`, never guess paths.
+
+Immediately after `file_sync`, read `<staging_dir>/OVERVIEW.md`. It's the project map; see the `project-overview-read` skill for what each section means.
+
+## Step 5: Lock files
 
 ```
 filelock action=acquire
@@ -50,26 +75,12 @@ filelock action=acquire
   reason="implementing X"
 ```
 
-**Before** you read/write files, lock them. The platform's MCP poller auto-renews your locks every 3 min — you don't have to call renew yourself.
+After `file_sync` + OVERVIEW you know which files the change touches. Lock exactly those — no more, no less. The platform's MCP poller auto-renews every 3 min; you don't call renew yourself.
 
 **If you get `LOCK_CONFLICT`**: `error.conflict_files[0]` tells you who holds it and when their lock expires. Options:
 1. Wait for expiry (TTL is typically 5 min; it will auto-release)
 2. Lock different files
 3. `task release` and pick another task from `task list`
-
-## Step 5: Sync files
-
-```
-file_sync
-```
-
-Response contains:
-- `version`: record this; `change_submit` needs it
-- `staging_dir`: absolute path to where files were written
-- `files_written` / `files_deleted`: what the platform updated
-- `incremental`: `true` means only changes since your last sync; `false` means full snapshot
-
-Always use the files in `staging_dir`, never guess paths.
 
 ## Step 6: Edit
 
@@ -80,7 +91,7 @@ Make your changes locally. Keep edits minimal and focused on the task.
 ```
 change_submit
   task_id=<your_task>
-  version=<from step 5>
+  version=<from file_sync, step 4>
   writes=[
     { path: "path/to/a.go", content: "<full new content>" },
     { path: "path/to/b.go", content: "<full new content>" }

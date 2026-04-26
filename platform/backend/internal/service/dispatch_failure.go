@@ -37,7 +37,7 @@ func HandleDispatchFailure(session *agent.Session, dispatchErr error) {
 	// AGENT_ERROR mirrors what the native runner emits when an
 	// LLM/tool call fails mid-session — the dashboard already
 	// renders it as a red system line in the chat pane (see
-	// frontend/src/hooks/useSSE.ts case 'AGENT_ERROR'). We piggy-
+	// platform/frontend/src/hooks/useSSE.ts case 'AGENT_ERROR'). We piggy-
 	// back on that plumbing so dispatch-time failures look the
 	// same as run-time failures.
 	BroadcastEvent(session.ProjectID, "AGENT_ERROR", gin.H{

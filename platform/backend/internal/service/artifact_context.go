@@ -44,6 +44,17 @@ import (
 	"github.com/a3c/platform/internal/model"
 )
 
+// ClusterCooldownDecay is the multiplicative penalty per recent
+// occurrence applied to RRF score when ArtifactQuery.RecentTopClusters
+// is set. 0.85 means: cluster appearing 1 time in window → score
+// × 0.85, 3 times → × 0.61, 5 times → × 0.44. Calibrated so a
+// genuinely-best artifact still wins after one repeat (sem-rank-1
+// vs sem-rank-2 RRF margin is wide enough to absorb a single 0.85
+// hit) but loses to a closely-ranked competitor after the same
+// cluster monopolises three or more rounds. Var (not const) so the
+// L1 weight tuner can override at runtime.
+var ClusterCooldownDecay = 0.85
+
 // rrfK is the RRF smoothing constant. k=60 is the literature default
 // (Cormack, Clarke & Büttcher 2009); it balances "rank-1 gets a big
 // bump" against "rank-50 still contributes something". Phase 2.5's L1
@@ -161,6 +172,37 @@ type ArtifactQuery struct {
 	// hijack the ranking.
 	WeightedTags   []WeightedTag
 	FileCategories []string
+
+	// RecentTopClusters: cluster IDs (matching clusterKey output) that
+	// recently held top-1 in this project, in any order. Each occurrence
+	// multiplies that cluster's RRF score by ClusterCooldownDecay before
+	// sorting, so two consecutive top-1s in the same cluster get
+	// progressively penalised. Empty (the default) disables the
+	// cross-round diversity mechanism entirely.
+	//
+	// Why this is opt-in instead of automatic: dispatchers that do
+	// rapid-fire claims for the same project genuinely benefit, but a
+	// one-shot probe (Chief context build, Analyze pass) doesn't have
+	// any "recent" history and a stateless selector keeps unit tests
+	// trivial. The caller — typically the task dispatcher — owns the
+	// rolling window.
+	RecentTopClusters []string
+
+	// TrustedClusters: cluster IDs flagged as legitimately
+	// high-quality by an independent grader (LLM judge cumulative
+	// agreement, ops review, hand-curated allowlist). Artifacts in
+	// these clusters are EXEMPT from RecentTopClusters cooldown
+	// even if they appear in the recent window — the exemption is
+	// the whole point of having this field. Empty (the default)
+	// means "no trust signal available, apply cooldown uniformly".
+	//
+	// Why this is opt-in: cluster trust requires an external signal
+	// source. evobench wires it from cumulative judge agreement
+	// (see cluster_trust.go); production paths leave it empty
+	// until an offline judging job exists to populate the trust
+	// counter persistently. See cluster_trust.go header for the
+	// full design rationale.
+	TrustedClusters []string
 
 	Budget Budget // zero value → defaults for the audience
 }
@@ -305,9 +347,132 @@ func SelectArtifactsForInjection(ctx context.Context, q ArtifactQuery) []Injecte
 		})
 	}
 
-	// 6. Sort by RRF score. Stable sort so equally-scored artifacts
-	//    preserve DB order, which keeps the output deterministic.
-	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+	// 5b. Apply optional cross-round cluster cooldown. evobench
+	//     measurements showed a single "gold" cluster (the one
+	//     happening to hold high-success artifacts at simulation
+	//     start) monopolises top-3 across the entire run because
+	//     every successful inject reinforces its importance score,
+	//     which feeds back into RRF, which keeps it at top-1, etc.
+	//     The fix is to let dispatchers (the only callers with a
+	//     natural notion of "recent rounds") pass in a sliding
+	//     window of recent top-1 cluster IDs; we multiply the
+	//     offending cluster's RRF score down before sort. Caller
+	//     opts in by populating q.RecentTopClusters; empty = no-op.
+	//
+	//     Magnitude-aware: a flat decay punishes legitimate dominance.
+	//     evobench seed=42 showed ep_H sitting on 96/100 top-1 because
+	//     its RRF score *legitimately* dwarfed everyone else's (gold
+	//     cluster), and a flat 0.85 cooldown was forcing the wrong
+	//     answer to surface. We scale the decay by how much the
+	//     recent cluster dominates non-recent alternatives — strong
+	//     dominance = soft penalty (gold), tied scores = full penalty
+	//     (self-reinforcement). See cooldownDecayFactor.
+	//
+	//     Practical limit (evobench 2026-04): RRF dense-rank fusion
+	//     compresses cluster-level score gaps to ~1-2% even when the
+	//     gold cluster wins rank 1 on every signal. Any decay strong
+	//     enough to break a self-reinforced monopoly (≥ 5%) also
+	//     flips a gold cluster of typical margin. Magnitude-aware
+	//     therefore behaves like flat decay in the common case and
+	//     only abstains when RRF gaps are unusually wide (e.g. the
+	//     runner-up is many ranks behind on multiple signals at
+	//     once). To genuinely preserve gold clusters we need a
+	//     non-RRF trust signal — e.g. cumulative judge-agreement
+	//     per cluster, hand-curated allowlist, or smoothed
+	//     success-count weighting fed in via ArtifactQuery. Tracked
+	//     in backlog as "Cluster trust signal for cooldown gating".
+	if len(q.RecentTopClusters) > 0 {
+		counts := map[string]int{}
+		for _, c := range q.RecentTopClusters {
+			if c != "" {
+				counts[c]++
+			}
+		}
+		// Trust set: clusters that have been independently
+		// corroborated by a grader and therefore should NOT be
+		// penalised even if they appear in the recent window.
+		// Empty by default (production path); evobench fills this
+		// from cumulative judge agreement.
+		trusted := map[string]bool{}
+		for _, c := range q.TrustedClusters {
+			if c != "" {
+				trusted[c] = true
+			}
+		}
+		if len(counts) > 0 {
+			// First pass: gather max RRF score per cluster across all
+			// scored candidates. Used to gauge how decisively each
+			// recent cluster outranks the non-recent alternatives.
+			clusterMax := map[string]float64{}
+			for i := range scored {
+				c := clusterKey(scored[i].Artifact)
+				if c == "" {
+					continue
+				}
+				if scored[i].Score > clusterMax[c] {
+					clusterMax[c] = scored[i].Score
+				}
+			}
+			// Runner-up: the highest RRF score among clusters NOT in
+			// the recent window. If no such cluster exists (every
+			// cluster in the candidate pool is recent), runnerUp
+			// stays 0, which makes cooldownDecayFactor abstain — we
+			// can't tell gold from self-reinforcement without a
+			// reference point.
+			var runnerUp float64
+			for c, score := range clusterMax {
+				if _, recent := counts[c]; recent {
+					continue
+				}
+				if score > runnerUp {
+					runnerUp = score
+				}
+			}
+			// Second pass: apply magnitude-aware decay per artifact,
+			// skipping artifacts whose cluster is in the trust set.
+			// The skip is the entire point of TrustedClusters —
+			// see cluster_trust.go for the design rationale and
+			// the path by which this field gets populated.
+			for i := range scored {
+				c := clusterKey(scored[i].Artifact)
+				n := counts[c]
+				if n == 0 {
+					continue
+				}
+				if trusted[c] {
+					continue
+				}
+				scored[i].Score *= cooldownDecayFactor(clusterMax[c], runnerUp, n, ClusterCooldownDecay)
+			}
+		}
+	}
+
+	// 6. Sort by RRF score. When scores tie (which is common when every
+	//    component rank ties — e.g. no query embedding + no tags + no
+	//    importance variance), break the tie by artifact ID so two calls
+	//    with the same input always produce the same output. Stable sort
+	//    alone wasn't enough: it preserves the candidate-pool order, but
+	//    that order itself was non-deterministic before we added id ASC
+	//    to fetchInjectionCandidates above. Belt-and-braces: keep both.
+	//
+	// Recency note (evobench finding, 2026-04): across 4 random seeds the
+	// recency signal won 0% of top-1 selections in normal mode and 0%
+	// in degraded mode. Mathematics: with rrfK=60 and dense ranks 1…R,
+	// the marginal RRF contribution from rank-1 vs rank-2 is identical
+	// for every signal (≈1/3782). Once the candidate pool has any
+	// semantic spread, sem rank-1 vs rank-3 swamps any single rec
+	// rank-1 vs rank-2 differential. Don't trust this means recency
+	// is useless in production — the synthetic fixture deliberately
+	// gives every topic a clean unit-vector basis, which separates
+	// sem ranks much more cleanly than real artifact summaries do.
+	// L1 weight tuning (TODO) on real Change feedback should answer
+	// whether to keep recency, drop it, or boost it.
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].Score != scored[j].Score {
+			return scored[i].Score > scored[j].Score
+		}
+		return scored[i].Artifact.ID < scored[j].Artifact.ID
+	})
 
 	// 7. Apply session-diversity cap BEFORE the per-kind budget.
 	//    Rationale: if we let budgeting run first, a kind might be
@@ -393,6 +558,50 @@ func applySessionDiversity(scored []InjectedArtifact, maxPerCluster int) []Injec
 	return filtered
 }
 
+// cooldownDecayFactor returns the multiplicative penalty to apply
+// to an artifact whose cluster appeared `n` times in the recent
+// window. The decay scales with how decisively the cluster
+// dominates non-recent alternatives:
+//
+//	dominance := clamp((myMax - runnerUpScore) / myMax, 0, 1)
+//	effective := baseDecay + (1 - baseDecay) * dominance
+//	factor    := effective ^ n
+//
+// At dominance=0 (recent cluster's score ties or barely beats the
+// runner-up): full baseDecay applies — we read this as
+// self-reinforcement and want to break the monopoly.
+//
+// At dominance=1 (recent cluster utterly dwarfs everyone else):
+// effective collapses to 1.0, no penalty — we read this as a
+// "gold cluster" that legitimately deserves to keep winning.
+//
+// Edge cases:
+//   - n <= 0 or myMax <= 0: identity (1.0). The caller has no
+//     reason to penalise this cluster.
+//   - runnerUpScore == 0 with myMax > 0: every cluster in the
+//     candidate pool is in the recent window. We have no reference
+//     point to gauge dominance, so we abstain (return 1.0). Better
+//     to leave ranking untouched than to make a uniformly wrong
+//     decision; the caller's window will eventually slide and
+//     restore comparability.
+func cooldownDecayFactor(myMax, runnerUpScore float64, n int, baseDecay float64) float64 {
+	if n <= 0 || myMax <= 0 {
+		return 1.0
+	}
+	dominance := 1.0
+	if runnerUpScore > 0 {
+		dominance = (myMax - runnerUpScore) / myMax
+		if dominance < 0 {
+			dominance = 0
+		}
+		if dominance > 1 {
+			dominance = 1
+		}
+	}
+	effective := baseDecay + (1.0-baseDecay)*dominance
+	return math.Pow(effective, float64(n))
+}
+
 // clusterKey extracts the first source-event ID from an artifact's
 // SourceEvents JSON array. This is conventionally the root episode /
 // session ID the artifact was derived from, so artifacts sharing a
@@ -418,10 +627,17 @@ func fetchInjectionCandidates(projectID string, audience Audience, limit int) []
 	// Ordering by confidence here is just to bias the 200-row cut in
 	// our favour if the project has a huge backlog; the real ordering
 	// happens in scoring below.
+	//
+	// id ASC is the final tie-breaker — without it, two artifacts with
+	// identical (confidence, updated_at) come back in driver-dependent
+	// order (SQLite rowid vs. MySQL row layout), and that propagates all
+	// the way through to the caller because the RRF score can also tie
+	// when every component rank ties. Sorting by a unique key at the
+	// bottom guarantees the candidate pool itself is deterministic.
 	model.DB.
 		Where("(project_id = ? OR project_id = '') AND status IN ? AND kind IN ?",
 			projectID, []string{"active", "candidate"}, kinds).
-		Order("confidence DESC, updated_at DESC").
+		Order("confidence DESC, updated_at DESC, id ASC").
 		Limit(limit).
 		Find(&arts)
 	return arts

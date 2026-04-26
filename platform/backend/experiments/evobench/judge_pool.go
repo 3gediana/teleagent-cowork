@@ -7,19 +7,92 @@ package main
 // 25 rounds sequentially is ~12 minutes of walltime even though each
 // call is independent. A bounded worker pool cuts that to ~30-60 s.
 //
-// The pool is deliberately simple — no retry, no cancellation. Errors
-// flow back as Skipped results, same semantics as synchronous
+// The pool wraps each call in a single retry on transient errors
+// (truncated body, timeout, 5xx, rate-limit). Permanent errors
+// (auth, malformed prompt) skip without burning the second attempt.
+// Errors flow back as Skipped results, same semantics as synchronous
 // JudgeRank. Callers own the aggregation.
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/a3c/platform/internal/service"
 )
+
+// judgeRetryAttempts caps total tries per task (1 retry on top of the
+// initial call). Higher values inflate API cost; on a 60-task pool a
+// 2× retry budget already doubles the worst-case spend.
+const judgeRetryAttempts = 2
+
+// judgeRetryBackoff is the wall-clock pause before the second
+// attempt. Short on purpose: most transient errors recover within
+// seconds (rate-limit windows, momentary 5xx) and the pool is
+// already running with 16-way concurrency so workers can absorb a
+// brief stall without serialising the whole run.
+var judgeRetryBackoff = 2 * time.Second
+
+// runJudgeWithRetry calls JudgeRank, and if the result is a
+// retryable skip, calls it once more after judgeRetryBackoff. Returns
+// the *last* result so the caller's stats reflect the eventual
+// outcome (success after retry, or final skip).
+func runJudgeWithRetry(ctx context.Context, cfg JudgeConfig, queryDesc string, candidates []JudgeCandidate) JudgeResult {
+	var last JudgeResult
+	for attempt := 1; attempt <= judgeRetryAttempts; attempt++ {
+		last = JudgeRank(ctx, cfg, queryDesc, candidates)
+		if !last.Skipped {
+			return last
+		}
+		// Don't burn budget on permanent errors. "judge disabled"
+		// will never recover; "no candidates" reflects an empty
+		// retrieval result, not a network blip.
+		if !isTransientJudgeErr(last.Err) {
+			return last
+		}
+		if attempt < judgeRetryAttempts {
+			select {
+			case <-ctx.Done():
+				return last
+			case <-time.After(judgeRetryBackoff):
+			}
+		}
+	}
+	return last
+}
+
+// isTransientJudgeErr classifies a JudgeResult.Err string as
+// retryable. The strings come from JudgeRank's own error wrapping;
+// matching them here keeps the decision in one place rather than
+// scattering retry logic into the call site.
+//
+// Retryable: anything that suggests transport, rate-limit, or
+// upstream-flake. Non-retryable: configuration errors and 4xx (auth,
+// bad model name, oversized payload). When in doubt we err toward
+// retrying — a wasted call is cheap, a lost agreement signal isn't.
+func isTransientJudgeErr(s string) bool {
+	if s == "" {
+		return false
+	}
+	transient := []string{
+		// Body / parsing failures (mostly truncated reasoning replies)
+		"decode:", "bad json:", "no json object", "empty choices",
+		// Network / TLS / context-deadline
+		"timeout", "EOF", "context deadline", "connection reset",
+		"connection refused", "i/o timeout",
+		// Server-side hiccups + rate limits
+		"http 429", "http 500", "http 502", "http 503", "http 504",
+	}
+	for _, h := range transient {
+		if strings.Contains(s, h) {
+			return true
+		}
+	}
+	return false
+}
 
 // JudgeTask is one queued judge request captured during the
 // simulation phase. We stash the full top-K slice so later
@@ -75,7 +148,7 @@ func RunJudgePool(ctx context.Context, cfg JudgeConfig, tasks []JudgeTask, worke
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			jr := JudgeRank(ctx, cfg, tasks[idx].QueryDesc, tasks[idx].Candidates)
+			jr := runJudgeWithRetry(ctx, cfg, tasks[idx].QueryDesc, tasks[idx].Candidates)
 			results[idx] = JudgeTaskResult{Task: tasks[idx], Result: jr}
 			n := atomic.AddInt64(&done, 1)
 			if n%2 == 0 || n == total {

@@ -85,7 +85,7 @@ cd platform/backend
 go run ./cmd/server
 
 # frontend (new terminal)
-cd frontend
+cd platform/frontend
 npm install
 npm run dev
 ```
@@ -249,13 +249,6 @@ A3C's wedge: the **skills library lifecycle + low-intervention Chief pattern**. 
 │       ├── handler/            HTTP routes
 │       ├── repo/               GORM queries
 │       └── model/              Schema
-├── frontend/                 React dashboard
-│   └── src/{api,components,pages,hooks,stores}
-├── client/
-│   ├── skill/                  Auto-loadable skills (copied into pool agents)
-│   └── mcp/                    TypeScript MCP bridge for external clients
-├── configs/                  config.yaml.example
-├── docs/                     Architecture, phase plans, design specs
 └── docker-compose.yml        MySQL + Redis
 ```
 
@@ -270,17 +263,17 @@ Open:
 - Agent topology graph
 - Proactive suggestions ported from Claude Code
 - Backend-truth policy match endpoint (v1 is client-side only)
-- Data-driven role→model router (see `docs/dev/14_router.md` sketch)
+- Data-driven role→model router (see `misc/docs/dev/14_router.md` sketch)
 
 ## Contributing
 
-PRs welcome. Read `docs/dev/02_architecture.md` first. Keep the **Chief-can't-mutate-queue** invariant sacred — if you think you need to add a task-mutation tool to Chief, the answer is almost certainly `delegate_to_maintain`.
+PRs welcome. Read `misc/docs/dev/02_architecture.md` first. Keep the **Chief-can't-mutate-queue** invariant sacred — if you think you need to add a task-mutation tool to Chief, the answer is almost certainly `delegate_to_maintain`.
 
 Run tests before pushing:
 
 ```bash
 cd platform/backend && go test ./...
-cd frontend && npm run build
+cd platform/frontend && npm run build
 ```
 
 ## License

@@ -131,19 +131,20 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 	var req FileSyncRequest
 	_ = c.ShouldBindJSON(&req) // body optional
 
-	repoPath := filepath.Join("data", "projects", projectID, "repo")
+	repoPath := service.GetProjectRepoPath(projectID)
 	ignorePatterns := loadGitignore(repoPath)
 
 	// Incremental path: if client sent their last-synced version and it maps to
 	// a git tag, return only the delta via `git diff --name-status`.
 	if req.Version != "" && req.Version != currentVersion {
 		if changed, deleted, ok := diffFilesSinceVersion(repoPath, req.Version); ok {
-			var files []FileInfo
+			files := make([]FileInfo, 0, len(changed))
 			for _, ch := range changed {
 				if shouldIgnore(ch.path, ignorePatterns) {
 					continue
 				}
 				data, _ := os.ReadFile(filepath.Join(repoPath, ch.path))
+
 				files = append(files, FileInfo{
 					Path:    ch.path,
 					Content: string(data),
@@ -178,7 +179,7 @@ func (h *FileSyncHandler) Sync(c *gin.Context) {
 	}
 
 	// Full sync (fallback / first sync)
-	var allFiles []FileInfo
+	allFiles := make([]FileInfo, 0)
 	if _, err := os.Stat(repoPath); err == nil {
 		filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {

@@ -94,6 +94,28 @@ async function main() {
   const startupTime = Date.now()
   const oc = new OpenCodeClient(OPENCODE_SERVE_URL, startupTime)
 
+  // Start the persistent SSE tracker right away so we lock onto the
+  // attach client's session as soon as it makes any noise (input,
+  // submit, switch). Idempotent.
+  oc.startSessionTracker()
+
+  // Sidecar self-suicide: if the attach client has produced no
+  // sessionID-bearing event for 30 min, the TUI is almost certainly
+  // closed. Exit so:
+  //   - poller.heartbeat() stops, letting the platform's 7-min sweep
+  //     mark this agent offline and release its tasks/locks/branch
+  //   - the OpenCode server stops piping broadcasts at an absent UI
+  //     (the headless-LLM-burn bug we verified empirically)
+  // Override with A3C_IDLE_SUICIDE_MS=<ms> if a workflow legitimately
+  // needs longer silent periods. 0 disables.
+  const idleSuicideMs = parseInt(process.env.A3C_IDLE_SUICIDE_MS || '', 10)
+  const effectiveIdleMs = Number.isFinite(idleSuicideMs)
+    ? idleSuicideMs
+    : 30 * 60 * 1000
+  if (effectiveIdleMs > 0) {
+    oc.startIdleSuicide(effectiveIdleMs)
+  }
+
   const server = new McpServer({
     name: 'a3c',
     version: '0.2.0',

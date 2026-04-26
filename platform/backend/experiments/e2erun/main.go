@@ -63,7 +63,9 @@ func main() {
 	model.DB = db
 	service.InstallEmbedderIntoRefinery(nil)
 
-	h, err := service.DefaultEmbeddingClient().Health(ctxT(5 * time.Second))
+	ctx, cancel := ctxT(5 * time.Second)
+	defer cancel()
+	h, err := service.DefaultEmbeddingClient().Health(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nembedder unreachable: %v\n"+
 			"  start it first: cd platform/embedder && python app.py\n", err)
@@ -302,8 +304,10 @@ func createAndEmbedTask(db *gorm.DB, projectID, humanID, name, desc string) stri
 	}
 	// Synchronous embed so the following stages see the result immediately
 	// (in production, EmbedTaskAsync fires in a goroutine).
+	ctx, cancel := ctxT(15 * time.Second)
+	defer cancel()
 	vecs, err := service.DefaultEmbeddingClient().EmbedDocuments(
-		ctxT(15*time.Second), []string{"[task] " + name + "\n" + desc})
+		ctx, []string{"[task] " + name + "\n" + desc})
 	if err != nil {
 		log.Fatalf("embed task: %v", err)
 	}
@@ -537,7 +541,9 @@ func demonstrateClientFeedbackLoop(db *gorm.DB, projectID, clientAgent string) {
 		"再次修复登录 401 回归", "前一次修复后又冒出来了,定位根因")
 	fmt.Printf("  1. %s claims task %q\n", clientAgent, taskID)
 
-	hints, err := service.BuildTaskClaimHints(ctxT(5*time.Second), taskID)
+	hintCtx, hintCancel := ctxT(5 * time.Second)
+	hints, err := service.BuildTaskClaimHints(hintCtx, taskID)
+	hintCancel()
 	if err != nil || hints == nil || len(hints.InjectedIDs) == 0 {
 		fmt.Println("     (no hints produced — client receives task only)")
 		return
@@ -646,7 +652,9 @@ func demonstrateTagLifecycle(db *gorm.DB, projectID, humanID string) {
 	}
 
 	// Capture the hint scores BEFORE any human review.
-	beforeHints, err := service.BuildTaskClaimHints(ctxT(5*time.Second), taskID)
+	beforeCtx, beforeCancel := ctxT(5 * time.Second)
+	beforeHints, err := service.BuildTaskClaimHints(beforeCtx, taskID)
+	beforeCancel()
 	if err != nil || beforeHints == nil {
 		fmt.Printf("  (could not build before-hints: %v)\n", err)
 		return
@@ -690,7 +698,9 @@ func demonstrateTagLifecycle(db *gorm.DB, projectID, humanID string) {
 	}
 
 	// After the review, re-score.
-	afterHints, err := service.BuildTaskClaimHints(ctxT(5*time.Second), taskID)
+	afterCtx, afterCancel := ctxT(5 * time.Second)
+	afterHints, err := service.BuildTaskClaimHints(afterCtx, taskID)
+	afterCancel()
 	if err != nil || afterHints == nil {
 		fmt.Printf("  (could not build after-hints: %v)\n", err)
 		return
@@ -749,9 +759,8 @@ func banner(n int, title string) {
 	fmt.Printf("\n%s\n  Stage %d · %s\n%s\n", line, n, title, line)
 }
 
-func ctxT(d time.Duration) context.Context {
-	ctx, _ := context.WithTimeout(context.Background(), d)
-	return ctx
+func ctxT(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
 }
 
 func ptrStr(s string) *string { return &s }

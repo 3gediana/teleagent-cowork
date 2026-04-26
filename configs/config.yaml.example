@@ -2,7 +2,9 @@ server:
   port: 3003
   mode: debug
 
-data_dir: "D:/claude-code/coai/platform/data"
+# Resolved relative to this file's directory (configs/) when not absolute.
+# Default points the platform at platform/data/ inside the repo.
+data_dir: "platform/data"
 
 database:
   host: localhost
@@ -23,7 +25,10 @@ git:
 
 opencode:
   serve_url: "http://127.0.0.1:4096"
-  project_path: "D:\\claude-code\\coai"
+  # Absolute path to the repo opencode subprocesses should treat as their
+  # working tree. Set this to the project you want platform-hosted agents
+  # to operate on; leave empty to disable platform-hosted spawning.
+  project_path: ""
   default_model_provider: "minimax-coding-plan"
   default_model_id: "MiniMax-M2.7"
 

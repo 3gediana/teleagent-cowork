@@ -170,3 +170,414 @@ Not in this sprint but queued in the todo:
   - Pool agent tied into change/review workflow — right now they
     deliver code but don't automatically land a Change row + kick
     StartAuditWorkflow. Next step to close the loop.
+
+================================================================
+2026-04-24 evening — tasq benchmark (solo vs platform pool)
+================================================================
+
+Goal: run 15 tasq CLI tasks two ways with the same MiniMax-M2.7
+model — (A) one solo agent, no platform; (B) 3 pool agents on
+the platform — and compare wall-clock, code quality, platform
+overhead. Full write-up of the first two runs is above in the
+earlier progress notes; the fixes + third/fourth runs are below.
+
+--------------- Run results snapshot -----------------------------
+
+Run A (solo, no platform)
+  - 21.9 min wall-clock for all 15 tasks
+  - 35 code files, 88 KB, full click+SQLite+pydantic stack
+  - pytest tests/ → 75 passed, ci.yml + pre-commit shipped
+  - Reference "good" baseline.
+
+Run B  (3 pool agents, pre-fix, ~13:40 → stalled ~19:00)
+  - 10/15 approved in DB but only 7 commits on master (5 distinct)
+  - Uses tasks.json file-based storage (violates SQLite spec)
+  - No tests, no pydantic models, 5/12 CLI subcommands
+  - Stalled 6+ hours after 3 tasks stuck in "claimed"; shut down.
+
+Run B2 (3 pool agents, after session-resume + audit-15s fixes)
+  - 4 tasks completed in 14min (20:35-20:44), then idle on next 3
+  - Didn't deadlock (fixes held); user cut it at T+20min for depth
+    optimization since throughput was still ~7× worse than solo.
+
+Run B3 (3 pool agents, after status_sync trim)
+  - Spawn 21:00:05, watched until 21:03 (user shut down for the
+    night). At T+3min: completed=1 claimed=3 pending=11. Too
+    early to judge the trim's impact; worth resuming next time
+    with a fresh 15-20 min window.
+
+--------------- Code changes this session -----------------------
+
+Fix 1: change_submit 404 → 200 on already-completed retry
+  @/D:/claude-code/coai2/platform/backend/internal/handler/change.go:76-132
+  Idempotent short-circuit when the same agent resubmits a task
+  that already flipped to completed (usually a client-side
+  timeout retry). Returns success-shaped data + next_action=done
+  so the agent stops re-executing the write leg.
+
+Fix 2: Shutdown sets agent.status=offline BEFORE subprocess terminate
+  @/D:/claude-code/coai2/platform/backend/internal/agentpool/pool.go:722-763
+  Prevents the dispatcher's 10s-grace window from handing work to
+  an agent that's already shutting down.
+
+Fix 3: Spawn falls back to cfg defaults when provider/model empty
+  @/D:/claude-code/coai2/platform/backend/internal/handler/agentpool.go:10-20,66-93
+  @/D:/claude-code/coai2/platform/backend/internal/config/config.go:88-130
+  Broadcast injector rejects empty provider/model (would produce
+  parts=0). Fallback from cfg.OpenCode.DefaultModelProvider +
+  DefaultModelID avoids that failure on bare spawn requests.
+
+Fix 4: Audit wait timeout 120s → 15s fast-path, async continuation
+  @/D:/claude-code/coai2/platform/backend/internal/handler/change.go:306-337
+  Biggest single contributor to per-task overhead. Agent now
+  returns from change_submit in ≤15s (or ~1s fast path) with
+  next_action=claim_next; audit finishes in background and
+  lands as an AUDIT_RESULT broadcast. Agent overlaps claim-
+  next-task with audit runtime.
+
+Fix 5: Resume-prompt injection on session rotate + dormancy wake
+  @/D:/claude-code/coai2/platform/backend/internal/agentpool/session_resume.go  (new)
+  @/D:/claude-code/coai2/platform/backend/internal/agentpool/context_watch.go:212-218
+  @/D:/claude-code/coai2/platform/backend/internal/agentpool/dormancy.go:377-385
+  THIS was the Run B stall root cause. When opencode's context
+  watcher or the dormancy detector rotated an agent's session,
+  the new one was empty and the agent forgot it had a task in
+  status=claimed. Dispatcher saw the claim and refused to
+  re-broadcast. Infinite stall. Now on every new session we
+  query for a claimed task on that agent and push a short
+  "[SESSION RESUMED — reason=…] your claimed task is X, resume
+  the core loop" message into the transcript. No-op when the
+  agent has nothing claimed.
+
+Fix 6: a3c_status_sync response trim
+  @/D:/claude-code/coai2/platform/backend/internal/handler/sync.go:18-216
+  - Drop `description` from every task in the list (kept only
+    for `my_task` which the agent actually needs).
+  - Filter out completed/deleted tasks (noise for coordination).
+  - Locks: drop reason + ISO timestamps; keep task_id / agent_name
+    / files only.
+  - Cap `direction` at 800 runes to match TASK_ASSIGN policy.
+  Response size expected to drop ~5×. Not validated in a cold
+  benchmark yet — Run B3 was too short.
+
+--------------- Lessons worth keeping ---------------------------
+
+1. Session rotation + claimed-task = permanent stall. The
+   dispatcher's invariant ("agent with a claimed task is busy,
+   don't send more") is fine for healthy agents but broken when
+   the agent's transcript gets rotated out from under them. Any
+   time you mutate an agent's opencode session ID, you must
+   also make sure the agent still knows what it's supposed to
+   be doing. Our fix does this via a resume prompt; a more
+   defensive design would also auto-release tasks whose agent
+   has gone silent > N min without any change_submit.
+
+2. Synchronous audit block is a throughput killer. When the
+   audit is a whole LLM session (30-90s) and you block the
+   submitting agent on it, you've doubled the effective time
+   per task even before you account for anything else. Making
+   it async with a tiny "fast path" (≤15s) for cheap audits
+   recovers most of that. The broadcast channel already exists
+   for async result delivery; we just weren't using it.
+
+3. Protocol tax accumulates in context. Every status_sync adds
+   the full task list including descriptions; every file_sync
+   adds every file's content. In the pre-Fix-6 traces, one
+   pool agent hit 92k tokens after 4 tasks. Solo baseline for
+   the same work was ~10k. The platform has to ruthlessly
+   minimize what it echoes back on each read because it gets
+   echoed back N times per task × M tasks.
+
+4. Claims of "10 completed" in the dashboard ≠ 10 commits in
+   git. Several of Run B's "completed" tasks had their change
+   approved but the underlying code either didn't satisfy the
+   spec (JSON vs required SQLite) or just didn't produce the
+   files it promised. The L1 audit apparently doesn't read the
+   task's verbatim acceptance criteria. If we care about
+   correctness vs just "audit didn't hate it", the audit prompt
+   needs the task description's verification clauses
+   surfaced more explicitly.
+
+--------------- Still-open / next session ------------------------
+
+  - Re-run a fresh platform benchmark (Run B3 redux) for the
+    full 30-40 min window so we have real numbers on Fix 6's
+    impact. Both /status/sync trim and the session-resume fix
+    need "does the wall-clock actually catch up to solo?"
+    validation.
+
+  - Consider auto-release of claimed tasks after N minutes of
+    no change_submit + no heartbeat. Complements the resume-
+    prompt fix: if the prompt doesn't land (injector down,
+    dormant re-spawn flaky) the dispatcher should eventually
+    unblock itself.
+
+  - Investigate a3c_file_sync overhead next. The incremental
+    path exists (git-diff between versions) but agents aren't
+    supplying `version`. Either make the client cache the last
+    version per agent session, or teach the backend to
+    remember. Full-dump every call is expensive.
+
+  - L1 audit needs the task's acceptance criteria threaded
+    through its prompt. Right now it approves code that
+    violates explicit spec (tasks.json vs required SQLite).
+    Without this, platform "quality gate" isn't meaningfully
+    quality.
+
+  - Skipped tests: no unit coverage for session_resume.go.
+    The fix shipped with DB-nil defensive guard tested by the
+    existing pool tests running to completion, but a
+    dedicated fake + assertion would be nicer.
+
+--------------- Operational state at shutdown --------------------
+
+Backend was running on :3003 at time of shutdown.
+3 plat-D pool workers (proj_474db7bf / bench-platform-v3) are
+all status=stopped after clean shutdown POSTs.
+
+Bench projects in DB (can be deleted next session if you want):
+  proj_1ed1254a  (Run A; solo workspace, not platform)
+  proj_0ff32593  (Run B; original stalled platform run)
+  proj_b10fe7d7  (Run B2; mid-flight, cut at T+20min)
+  proj_474db7bf  (Run B3; 1/15 done, cut at T+3min)
+
+Bench copy of Run B solo + platform results lives at:
+  D:\_bench_solo      (Run A repo copy, 75 tests pass)
+  D:\_bench_B         (Run B repo copy, tasks.json-backed, no tests)
+
+Access key used throughout: 87823b3e4f7635c9f024dd90255dc2f3
+Tasks JSON: D:\claude-code\coai2\_bench_tasks.json
+
+================================================================
+2026-04-24 late-night / 2026-04-25 early — Fix 7 & Fix 8
+================================================================
+
+Run B4 (continuation validation of Run B2's 6 fixes):
+  - Spawn 23:08:57, 4 tasks completed by 23:16:55 (T+8min)
+  - 2x faster than B2 (which did 4 in 14min) — fixes 1-6 helped
+  - BUT stalled at 4/15 by T+20min with 3 agents idle "waiting
+    for audit result"
+  - Root cause: Fix 4's 15s audit fast-path path in change.go
+    left no code to emit AUDIT_RESULT broadcast when audit
+    completed after the 15s window. BroadcastDirected was only
+    called in the human-confirm (/change/approve) handler, not
+    in the auto-mode audit finisher. Agents sat forever.
+
+Fix 7: AUDIT_RESULT broadcast lives at the audit completion
+source, not in the HTTP handler.
+  @/D:/claude-code/coai2/platform/backend/internal/service/audit.go:78-127
+  - notifyAuditCompletion() now ALWAYS fires a BroadcastDirected
+    with the change.agent_id, regardless of whether a sync waiter
+    is still holding the channel. Covers L0/L1/L2 via the existing
+    call sites in ProcessAuditOutput, and adds a new call site in
+    ProcessFixOutput case "fix" so the "L1 -> Fix-agent -> approved"
+    final state also reaches the agent. Carries task_id if present.
+  - notifyAuditCompletion uses select-default on the channel send
+    so the audit worker never blocks on a drained waiter slot.
+
+Run B5 (after Fix 7):
+  - Spawn ~00:08, 7 tasks completed by T+14min (vs B4's 4)
+  - Throughput matched Run A's solo rate at 7 tasks / 14min
+    BUT three audit sessions stuck in flight:
+    * chg_3ff842b0 session_ad17d47d — session DB status=completed
+      yet no ProcessAuditOutput was ever called
+    * chg_72b6863c session_cc4286df — session DB status=failed
+    * chg_39de7cb3 session_c9ec0f7e — session DB status=completed
+      but also never fired ProcessAuditOutput
+  - Cause: the audit-agent LLM session finishes without emitting
+    an audit_output tool call. It reads/thinks/reads/thinks and
+    then the session closes (likely hit a cap or just emitted
+    final text instead of the tool). Backend records the session
+    as done but has no verdict to act on.
+  - This is an LLM prompt/discipline bug, not a backend control-flow
+    bug. Fix 7 is working (7 completions vs B4's 4 in the same
+    window, and every completion DID emit a broadcast); we just
+    hit a new class of failure upstream.
+
+Also caught during B5: chg_2885f4de fired "Task auto-completed"
+SEVEN times in a row (00:21:29, 00:21:53, 00:22:03, 00:22:10,
+00:22:16, 00:22:23, 00:22:36). Each run spammed approveChange ->
+git commit -> VERSION_UPDATE broadcast (version v1.7 -> v1.13).
+Fix-agent session kept re-emitting fix_output for the same
+already-approved change.
+
+Fix 8: idempotency guard on ProcessFixOutput
+  @/D:/claude-code/coai2/platform/backend/internal/service/audit.go:301-323
+  If the change is already status in {approved, rejected} when
+  fix_output arrives, re-broadcast the stored verdict (cheap,
+  idempotent agent-side) but skip approveChange. Prevents:
+  - duplicate git commits
+  - duplicate version bumps
+  - duplicate VERSION_UPDATE broadcasts
+  - N-fold "auto-completed" log spam
+
+Worth noting a tooling bug: the edit tool we used to apply Fix 7
++ Fix 8 silently kept injecting stray lines around our old_string
+matches (noticeable duplicate log lines like "Change %s rejected
+(L2) due to: %s"). We recovered by direct
+[System.IO.File]::ReadAllLines / WriteAllLines patching. If you
+see comments with arrow-style decorations (->), that's because
+we normalized them out of the mojibake unicode (→) that the tool
+had double-encoded. No semantic change.
+
+Run state at this shutdown:
+  - Backend alive on :3003 (started 23:38:53, running with Fix 7
+    + Fix 8 compiled in)
+  - 3 plat-F pool workers on proj_1cf789a0 shut down cleanly
+  - B5 snapshot: pending=5 claimed=3 completed=7
+  - Bench projects accumulated: proj_1ed1254a (A) / proj_0ff32593
+    (B) / proj_b10fe7d7 (B2) / proj_474db7bf (B3) / proj_f65a7aa2
+    (B4) / proj_1cf789a0 (B5)
+
+Still open for next session:
+  1. Audit-agent LLM reliability: three sessions hit "no tool call
+     emitted" during Run B5. Options, in order of cheapness:
+       (a) Tighten audit agent prompt to make tool-call-on-exit
+           mandatory and force the model to use it.
+       (b) Server-side watchdog on the audit session:
+           if session reaches end-of-run without ProcessAuditOutput
+           having been called, emit a default L1 verdict ("audit
+           incomplete — reviewer did not emit structured output;
+           treat as needs manual review") and fire the broadcast.
+           This prevents the "change stays pending forever" class
+           of failure.
+       (c) In the agent dispatch layer, detect end-of-session with
+           zero tool calls of the expected kind and retry.
+  2. Quality check on Run B5's 7 completed tasks — do the code
+     submissions actually match the task descriptions
+     (SQLite-not-tasks.json, pytest coverage, etc.)?
+  3. The 15-task solo baseline (Run A) finished 22min. B5 did 7
+     tasks in 14min then stalled. A true same-dimension "15/15
+     in Xmin" number for post-Fix-7-8 is what we still owe.
+  4. Fix-agent wakes up on fix_needed but the model sometimes
+     doesn't acknowledge — why? Does ctx.ChangeInfo.AuditIssues
+     actually land in the system prompt we feed it? (add a print
+     of the fix-agent session prompt to verify.)
+  5. Clean up the accumulated bench projects + DB rows if you
+     want a tidy workspace for tomorrow.
+
+================================================================
+2026-04-25 noon — Pivot: collaboration-hub mode (autopilot=off)
+================================================================
+
+Decision: the platform's value is *not* "spawn N LLMs faster than
+one LLM"; benchmarks proved the auto-pool path adds protocol
+overhead without beating solo. The platform's real value is
+*remote multi-developer + AI collaboration* — a shared project /
+task / change / review hub where each developer's local AI is
+their own tool, not a server-spawned subprocess.
+
+Operator chose option 2 ("keep agent pool but default it OFF").
+Agent pool code stays on disk for legacy demos, but the boot
+path no longer starts dispatcher / pool background loops, and
+change submission no longer triggers server-side audit/fix LLM
+sessions.
+
+Toggle: A3C_AUTOPILOT env var. Default OFF. Set to "1" / "true" /
+"yes" / "on" (case-insensitive) to restore autopilot.
+
+Code changes (all behind config.IsAutopilotEnabled):
+
+  @/D:/claude-code/coai2/platform/backend/internal/config/config.go:1-36
+    New IsAutopilotEnabled() helper. Single source of truth for
+    the autopilot kill-switch.
+
+  @/D:/claude-code/coai2/platform/backend/cmd/server/main.go:108-147
+    Wraps poolManager.Start{ContextWatcher,BroadcastConsumer,
+    DormancyDetector} in `if autopilot`. Boot logs the mode
+    explicitly: "[Boot] autopilot mode: ON" / "OFF".
+
+  @/D:/claude-code/coai2/platform/backend/cmd/server/main.go:335-346
+    Same gate around service.StartTaskDispatcher() — when off,
+    logs "Task dispatcher NOT started".
+
+  @/D:/claude-code/coai2/platform/backend/internal/handler/change.go:214-224
+    Submit overrides per-project auto_mode to false when
+    autopilot is off, so every change goes via
+    pending_human_confirm + the existing CHANGE_PENDING_CONFIRM
+    broadcast. No more server-side audit kicks off.
+
+  @/D:/claude-code/coai2/platform/backend/internal/handler/change.go:533-547
+    ApproveForReview returns 409 + AUTOPILOT_DISABLED in collab
+    mode (it would otherwise try to start a background audit
+    session that has no executor). Clear redirect: "use POST
+    /change/review directly".
+
+  @/D:/claude-code/coai2/platform/backend/internal/handler/change.go:578-681
+    Review (the human-verdict endpoint) is now the primary
+    review path. Accepts both `pending` (legacy) and
+    `pending_human_confirm` (new collab-hub) source statuses.
+    On approve it now actually delegates to
+    service.ApproveAndCommitChange (git commit + version bump
+    + task auto-complete + VERSION_UPDATE broadcast) — the
+    pre-pivot Review only flipped the status column, leaving
+    repo + task in inconsistent state. Always fires AUDIT_RESULT
+    directed broadcast to the submitter so client SDKs see the
+    same verdict shape regardless of mode. Defaults level to L0
+    on approve / L2 on reject when omitted.
+
+  @/D:/claude-code/coai2/platform/backend/internal/service/audit.go:147-156
+    Exports ApproveAndCommitChange wrapper around the existing
+    private approveChange helper, so the Review handler can
+    drive the same approval side-effects as the autopilot path
+    without re-implementing them.
+
+  @/D:/claude-code/coai2/platform/backend/internal/handler/agentpool.go:49-63
+    /agentpool/spawn returns 503 + AUTOPILOT_DISABLED in collab
+    mode. Without this, calls would create DB rows + opencode
+    subprocesses that can never receive directed broadcasts
+    (no consumer running) — silent zombies. Smoke-tested:
+    POST /agentpool/spawn → HTTP 503 with the correct error
+    code as expected.
+
+Boot smoke (verified):
+  [Boot] autopilot mode: OFF (collaboration-hub mode; pool/dispatcher/
+    auto-audit disabled — set A3C_AUTOPILOT=1 to re-enable legacy
+    behaviour)
+  [Pool] background loops NOT started (autopilot=off)
+  Server starting on :3003
+  [Dispatcher] Task dispatcher NOT started (autopilot=off)
+  → /api/v1/agentpool/spawn POST returns HTTP 503 AUTOPILOT_DISABLED
+  → /api/v1/project/list, /api/v1/agentpool/list (read-only) work fine
+
+Tests:
+  go test ./internal/... -timeout 180s — all packages OK
+  (agent / agentpool / handler / llm / model / opencode / runner /
+  service / refinery)
+
+Still open for next session (pivot follow-on):
+
+  A. Front-end: dashboard's "Agent Pool" panel should hide / show
+     a "Disabled — autopilot is off" hint when /agentpool/spawn
+     returns AUTOPILOT_DISABLED. Equivalent: poll a new
+     /api/v1/system/mode endpoint we'd add for cleanliness.
+
+  B. New collab-first endpoints worth adding to round out the
+     hub story:
+        POST /change/:id/comment  — anyone in the project can
+            leave a thread comment; AI assistants can use it to
+            post their analysis as a comment instead of acting
+            unilaterally.
+        GET  /change/pending_review — list inbox of changes
+            awaiting verdict for the current viewer.
+        POST /change/:id/assign_review — lead can route a
+            change to a specific reviewer.
+        @mention support inside comment.body so directed
+            broadcasts notify the mentioned member.
+
+  C. Client SDK doc: write a short README explaining that the
+     SDK is the bridge between *your* local AI (Claude Code,
+     Cursor, Codex, custom) and the shared hub. Make clear the
+     platform never runs LLMs in this mode — it's pure protocol
+     + state + git. Include sample local-AI hook for
+     "review this diff" so users can see how to plug in.
+
+  D. (Optional) audit-session timeout watchdog. Only matters if
+     someone re-enables autopilot for a demo and hits the same
+     "audit LLM finished without emitting tool call → change
+     stuck pending forever" failure we observed in Run B5. Not
+     a blocker for the pivot — it's strictly an autopilot-mode
+     concern.
+
+  E. Clean up the accumulated bench projects + DB rows. The new
+     mode is best demoed fresh.

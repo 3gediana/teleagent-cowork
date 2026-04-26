@@ -1,7 +1,7 @@
 ﻿{
-    "label":  "solo",
+    "label":  "solo-output",
     "dir":  "D:\\claude-code\\coai2\\bench\\tasq-experiment\\solo-output",
-    "graded_at":  "2026-04-24T08:18:18.3666754+08:00",
+    "graded_at":  "2026-04-24T08:21:18.7355976+08:00",
     "loc":  1920,
     "test_loc":  829,
     "pytest":  {

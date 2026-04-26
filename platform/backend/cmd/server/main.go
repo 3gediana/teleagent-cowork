@@ -105,29 +105,18 @@ func main() {
 	agentPoolHandler := handler.NewAgentPoolHandler()
 	loopCheckHandler := handler.NewLoopCheckHandler()
 
-	// Platform-hosted agent pool — spawns opencode subprocesses on
-	// the same host, auto-injects skills from the DB + baseline
-	// client/skill/using-a3c-platform, and treats them like normal
-	// client agents. See internal/agentpool/pool.go. The pool is
-	// opt-in: if no handler ever calls Spawn, zero subprocesses
-	// are created.
-	// Allow operators to pin the spawner command explicitly. The pool's
-	// default is "opencode" resolved against PATH, which doesn't help
-	// on Windows deployments where opencode ships as opencode.cmd under
-	// a non-PATH directory like D:\openclaw\npm. A3C_OPENCODE_CMD is
-	// the absolute path (or basename) to invoke; A3C_OPENCODE_ARGS is
-	// a whitespace-separated prefix such as "serve" — the pool still
-	// appends "--port <N>" automatically when the operator did not
-	// already include one.
+	autopilot := config.IsAutopilotEnabled()
+	if autopilot {
+		log.Printf("[Boot] autopilot mode: ON (A3C_AUTOPILOT set; pool + dispatcher + auto-audit will run)")
+	} else {
+		log.Printf("[Boot] autopilot mode: OFF (collaboration-hub mode; pool/dispatcher/auto-audit disabled — set A3C_AUTOPILOT=1 to re-enable legacy behaviour)")
+	}
+
 	poolCmd := strings.TrimSpace(os.Getenv("A3C_OPENCODE_CMD"))
 	var poolArgs []string
 	if raw := strings.TrimSpace(os.Getenv("A3C_OPENCODE_ARGS")); raw != "" {
 		poolArgs = strings.Fields(raw)
 	}
-	// PoolSessionCreator doubles as both SessionCreator and
-	// ContextProbe — one object, two interfaces — so the pool only
-	// needs the one wire-up here rather than two parallel clients
-	// pointing at the same opencode serves.
 	poolOC := opencodepkg.NewPoolSessionCreator(0)
 	poolInject := opencodepkg.NewPoolBroadcastInjector(0)
 	poolManager := agentpool.NewManager(agentpool.ManagerConfig{
@@ -148,24 +137,15 @@ func main() {
 	if poolCmd != "" {
 		log.Printf("[Pool] spawner command override: %s %v", poolCmd, poolArgs)
 	}
-	// Start the context watcher AND the directed-broadcast consumer
-	// once the pool manager is wired. context.Background() gives both
-	// a server-lifetime ceiling; pool.ShutdownAll() stops them cleanly
-	// on graceful shutdown.
-	//
-	// The broadcast consumer is what replaces the external MCP node
-	// process for platform-hosted agents: it drains Redis queue
-	// a3c:directed:<agentID> and injects events as prompt_async turns
-	// into the agent's opencode session. See agentpool/broadcast_consumer.go.
-	poolManager.StartContextWatcher(context.Background())
-	poolManager.StartBroadcastConsumer(context.Background(), 0)
-	poolManager.StartDormancyDetector(context.Background())
-	log.Printf("[Pool] broadcast consumer + dormancy detector started")
+	if autopilot {
+		poolManager.StartContextWatcher(context.Background())
+		poolManager.StartBroadcastConsumer(context.Background(), 0)
+		poolManager.StartDormancyDetector(context.Background())
+		log.Printf("[Pool] broadcast consumer + dormancy detector started")
+	} else {
+		log.Printf("[Pool] background loops NOT started (autopilot=off)")
+	}
 
-	// Unauthenticated bootstrap endpoints only. Anything that mutates
-	// or reads project state now lives in the auth group below — previously
-	// /project/create, /project/:id and /project/list were open which let
-	// any unauthenticated caller enumerate and create projects.
 	v1.POST("/auth/login", authHandler.Login)
 	v1.POST("/auth/logout", authHandler.Logout)
 	v1.POST("/agent/register", authHandler.Register)
@@ -352,6 +332,18 @@ func main() {
 	service.StartAnalyzeTimer()
 	service.StartRefineryTimer()
 	service.StartTaskEmbeddingBackfillTimer()
+	// Task dispatcher is the matcher that pulls pending tasks from
+	// the DB and pushes TASK_ASSIGN broadcasts to idle pool agents.
+	// It only ever assigns to is_platform_hosted=true agents
+	// (see runDispatcherOnce), so when autopilot is off and no pool
+	// agents come up there is literally nothing for it to do — but
+	// the every-15s tick is still wasted DB queries. Keep it
+	// gated to the autopilot path.
+	if autopilot {
+		service.StartTaskDispatcher()
+	} else {
+		log.Printf("[Dispatcher] Task dispatcher NOT started (autopilot=off)")
+	}
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)

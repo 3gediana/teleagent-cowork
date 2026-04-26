@@ -374,6 +374,16 @@ func (m *Manager) Wake(ctx context.Context, instanceID string) (*Instance, error
 
 	go m.watch(sp)
 
+	// Same story as rotateSession: the new session is empty, and if
+	// the agent had a task in status=claimed when it went to sleep
+	// the dispatcher won't re-broadcast. Poke the fresh session
+	// with a short recap so the agent immediately knows what to
+	// pick back up.
+	if newSession != "" {
+		m.maybeInjectResumePrompt(ctx, serveURL, newSession, agentID,
+			sp.inst.OpencodeProviderID, sp.inst.OpencodeModelID, "dormancy_wake")
+	}
+
 	log.Printf("[Pool] woke instance=%s agent=%s on port=%d session=%s", instanceID, agentID, port, newSession)
 	m.recordEvent(instanceID, "wake", fmt.Sprintf("port=%d session=%s", port, newSession))
 	return &sp.inst, nil

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/a3c/platform/internal/config"
 	"github.com/a3c/platform/internal/model"
 	"github.com/a3c/platform/internal/repo"
 	"github.com/a3c/platform/internal/service"
@@ -83,8 +84,43 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	overviewReminder := checkOverviewStale(req.Writes, req.Deletes)
 
 	var task model.Task
-	if err := model.DB.Where("id = ? AND status = 'claimed'", req.TaskID).First(&task).Error; err != nil {
-		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found or not claimed"}})
+	if err := model.DB.Where("id = ?", req.TaskID).First(&task).Error; err != nil {
+		c.JSON(404, gin.H{"success": false, "error": gin.H{"code": "TASK_NOT_FOUND", "message": "Task not found"}})
+		return
+	}
+
+	// Idempotent short-circuit: if the task is already completed by THIS
+	// agent, the previous change_submit call has almost certainly
+	// succeeded — the client just timed out waiting for audit (120s cap)
+	// and retried. Returning 404 here would mislead the agent into
+	// thinking the task is still open; returning success-shaped data
+	// with next_action=done lets the agent move on to feedback without
+	// re-executing the write leg. We look up the most recent change for
+	// this task+agent so the agent can reference it downstream.
+	if task.Status == "completed" && task.AssigneeID != nil && *task.AssigneeID == agentID.(string) {
+		var latest model.Change
+		_ = model.DB.Where("task_id = ? AND agent_id = ?", task.ID, agentID).
+			Order("created_at DESC").First(&latest).Error
+		resp := gin.H{
+			"task_id":     task.ID,
+			"next_action": "done",
+			"message":     "Task already completed by this agent (previous change_submit succeeded; probably a client-side timeout retry). No action needed — proceed to a3c_feedback.",
+		}
+		if latest.ID != "" {
+			resp["change_id"] = latest.ID
+			resp["status"] = latest.Status
+			resp["audit_level"] = latest.AuditLevel
+		}
+		c.JSON(200, gin.H{"success": true, "data": resp})
+		return
+	}
+
+	if task.Status != "claimed" {
+		c.JSON(409, gin.H{"success": false, "error": gin.H{
+			"code":    "TASK_NOT_CLAIMABLE",
+			"message": fmt.Sprintf("Task status is %q; change_submit requires 'claimed'. Call a3c_task action=claim task_id=%s first.", task.Status, task.ID),
+			"status":  task.Status,
+		}})
 		return
 	}
 
@@ -174,6 +210,18 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 	autoMode := true // default on
 	if err := model.DB.Where("id = ?", projectID).First(&project).Error; err == nil {
 		autoMode = project.AutoMode
+	}
+
+	// Global autopilot kill-switch: when off, every change goes
+	// through human review regardless of the per-project auto_mode
+	// flag. The platform's role in this mode is collaboration-hub:
+	// the server never spawns audit/fix LLM sessions on its own.
+	// Any team member (or their local AI assistant acting on their
+	// behalf) calls /change/review to give a verdict; the
+	// submitting agent gets the result via the existing
+	// AUDIT_RESULT directed broadcast (see Review handler).
+	if !config.IsAutopilotEnabled() {
+		autoMode = false
 	}
 
 	changeStatus := "pending"
@@ -268,15 +316,28 @@ func (h *ChangeHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	// Auto mode: trigger audit workflow and wait for result (blocking)
-	result, err := service.StartAuditWorkflowAndWait(changeID, 120*time.Second)
+	// Auto mode: trigger audit workflow and wait briefly. Previously
+	// we blocked up to 120s here waiting for the full L0/L1/L2
+	// verdict — but audit is a whole LLM session and routinely takes
+	// 30-90s, during which the submitting agent sits idle on a
+	// synchronous HTTP call instead of moving on to the next task.
+	// With N parallel pool agents that adds up to the biggest
+	// single contributor to platform overhead.
+	//
+	// New policy: wait up to 15s for the fast path (small diffs, cached
+	// contexts, lucky timing), then return "pending" with a clear
+	// next_action so the agent can immediately claim its next task
+	// while audit finishes in the background. The final verdict is
+	// delivered via the AUDIT_RESULT broadcast + can still be polled
+	// via /change/status for clients that prefer sync.
+	result, err := service.StartAuditWorkflowAndWait(changeID, 15*time.Second)
 	if err != nil {
 		timeoutData := gin.H{
 			"change_id":     changeID,
 			"status":        "pending",
-			"next_action":   "poll_change_status",
+			"next_action":   "claim_next",
 			"poll_endpoint": "GET /api/v1/change/status?change_id=" + changeID,
-			"message":       "Audit did not finish within 120s. Poll the endpoint above for the final result. Do NOT resubmit.",
+			"message":       "Audit is running asynchronously. You can move on: call a3c_task action=claim for the next pending task right now. The audit verdict will arrive as an AUDIT_RESULT broadcast; if it comes back L1/L2 you can revise then. Do NOT resubmit this change.",
 		}
 		if overviewReminder != "" {
 			timeoutData["overview_reminder"] = overviewReminder
@@ -469,6 +530,22 @@ func (h *ChangeHandler) ApproveForReview(c *gin.Context) {
 		return
 	}
 
+	// In collaboration-hub mode (autopilot off) the server never
+	// spawns audit/fix sessions on its own — there is no LLM
+	// pipeline to forward this change to. ApproveForReview was
+	// designed for the legacy autopilot flow where a human gates
+	// the auto-audit. With autopilot off the right path is to
+	// call /change/review directly (which a project member or
+	// their local AI assistant can do). Reject explicitly so the
+	// caller doesn't silently end up with a dangling pending row.
+	if !config.IsAutopilotEnabled() {
+		c.JSON(409, gin.H{"success": false, "error": gin.H{
+			"code":    "AUTOPILOT_DISABLED",
+			"message": "Autopilot is off; /change/approve_for_review only applies to the legacy auto-audit flow. Use POST /change/review directly with {change_id, approved, level, reason} to submit a verdict.",
+		}})
+		return
+	}
+
 	// Update status to pending and start audit
 	change.Status = "pending"
 	model.DB.Save(&change)
@@ -498,6 +575,23 @@ func (h *ChangeHandler) ApproveForReview(c *gin.Context) {
 	})
 }
 
+// Review records a human (or human-via-AI-assistant) verdict on a
+// change. This is the primary review entry point in
+// collaboration-hub mode (autopilot off): any project member can
+// call it, supplying {approved, level, reason}.
+//
+// Accepted source statuses:
+//   - pending             : legacy autopilot flow, after audit finished
+//   - pending_human_confirm: collab-hub flow, fresh out of /change/submit
+//
+// On approve we run the same side-effects the autopilot path runs
+// (git commit, version bump, task auto-complete, VERSION_UPDATE
+// broadcast) by delegating to service.ApproveAndCommitChange. On
+// reject we just record the verdict.
+//
+// Either way we fire a directed AUDIT_RESULT broadcast to the
+// submitting agent so the same client-side handler that listens for
+// autopilot verdicts works unchanged.
 func (h *ChangeHandler) Review(c *gin.Context) {
 	var req struct {
 		ChangeID string `json:"change_id" binding:"required"`
@@ -516,28 +610,72 @@ func (h *ChangeHandler) Review(c *gin.Context) {
 		return
 	}
 
-	if change.Status != "pending" {
-		c.JSON(409, gin.H{"success": false, "error": gin.H{"code": "CHANGE_ALREADY_APPROVED", "message": "Change already reviewed"}})
+	if change.Status != "pending" && change.Status != "pending_human_confirm" {
+		c.JSON(409, gin.H{"success": false, "error": gin.H{
+			"code":    "CHANGE_NOT_REVIEWABLE",
+			"message": fmt.Sprintf("Change is %s; only pending / pending_human_confirm changes can be reviewed", change.Status),
+		}})
 		return
 	}
 
-	now := time.Now()
-	change.ReviewedAt = &now
-	change.AuditReason = req.Reason
-	change.AuditLevel = &req.Level
+	// Default level to "L0" on approve / "L2" on reject if caller
+	// omitted it — saves polling clients from having to pick a
+	// level when "approve" / "reject" is the whole signal.
+	level := strings.TrimSpace(req.Level)
+	if level == "" {
+		if req.Approved {
+			level = "L0"
+		} else {
+			level = "L2"
+		}
+	}
 
+	now := time.Now()
 	if req.Approved {
-		change.Status = "approved"
+		// Delegate to the same approval path that autopilot uses
+		// so the change actually gets a git commit + version bump
+		// + task completion. Before this change Review only
+		// flipped the status column, leaving task=claimed and the
+		// repo with no commit — which silently broke every
+		// downstream "task done" signal.
+		if err := service.ApproveAndCommitChange(&change); err != nil {
+			c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "APPROVE_FAILED", "message": err.Error()}})
+			return
+		}
+		change.AuditLevel = &level
+		change.AuditReason = req.Reason
+		change.ReviewedAt = &now
+		if err := model.DB.Save(&change).Error; err != nil {
+			log.Printf("[Review] persist audit_level/reason for %s: %v", change.ID, err)
+		}
 	} else {
 		change.Status = "rejected"
+		change.AuditLevel = &level
+		change.AuditReason = req.Reason
+		change.ReviewedAt = &now
+		if err := model.DB.Save(&change).Error; err != nil {
+			c.JSON(500, gin.H{"success": false, "error": gin.H{"code": "REJECT_PERSIST_FAILED", "message": err.Error()}})
+			return
+		}
 	}
-	model.DB.Save(&change)
+
+	// Notify the submitter via the same directed-broadcast channel
+	// the autopilot AUDIT_RESULT path uses, so client SDKs only
+	// need one verdict-handling code path.
+	service.BroadcastDirected(change.AgentID, "AUDIT_RESULT", gin.H{
+		"change_id":    change.ID,
+		"status":       change.Status,
+		"audit_level":  level,
+		"audit_reason": req.Reason,
+		"reviewed_by":  c.GetString("agent_id"),
+	})
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"data": gin.H{
-			"change_id": change.ID,
-			"status":    change.Status,
+			"change_id":   change.ID,
+			"status":      change.Status,
+			"audit_level": level,
 		},
 	})
 }

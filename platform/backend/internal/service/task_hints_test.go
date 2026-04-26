@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,7 +47,14 @@ func setupHintsDB(t *testing.T) func() {
 		t.Fatalf("migrate: %v", err)
 	}
 	model.DB = db
-	return func() { model.DB = prev }
+	// Reset the process-global cluster-cooldown state up front: previous
+	// tests in this binary may have left it populated, and these tests
+	// assert top-1 ordering that the cooldown can perturb.
+	resetRecentClusters()
+	return func() {
+		model.DB = prev
+		resetRecentClusters()
+	}
 }
 
 // seedHintFixtures creates a task (optionally with a query embedding)
@@ -89,9 +97,17 @@ func seedHintFixtures(t *testing.T, taskEmb []float32) string {
 			Status: "active", Confidence: 0.85, Version: 1,
 			Embedding: MarshalEmbedding(unit(0.8, 0.3, 0.1)), EmbeddingDim: 3},
 	}
+	// Pin every artifact's timestamps to the same instant. Looping with
+	// fresh time.Now() calls — the previous version — produced
+	// nanosecond differences that made the recency rank non-flat across
+	// the three rows. Once recency contributed any variance, RRF could
+	// tie two artifacts whose semantic ranks differed by one (sem-r1 +
+	// rec-r2 == sem-r2 + rec-r1), defeating the test's intent of
+	// isolating the semantic signal.
+	now := time.Now()
 	for i := range artifacts {
-		artifacts[i].CreatedAt = time.Now()
-		artifacts[i].UpdatedAt = time.Now()
+		artifacts[i].CreatedAt = now
+		artifacts[i].UpdatedAt = now
 		if err := model.DB.Create(&artifacts[i]).Error; err != nil {
 			t.Fatalf("seed artifact: %v", err)
 		}
@@ -147,6 +163,89 @@ func TestHints_InjectedIDsReflectRankingOrder(t *testing.T) {
 	if hints.InjectedIDs[0] != "rec-auth" {
 		t.Errorf("top injected id should be rec-auth, got %s (all: %v)",
 			hints.InjectedIDs[0], hints.InjectedIDs)
+	}
+}
+
+// TestHints_ClusterCooldownFlipsTop1OnSecondCall is the end-to-end
+// proof that the BuildTaskClaimHints path actually wires the
+// cluster-cooldown tracker. Two artifacts with identical signals but
+// different clusters: the first claim picks artifact_a by ID
+// tie-break, recording cluster ep_A into the window. The second claim
+// reads the window back via recentClustersFor, hands ep_A to the
+// selector via RecentTopClusters, and the 0.85 multiplier on
+// artifact_a's RRF score is enough to flip artifact_b on top.
+func TestHints_ClusterCooldownFlipsTop1OnSecondCall(t *testing.T) {
+	defer setupHintsDB(t)()
+
+	// Seed a task with a query embedding aligned with both artifacts.
+	taskID := "task_cooldown_demo"
+	task := &model.Task{
+		ID: taskID, ProjectID: "p_cd", Name: "shared title",
+		Description: "shared description", Priority: "high", Status: "pending",
+		CreatedBy: "agent_demo",
+	}
+	task.DescriptionEmbedding = MarshalEmbedding([]float32{1, 0, 0})
+	task.DescriptionEmbeddingDim = 3
+	now := time.Now()
+	task.DescriptionEmbeddedAt = &now
+	if err := model.DB.Create(task).Error; err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	// Two artifacts identical on every signal except clusterKey.
+	// `tool_recipe` is in AudienceCoder's kind list, so both will
+	// survive the audience filter that BuildTaskClaimHints uses.
+	makeArtifact := func(id, cluster string) *model.KnowledgeArtifact {
+		return &model.KnowledgeArtifact{
+			ID: id, ProjectID: "p_cd", Kind: "tool_recipe",
+			Name: "rec:" + id, Summary: "shared summary",
+			Status: "active", Confidence: 0.8, Version: 1,
+			Embedding:    MarshalEmbedding([]float32{1, 0, 0}),
+			EmbeddingDim: 3,
+			SourceEvents: `["` + cluster + `","` + id + `_evt"]`,
+			CreatedAt:    now, UpdatedAt: now,
+		}
+	}
+	if err := model.DB.Create(makeArtifact("artifact_a", "ep_A")).Error; err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+	if err := model.DB.Create(makeArtifact("artifact_b", "ep_B")).Error; err != nil {
+		t.Fatalf("seed b: %v", err)
+	}
+
+	// First claim: cooldown window is empty, so the deterministic ID
+	// tie-break (artifact_a < artifact_b) puts artifact_a on top. The
+	// hint builder records ep_A into the per-project window as a
+	// side effect of returning the result.
+	first, err := BuildTaskClaimHints(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("first BuildTaskClaimHints: %v", err)
+	}
+	if len(first.InjectedIDs) < 2 || first.InjectedIDs[0] != "artifact_a" {
+		t.Fatalf("first call expected artifact_a top-1, got %v", first.InjectedIDs)
+	}
+
+	// Sanity-check the side effect actually fired — otherwise the
+	// next assertion could pass trivially in a future regression.
+	if got := recentClustersFor("p_cd"); len(got) != 1 || got[0] != "ep_A" {
+		t.Fatalf("after first call expected window=[ep_A]; got %v", got)
+	}
+
+	// Second claim: cooldown applies 0.85 to artifact_a's RRF score.
+	// With both rows otherwise tied, this is enough to drop it behind
+	// artifact_b.
+	second, err := BuildTaskClaimHints(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("second BuildTaskClaimHints: %v", err)
+	}
+	if len(second.InjectedIDs) < 2 || second.InjectedIDs[0] != "artifact_b" {
+		t.Errorf("second call expected artifact_b top-1 (cooldown should flip); got %v",
+			second.InjectedIDs)
+	}
+
+	// Window should now hold both clusters in chronological order.
+	if got, want := recentClustersFor("p_cd"), []string{"ep_A", "ep_B"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("window after two calls: got %v want %v", got, want)
 	}
 }
 

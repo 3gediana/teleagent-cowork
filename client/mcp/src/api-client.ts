@@ -123,7 +123,7 @@ export class ApiClient {
     return data
   }
 
-  async syncFiles(version: string) {
+  async syncFiles(version = '') {
     const { data } = await this.client.post('/api/v1/file/sync', { version })
     return data
   }

@@ -1,15 +1,15 @@
 ﻿{
-    "label":  "team",
+    "label":  "team-output",
     "dir":  "D:\\claude-code\\coai2\\bench\\tasq-experiment\\team-output",
-    "graded_at":  "2026-04-24T08:18:22.0835122+08:00",
-    "loc":  1455,
-    "test_loc":  1202,
+    "graded_at":  "2026-04-24T08:21:21.8006502+08:00",
+    "loc":  1446,
+    "test_loc":  1004,
     "pytest":  {
-                   "passed":  141,
+                   "passed":  146,
                    "ran":  true,
-                   "failed":  15,
-                   "pct":  90.4,
-                   "total":  156,
+                   "failed":  1,
+                   "pct":  99.3,
+                   "total":  147,
                    "stderr":  ""
                },
     "coverage":  {

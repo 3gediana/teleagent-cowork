@@ -729,6 +729,20 @@ func (m *Manager) shutdownLocked(instanceID string, cause error) error {
 	handle := sp.handle
 	m.mu.Unlock()
 
+	// Flip DB state FIRST — before waiting for the subprocess to exit.
+	// Task dispatcher queries `agents WHERE status='online'` on its
+	// 15s tick; if we waited for handle.Terminate (up to ShutdownGrace
+	// ≈ 10s) before updating the row, dispatcher could still broadcast
+	// TASK_ASSIGN to this doomed agent and those broadcasts silently
+	// land in Redis nobody drains. Marking offline up-front gives the
+	// dispatcher an immediate "don't bother" signal while the OS cleanup
+	// is still in flight.
+	now := time.Now()
+	_ = m.store.UpdateAgent(sp.inst.AgentID, map[string]any{
+		"status":         "offline",
+		"last_heartbeat": &now,
+	})
+
 	// Tear down outside the lock. Guard against nil handle too —
 	// dormancy nils it on transition, so a Shutdown called on a
 	// dormant instance has nothing to terminate.
@@ -736,13 +750,6 @@ func (m *Manager) shutdownLocked(instanceID string, cause error) error {
 	if handle != nil {
 		handle.Terminate(m.cfg.ShutdownGrace)
 	}
-
-	// Flip DB state.
-	now := time.Now()
-	_ = m.store.UpdateAgent(sp.inst.AgentID, map[string]any{
-		"status":         "offline",
-		"last_heartbeat": &now,
-	})
 
 	m.mu.Lock()
 	sp.inst.Status = "stopped"

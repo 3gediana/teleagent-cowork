@@ -159,9 +159,9 @@ Things to double-check:
   close long-lived connections — verify your provider keeps SSE open before
   relying on it.
 - **Allowed hosts.** vite refuses unknown hostnames by default. Set
-  `A3C_ALLOWED_HOSTS` (comma-separated) in `frontend/.env.local` to the
+  `A3C_ALLOWED_HOSTS` (comma-separated) in `platform/frontend/.env.local` to the
   tunnel hostname(s) the dev server should accept. See
-  `frontend/.env.local.example` for the full list of supported keys.
+  `platform/frontend/.env.local.example` for the full list of supported keys.
 - **Production hosting.** vite's dev server is fine for personal or
   small-team tunnels. For production, build the frontend (`vite build`)
   and serve `dist/` from nginx / Caddy / Traefik, with `/api/v1/*` proxied

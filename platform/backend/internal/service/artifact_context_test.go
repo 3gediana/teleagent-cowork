@@ -352,6 +352,308 @@ func TestSelector_EmptySourceEventsTreatedAsSingleton(t *testing.T) {
 	}
 }
 
+// TestSelector_RecentClusterCooldown_PenalisesRepeatOffenders verifies
+// the opt-in RecentTopClusters mechanism actually displaces a cluster
+// from top-1 once it has dominated recent rounds. evobench surfaced
+// the underlying bias: whichever cluster lucked into hosting the
+// highest-importance artifacts at simulation start kept winning every
+// subsequent round, because each successful inject reinforced its
+// importance score and fed back into RRF. Cooldown breaks that loop.
+func TestSelector_RecentClusterCooldown_PenalisesRepeatOffenders(t *testing.T) {
+	defer setupArtifactCtxDB(t)()
+
+	// Two singletons-by-cluster, identical semantic match. Without
+	// cooldown the deterministic ID tie-break (artifact_a < artifact_b)
+	// should put artifact_a on top. seedArtifactWithCluster calls
+	// time.Now() per row, which leaves nanosecond drift between
+	// CreatedAt/UpdatedAt — enough to give artifact_b a younger
+	// recency rank and break the tie-break test below. Flatten the
+	// timestamps explicitly so only the cooldown signal varies.
+	seedArtifactWithCluster(t, "artifact_a", "p1", "pattern", "pat:a", makeUnitVec(1, 0, 0), "ep_A")
+	seedArtifactWithCluster(t, "artifact_b", "p1", "pattern", "pat:b", makeUnitVec(1, 0, 0), "ep_B")
+	pinned := time.Now()
+	if err := model.DB.Model(&model.KnowledgeArtifact{}).
+		Where("project_id = ?", "p1").
+		Updates(map[string]any{"created_at": pinned, "updated_at": pinned}).Error; err != nil {
+		t.Fatalf("flatten timestamps: %v", err)
+	}
+
+	// Sanity: empty RecentTopClusters reproduces the legacy behaviour
+	// (pre-cooldown). artifact_a wins by ID tie-break.
+	base := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding: makeUnitVec(1, 0, 0),
+	})
+	if len(base) < 2 || base[0].Artifact.ID != "artifact_a" {
+		t.Fatalf("baseline (no cooldown) expected artifact_a top-1; got %v",
+			injectedIDs(base))
+	}
+
+	// One occurrence of ep_A in the recent window. 0.85^1 ≈ 0.85
+	// applied to artifact_a's RRF score; with both at sem rank 1
+	// (i.e. genuinely tied on every signal), that single 15% haircut
+	// is enough to drop artifact_a behind artifact_b.
+	once := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_A"},
+	})
+	if len(once) < 2 || once[0].Artifact.ID != "artifact_b" {
+		t.Errorf("with RecentTopClusters=[ep_A] expected artifact_b on top; got %v",
+			injectedIDs(once))
+	}
+
+	// Three occurrences should hammer ep_A even harder
+	// (0.85^3 ≈ 0.614). artifact_b stays on top.
+	thrice := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_A", "ep_A", "ep_A"},
+	})
+	if len(thrice) < 2 || thrice[0].Artifact.ID != "artifact_b" {
+		t.Errorf("with 3× ep_A in window expected artifact_b on top; got %v",
+			injectedIDs(thrice))
+	}
+
+	// Penalising a cluster that nobody owns is a no-op — falls back
+	// to the deterministic ID tie-break.
+	noop := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_NEVER_EXISTED"},
+	})
+	if len(noop) < 2 || noop[0].Artifact.ID != "artifact_a" {
+		t.Errorf("penalising a non-existent cluster should be a no-op; got %v",
+			injectedIDs(noop))
+	}
+}
+
+// TestCooldownDecayFactor verifies the magnitude-aware decay math
+// in isolation. The integration with SelectArtifactsForInjection is
+// covered by the *_GoldClusterSurvives test below; this one nails
+// down the formula's edge cases so future tweaks can't drift the
+// abstention semantics by accident.
+func TestCooldownDecayFactor(t *testing.T) {
+	cases := []struct {
+		name         string
+		myMax        float64
+		runnerUp     float64
+		n            int
+		baseDecay    float64
+		want         float64
+		toleranceAbs float64
+	}{
+		{
+			name: "tied scores apply full decay",
+			// myMax == runnerUp → dominance=0 → effective=baseDecay
+			myMax: 1.0, runnerUp: 1.0, n: 1, baseDecay: 0.85,
+			want: 0.85, toleranceAbs: 1e-9,
+		},
+		{
+			name: "tied scores compose across n=3",
+			myMax: 1.0, runnerUp: 1.0, n: 3, baseDecay: 0.85,
+			want: 0.614125, toleranceAbs: 1e-6,
+		},
+		{
+			name: "half-dominance softens decay halfway",
+			// (1.0 - 0.5)/1.0 = 0.5 → effective = 0.85 + 0.075 = 0.925
+			myMax: 1.0, runnerUp: 0.5, n: 1, baseDecay: 0.85,
+			want: 0.925, toleranceAbs: 1e-9,
+		},
+		{
+			name: "extreme dominance nearly disables decay",
+			// (1.0 - 0.01)/1.0 = 0.99 → effective ≈ 0.9985
+			myMax: 1.0, runnerUp: 0.01, n: 1, baseDecay: 0.85,
+			want: 0.9985, toleranceAbs: 1e-3,
+		},
+		{
+			name: "zero occurrence is identity",
+			myMax: 1.0, runnerUp: 0.5, n: 0, baseDecay: 0.85,
+			want: 1.0, toleranceAbs: 1e-9,
+		},
+		{
+			name: "zero myMax is identity",
+			// Defensive: cluster has no positive-scored candidates.
+			myMax: 0.0, runnerUp: 0.5, n: 1, baseDecay: 0.85,
+			want: 1.0, toleranceAbs: 1e-9,
+		},
+		{
+			name: "no alternative cluster abstains",
+			// runnerUp == 0 means every cluster is recent. Per the
+			// helper's documented contract we abstain → no penalty.
+			myMax: 1.0, runnerUp: 0.0, n: 2, baseDecay: 0.85,
+			want: 1.0, toleranceAbs: 1e-9,
+		},
+		{
+			name: "negative dominance is clamped to zero",
+			// Pathological: runnerUp > myMax (caller asked us about a
+			// cluster that's already losing). Formula would yield a
+			// negative dominance; clamp pins it to 0 → full baseDecay.
+			myMax: 0.5, runnerUp: 1.0, n: 1, baseDecay: 0.85,
+			want: 0.85, toleranceAbs: 1e-9,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cooldownDecayFactor(tc.myMax, tc.runnerUp, tc.n, tc.baseDecay)
+			diff := got - tc.want
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > tc.toleranceAbs {
+				t.Errorf("cooldownDecayFactor(%g, %g, %d, %g) = %g, want %g (±%g)",
+					tc.myMax, tc.runnerUp, tc.n, tc.baseDecay,
+					got, tc.want, tc.toleranceAbs)
+			}
+		})
+	}
+}
+
+// TestSelector_RecentClusterCooldown_TrustExemptsKnownGold verifies
+// the TrustedClusters opt-in exempts a cluster from cooldown decay.
+// This is the operational replacement for magnitude-aware decay in
+// the gold-cluster scenario: an external signal source (LLM judge
+// agreement, ops review, etc.) tells us "ep_A is gold" and the
+// selector honours that even when the cluster also appears in
+// RecentTopClusters.
+//
+// Test scenario: identical-signal twins in two clusters, one round
+// of cooldown for ep_A. Without trust, artifact_a (ep_A) would be
+// haircut and artifact_b would surface on top by ID tie-break.
+// With ep_A trusted, the cooldown is skipped and the deterministic
+// ID tie-break (artifact_a < artifact_b) keeps artifact_a on top.
+func TestSelector_RecentClusterCooldown_TrustExemptsKnownGold(t *testing.T) {
+	defer setupArtifactCtxDB(t)()
+
+	seedArtifactWithCluster(t, "artifact_a", "p1", "pattern", "pat:a", makeUnitVec(1, 0, 0), "ep_A")
+	seedArtifactWithCluster(t, "artifact_b", "p1", "pattern", "pat:b", makeUnitVec(1, 0, 0), "ep_B")
+	pinned := time.Now()
+	if err := model.DB.Model(&model.KnowledgeArtifact{}).
+		Where("project_id = ?", "p1").
+		Updates(map[string]any{"created_at": pinned, "updated_at": pinned}).Error; err != nil {
+		t.Fatalf("flatten timestamps: %v", err)
+	}
+
+	// Reference call: cooldown active, no trust → artifact_a haircut,
+	// artifact_b wins. (Same assertion as
+	// TestSelector_RecentClusterCooldown_PenalisesRepeatOffenders'
+	// "once" branch — included here so the trust assertion below has
+	// a contrast to point at, not to be the sole source of truth.)
+	without := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_A"},
+	})
+	if len(without) < 2 || without[0].Artifact.ID != "artifact_b" {
+		t.Fatalf("setup sanity: cooldown without trust should haircut ep_A; got %v",
+			injectedIDs(without))
+	}
+
+	// The actual assertion: ep_A is in the trust set, so cooldown
+	// must skip it. RRF scores tie, ID tie-break puts artifact_a
+	// back on top.
+	withTrust := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_A"},
+		TrustedClusters:   []string{"ep_A"},
+	})
+	if len(withTrust) < 2 || withTrust[0].Artifact.ID != "artifact_a" {
+		t.Errorf("trust exemption failed; expected artifact_a top-1 (cooldown skipped), got %v",
+			injectedIDs(withTrust))
+	}
+
+	// Defensive: trusting an unrelated cluster doesn't accidentally
+	// exempt artifact_a. ep_A is still penalised, artifact_b wins.
+	withWrongTrust := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{"ep_A"},
+		TrustedClusters:   []string{"ep_DIFFERENT"},
+	})
+	if len(withWrongTrust) < 2 || withWrongTrust[0].Artifact.ID != "artifact_b" {
+		t.Errorf("trusting unrelated cluster shouldn't exempt ep_A; got %v",
+			injectedIDs(withWrongTrust))
+	}
+}
+
+// Why there's no end-to-end "gold cluster survives cooldown" test
+// here despite the helper's nominal magnitude-awareness: in
+// practice, RRF dense-rank fusion compresses the score gap between
+// the best and second-best cluster to about 1.6 % at worst-case
+// (k=60, four signals, gold rank 1 on every signal vs runner-up
+// rank 2 on every signal: 4/61 vs 4/62 ≈ 1.63 %). The cooldown's
+// multiplicative penalty is 15 % per occurrence at base 0.85, so
+// any decay strong enough to break a self-reinforced monopoly is
+// also strong enough to flip a gold cluster of typical RRF margin.
+//
+// The cooldownDecayFactor helper STILL applies: at extreme
+// dominance ratios (e.g. RRF gap ≥ 30 % — when the runner-up is
+// many ranks behind on every signal) it reduces decay toward 1.0.
+// We just don't yet have a reliable way to construct that scenario
+// in a small test. evobench seeds dozens of artifacts and would
+// occasionally hit the regime; unit-test scale doesn't.
+//
+// Backlog: a proper "gold-cluster preservation" mechanism needs a
+// cluster-trust signal independent of RRF (e.g., judge-agreement
+// persistence, hand-curated overrides, or a smoothed
+// success-count-per-cluster score). Tracked in the section
+// comment above section 5b in artifact_context.go.
+
+// TestSelector_RecentClusterCooldown_LeavesSingletonsAlone verifies
+// that artifacts with no parseable cluster (legacy rows pre-dating
+// SourceEvents tracking) are NOT penalised even when an empty-string
+// cluster ID happens to be in RecentTopClusters. The cooldown is a
+// targeted fix for cluster-monopoly dynamics; treating singletons as
+// part of any "cluster" would unfairly demote half the historical pool.
+func TestSelector_RecentClusterCooldown_LeavesSingletonsAlone(t *testing.T) {
+	defer setupArtifactCtxDB(t)()
+
+	// Two artifacts with no SourceEvents set — both have clusterKey="".
+	// One has marginally higher confidence so the candidate fetch
+	// returns a stable order before scoring.
+	seedArtifact(t, "p1_lone", "p1", "pattern", "pat:lone", makeUnitVec(1, 0, 0))
+	seedArtifact(t, "p2_lone", "p1", "pattern", "pat:lone2", makeUnitVec(1, 0, 0))
+	// Flatten timestamps so the test isn't flaky on the recency
+	// signal: seedArtifact stamps each row with time.Now() and the
+	// monotonic drift between two consecutive calls is enough to
+	// give p2_lone a fresher rank, which then wins RRF and breaks
+	// the ID tie-break assertion below.
+	pinned := time.Now()
+	if err := model.DB.Model(&model.KnowledgeArtifact{}).
+		Where("project_id = ?", "p1").
+		Updates(map[string]any{"created_at": pinned, "updated_at": pinned}).Error; err != nil {
+		t.Fatalf("flatten timestamps: %v", err)
+	}
+
+	// Even with empty-string in the cooldown window, neither artifact
+	// should see its score multiplied — the cooldown skips empty
+	// cluster keys entirely (see counts map population).
+	r := SelectArtifactsForInjection(context.Background(), ArtifactQuery{
+		ProjectID: "p1", Audience: AudienceAnalyzer,
+		QueryEmbedding:    makeUnitVec(1, 0, 0),
+		RecentTopClusters: []string{""},
+	})
+	if len(r) != 2 {
+		t.Fatalf("expected both legacy artifacts to survive, got %d", len(r))
+	}
+	// Order must be deterministic via ID tie-break since RRF scores tie.
+	if r[0].Artifact.ID != "p1_lone" {
+		t.Errorf("expected ID tie-break to put p1_lone first; got %v",
+			injectedIDs(r))
+	}
+}
+
+// injectedIDs is a small helper for failure messages — turns a result
+// slice into a flat ID list so log lines stay readable.
+func injectedIDs(result []InjectedArtifact) []string {
+	out := make([]string, len(result))
+	for i, ia := range result {
+		out[i] = ia.Artifact.ID
+	}
+	return out
+}
+
 // TestDenseRank covers the ranking primitive in isolation. Important
 // edge cases: ties share rank, all-zero input becomes all-tied-at-1
 // (critical for RRF graceful degradation), empty input returns nil.

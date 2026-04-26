@@ -36,8 +36,11 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 	tasks, _ := repoGetTasksByProject(projectID)
 	locks, _ := repoGetLocksByProject(projectID)
 
-	taskList := make([]gin.H, 0)
+	taskList := make([]gin.H, 0, len(tasks))
 	for _, t := range tasks {
+		if t.Status == "completed" || t.Status == "deleted" {
+			continue
+		}
 		assigneeName := ""
 		if t.AssigneeID != nil {
 			a, _ := repoGetAgentByID(*t.AssigneeID)
@@ -48,7 +51,6 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 		taskItem := gin.H{
 			"id":            t.ID,
 			"name":          t.Name,
-			"description":   t.Description,
 			"status":        t.Status,
 			"assignee_name": assigneeName,
 			"priority":      t.Priority,
@@ -59,18 +61,14 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 		taskList = append(taskList, taskItem)
 	}
 
-	lockList := make([]gin.H, 0)
+	lockList := make([]gin.H, 0, len(locks))
 	for _, l := range locks {
 		var files []string
 		json.Unmarshal([]byte(l.Files), &files)
 		lockList = append(lockList, gin.H{
-			"lock_id":     l.ID,
-			"task_id":     l.TaskID,
-			"agent_name":  syncGetAgentName(l.AgentID),
-			"files":       files,
-			"reason":      l.Reason,
-			"acquired_at": l.AcquiredAt.Format(time.RFC3339),
-			"expires_at":  l.ExpiresAt.Format(time.RFC3339),
+			"task_id":    l.TaskID,
+			"agent_name": syncGetAgentName(l.AgentID),
+			"files":      files,
 		})
 	}
 
@@ -80,7 +78,7 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 		"locks":   lockList,
 	}
 	if direction != nil {
-		data["direction"] = direction.Content
+		data["direction"] = trimStringForContext(direction.Content, 800)
 	}
 	if milestone != nil {
 		data["milestone"] = milestone.Name
@@ -89,7 +87,6 @@ func (h *StatusHandler) Sync(c *gin.Context) {
 		data["version"] = version.Content
 	}
 
-	// Add current agent's claimed task
 	var myTask model.Task
 	if err := model.DB.Where("assignee_id = ? AND status = 'claimed'", agentID).First(&myTask).Error; err == nil {
 		data["my_task"] = gin.H{
@@ -205,4 +202,15 @@ func repoGetLocksByProject(projectID string) ([]model.FileLock, error) {
 	var locks []model.FileLock
 	err := model.DB.Where("project_id = ? AND released_at IS NULL AND expires_at > ?", projectID, time.Now()).Find(&locks).Error
 	return locks, err
+}
+
+func trimStringForContext(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "\n…[truncated, call a3c_task action=show for full text]"
 }
