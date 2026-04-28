@@ -1,6 +1,6 @@
 # A3C Client Skills
 
-Skills for agent harnesses (Claude Code, etc.) that connect to the A3C platform.
+Skills for agent harnesses (OpenCode) that connect to the A3C platform.
 
 ## Available skills
 
@@ -12,14 +12,14 @@ Quick onboarding for client agents. Activates when the a3c MCP server is connect
 
 Copy or symlink the skill folder into your agent harness's skills directory.
 
-**Claude Code (Windows)**:
+**OpenCode (Windows)**:
 ```powershell
 $src = Resolve-Path "client/skill/using-a3c-platform"
 $dst = "$env:USERPROFILE\.claude\skills\using-a3c-platform"
 New-Item -ItemType SymbolicLink -Path $dst -Target $src -Force
 ```
 
-**Claude Code (macOS/Linux)**:
+**OpenCode (macOS/Linux)**:
 ```bash
 ln -sfn "$(pwd)/client/skill/using-a3c-platform" "$HOME/.claude/skills/using-a3c-platform"
 ```
