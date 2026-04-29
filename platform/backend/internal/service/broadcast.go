@@ -293,7 +293,21 @@ func BroadcastDirected(agentID string, eventType string, payload gin.H) {
 	}
 }
 
-// GetDirectedMessages retrieves and removes all directed messages for a specific agent
+// GetDirectedMessages returns the directed messages currently queued
+// for the given agent. The queue itself is NOT modified — entries are
+// only removed when the consumer (the MCP poller, via /poll's
+// `acked_directed_ids` field) explicitly acks them. See
+// AckDirectedMessages below for the LREM path.
+//
+// Until v0.3 this used to LRange + Del, which silently dropped any
+// message the MCP-side inject path failed to deliver (no OpenCode
+// session yet, network hiccup, restart between fetch and inject).
+// Since AUDIT_RESULT / CHANGE_PENDING_CONFIRM / VERSION_UPDATE all
+// flow through this queue, that bug meant external agents would
+// occasionally never learn the verdict on their own PR.
+//
+// The 10-minute Redis TTL on the queue (see BroadcastDirected) is
+// the safety net that bounds growth if a client never acks.
 func GetDirectedMessages(agentID interface{}) []gin.H {
 	if model.RDB == nil {
 		return nil
@@ -302,14 +316,10 @@ func GetDirectedMessages(agentID interface{}) []gin.H {
 	idStr := fmt.Sprintf("%v", agentID)
 	key := fmt.Sprintf("a3c:directed:%s", idStr)
 
-	// Get all messages
 	data, err := model.RDB.LRange(ctx, key, 0, -1).Result()
 	if err != nil || len(data) == 0 {
 		return nil
 	}
-
-	// Delete the queue after reading (consume-once)
-	model.RDB.Del(ctx, key)
 
 	var messages []gin.H
 	for _, d := range data {
@@ -320,6 +330,64 @@ func GetDirectedMessages(agentID interface{}) []gin.H {
 	}
 
 	return messages
+}
+
+// AckDirectedMessages removes from the per-agent directed queue every
+// entry whose header.messageID is in messageIDs. Called from the
+// /poll handler when the MCP client confirms it has injected those
+// messages into its OpenCode session. Idempotent: re-acking a
+// messageID that's already gone (TTL expired, double-ack) is a no-op.
+//
+// Implementation note: Redis LREM matches on exact value, so we
+// LRange the queue, find the JSON blobs whose decoded header.messageID
+// is in the requested set, and LREM each one by exact-blob match.
+// The per-agent queue is bounded (small handful of pending events
+// in steady state), so this O(n) scan per ack call is fine.
+func AckDirectedMessages(agentID interface{}, messageIDs []string) {
+	if model.RDB == nil || len(messageIDs) == 0 {
+		return
+	}
+	ctx := context.Background()
+	idStr := fmt.Sprintf("%v", agentID)
+	key := fmt.Sprintf("a3c:directed:%s", idStr)
+
+	data, err := model.RDB.LRange(ctx, key, 0, -1).Result()
+	if err != nil || len(data) == 0 {
+		return
+	}
+
+	wanted := make(map[string]bool, len(messageIDs))
+	for _, id := range messageIDs {
+		if id != "" {
+			wanted[id] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return
+	}
+
+	for _, blob := range data {
+		var env struct {
+			Header struct {
+				MessageID string `json:"messageID"`
+			} `json:"header"`
+		}
+		if err := json.Unmarshal([]byte(blob), &env); err != nil {
+			continue
+		}
+		if env.Header.MessageID == "" || !wanted[env.Header.MessageID] {
+			continue
+		}
+		// LREM count=1 because each message is enqueued exactly once.
+		// If multiple identical blobs exist (would require an exact
+		// JSON-equal duplicate, including timestamp), removing one
+		// here is the right behaviour — the others remain and will
+		// be redelivered until the client acks them too.
+		if remErr := model.RDB.LRem(ctx, key, 1, blob).Err(); remErr != nil {
+			log.Printf("[Broadcast] LRem failed for ack of %s on %s: %v",
+				env.Header.MessageID, idStr, remErr)
+		}
+	}
 }
 
 func (m *SSEManagerStruct) AckAllBroadcasts(projectID string, agentID string) {

@@ -138,9 +138,19 @@ export class ApiClient {
     return data
   }
 
-  async poll() {
-    // Auth is via Bearer header; body is empty by design (server does not read `key`).
-    const { data } = await this.client.post('/api/v1/poll', {})
+  // poll asks the platform for buffered broadcasts + directed messages.
+  // ackedDirectedIds is a list of header.messageID values for directed
+  // messages this client has fully processed (injected into the
+  // OpenCode session). The server LREMs matching entries from the
+  // directed queue so they aren't redelivered. Empty / omitted on
+  // first call; populated on subsequent calls by the poller's
+  // ackProvider hook.
+  async poll(ackedDirectedIds: string[] = []) {
+    const body: Record<string, unknown> = {}
+    if (ackedDirectedIds.length > 0) {
+      body.acked_directed_ids = ackedDirectedIds
+    }
+    const { data } = await this.client.post('/api/v1/poll', body)
     return data
   }
 

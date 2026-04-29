@@ -80,9 +80,8 @@ var DefaultCompactionPolicy = CompactionPolicy{
 // "already microcompacted which tool_use_id" set so we don't re-work
 // already-stripped entries.
 type CompactionState struct {
-	consecutiveFailures  int
-	microCompactedIDs    map[string]bool
-	summarizedUpToTurnIx int
+	consecutiveFailures int
+	microCompactedIDs   map[string]bool
 
 	// lastTerminalToolTurnIx: index of the assistant turn that emitted
 	// a terminal output tool (audit_output, chief_output, ...). Set

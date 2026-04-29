@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"strings"
 	"time"
 
@@ -9,6 +10,20 @@ import (
 	"github.com/a3c/platform/internal/repo"
 	"github.com/a3c/platform/internal/service"
 )
+
+// logSaveErr is a small wrapper around model.DB.Save that logs
+// failures with a short context tag. Auth-state transitions don't
+// abort the request when a save fails (the caller still gets a 200
+// for login etc.), but the failure absolutely must not be silent —
+// dropped saves here mean stale heartbeat / dangling locks /
+// orphaned tasks. The handler used to ignore Save errors entirely;
+// this helper preserves that non-fatal behaviour while at least
+// surfacing the error in the server journal.
+func logSaveErr(rec interface{}, what string) {
+	if err := model.DB.Save(rec).Error; err != nil {
+		log.Printf("[Auth] DB save %s: %v", what, err)
+	}
+}
 
 type AuthHandler struct{}
 
@@ -47,13 +62,13 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			now := time.Now()
 			agent.Status = "offline"
 			agent.LastHeartbeat = &now
-			model.DB.Save(agent)
+			logSaveErr(agent, "login/stale-cleanup agent")
 
 			var locks []model.FileLock
 			model.DB.Where("agent_id = ? AND released_at IS NULL", agent.ID).Find(&locks)
 			for i := range locks {
 				locks[i].ReleasedAt = &now
-				model.DB.Save(&locks[i])
+				logSaveErr(&locks[i], "login/stale-cleanup lock")
 			}
 
 			var tasks []model.Task
@@ -61,7 +76,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			for i := range tasks {
 				tasks[i].Status = "pending"
 				tasks[i].AssigneeID = nil
-				model.DB.Save(&tasks[i])
+				logSaveErr(&tasks[i], "login/stale-cleanup task")
 			}
 
 			// Release branch occupancy so other agents can enter the branch,
@@ -81,7 +96,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	agent.LastHeartbeat = &now
 	sessionID := model.GenerateID("session")
 	agent.SessionID = sessionID
-	model.DB.Save(agent)
+	logSaveErr(agent, "login/online-mark agent")
 
 	// Match the 7-minute heartbeat timeout in scheduler.go to tolerate jitter.
 	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
@@ -100,7 +115,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		project, _ := repo.GetProjectByID(req.Project)
 		if project != nil {
 			agent.CurrentProjectID = &req.Project
-			model.DB.Save(agent)
+			logSaveErr(agent, "login/select-project agent")
 			direction, _ := repo.GetContentBlock(req.Project, "direction")
 			milestone, _ := repo.GetCurrentMilestone(req.Project)
 			version, _ := repo.GetContentBlock(req.Project, "version")
@@ -157,13 +172,13 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	now := time.Now()
 	agent.Status = "offline"
 	agent.LastHeartbeat = &now
-	model.DB.Save(agent)
+	logSaveErr(agent, "logout agent")
 
 	var locks []model.FileLock
 	model.DB.Where("agent_id = ? AND released_at IS NULL", agent.ID).Find(&locks)
 	for i := range locks {
 		locks[i].ReleasedAt = &now
-		model.DB.Save(&locks[i])
+		logSaveErr(&locks[i], "logout lock")
 	}
 
 	var tasks []model.Task
@@ -172,7 +187,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	for i := range tasks {
 		tasks[i].Status = "pending"
 		tasks[i].AssigneeID = nil
-		model.DB.Save(&tasks[i])
+		logSaveErr(&tasks[i], "logout task")
 		releasedTasks = append(releasedTasks, tasks[i].ID)
 	}
 
@@ -299,8 +314,8 @@ func (h *AuthHandler) Heartbeat(c *gin.Context) {
 		now := time.Now()
 		agent.LastHeartbeat = &now
 		agent.Status = "online"
-		model.DB.Save(agent)
-	model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
+		logSaveErr(agent, "heartbeat agent")
+		model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
 
 		var locks []model.FileLock
 		model.DB.Where("agent_id = ? AND released_at IS NULL AND expires_at > NOW()", agent.ID).Find(&locks)

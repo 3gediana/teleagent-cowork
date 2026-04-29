@@ -292,29 +292,53 @@ export class OpenCodeClient {
     })
   }
 
-  injectMessage(sessionId: string, message: string): void {
-    const data = JSON.stringify({
-      parts: [{ type: 'text', text: message }],
-    })
-    const url = new URL(`/session/${sessionId}/message`, this.serveURL)
-    const req = http.request(
-      url,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data),
+  // injectMessage POSTs a single text part into the OpenCode session
+  // identified by sessionId. Returns true iff opencode accepted the
+  // POST (HTTP 2xx). Returns false on HTTP error, network error, or
+  // timeout — callers must check and decide whether to retry / buffer.
+  //
+  // Earlier this was fire-and-forget (`req.on('error', () => {})`),
+  // which combined with the directed-broadcast queue's consume-on-read
+  // semantics on the platform side caused silent data loss every time
+  // OpenCode was restarting or the session id had changed since the
+  // poll fetched the message. The Promise<boolean> shape now lets the
+  // MCP poller buffer + retry instead.
+  injectMessage(sessionId: string, message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const data = JSON.stringify({
+        parts: [{ type: 'text', text: message }],
+      })
+      const url = new URL(`/session/${sessionId}/message`, this.serveURL)
+      const req = http.request(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data),
+          },
+          timeout: 3000,
         },
-        timeout: 3000,
-      },
-      (res) => {
-        res.resume()
-        res.on('end', () => {})
-      },
-    )
-    req.on('error', () => {})
-    req.on('timeout', () => req.destroy())
-    req.write(data)
-    req.end()
+        (res) => {
+          const ok = typeof res.statusCode === 'number' && res.statusCode >= 200 && res.statusCode < 300
+          // Drain the body so the socket is reusable; we don't care
+          // about the parsed response — opencode just echoes the part.
+          res.resume()
+          res.on('end', () => resolve(ok))
+          res.on('error', () => resolve(false))
+        },
+      )
+      req.on('error', (err) => {
+        console.error('[OpenCodeClient] injectMessage error session=%s: %s', sessionId, (err as Error).message)
+        resolve(false)
+      })
+      req.on('timeout', () => {
+        console.error('[OpenCodeClient] injectMessage timeout session=%s', sessionId)
+        req.destroy()
+        resolve(false)
+      })
+      req.write(data)
+      req.end()
+    })
   }
 }

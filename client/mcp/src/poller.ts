@@ -6,6 +6,14 @@ export class Poller {
   private heartbeatInterval: NodeJS.Timeout | null = null
   private aliveCheckInterval: NodeJS.Timeout | null = null
   private onBroadcast: ((messages: any[]) => void) | null = null
+  // ackProvider lets the broadcast handler hand the poller a list of
+  // directed-message IDs that have been fully processed. The poller
+  // forwards them on the next /poll call so the platform LREMs them
+  // from the per-agent queue. See client/mcp/src/index.ts for the
+  // wiring; see platform/backend/internal/handler/sync.go::Poll for
+  // the server-side LREM path.
+  private ackProvider: (() => string[]) | null = null
+  private onAcksConfirmed: ((acked: string[]) => void) | null = null
   private running = false
   private parentPid: number | null = null
 
@@ -17,19 +25,43 @@ export class Poller {
     this.onBroadcast = handler
   }
 
+  // setAckProvider wires in a function the poller calls just before
+  // each /poll request. The returned IDs are sent to the server and,
+  // on a successful poll response, passed to onAcksConfirmed (set via
+  // setAckConfirmedHandler) so the broadcast handler can drop them
+  // from its in-memory pending map. If poll throws, acks are NOT
+  // confirmed and stay queued in the provider for the next tick.
+  setAckProvider(fn: () => string[]) {
+    this.ackProvider = fn
+  }
+
+  setAckConfirmedHandler(fn: (acked: string[]) => void) {
+    this.onAcksConfirmed = fn
+  }
+
   async start() {
     if (this.running) return
     this.running = true
     this.parentPid = process.ppid
 
     this.pollInterval = setInterval(async () => {
+      const acks = this.ackProvider ? this.ackProvider() : []
       try {
-        const data = await this.api.poll()
+        const data = await this.api.poll(acks)
+        // Acks were durably accepted by the server: notify the
+        // broadcast handler so it clears matching entries from its
+        // pending map. Done before broadcasting so the handler sees
+        // the cleanest state when processing fresh inbound messages.
+        if (acks.length > 0 && this.onAcksConfirmed) {
+          this.onAcksConfirmed(acks)
+        }
         if (data?.data?.messages?.length > 0 && this.onBroadcast) {
           this.onBroadcast(data.data.messages)
         }
       } catch (e) {
         console.error('[Poller] Poll error:', e)
+        // acks remain in the provider's queue and will be retried
+        // on the next tick; no manual rollback needed here.
       }
     }, 5000)
 

@@ -481,19 +481,122 @@ async function main() {
     }
   })
 
+  // Broadcast retry buffer.
+  //
+  // Keyed by header.messageID. Lifecycle:
+  //   inflight     — fetched from /poll, not yet successfully injected
+  //   awaiting_ack — injected into OpenCode, ack queued for the next /poll
+  //
+  // The platform now keeps directed messages in its Redis queue until
+  // the client acks them (handler/sync.go::Poll reads acked_directed_ids
+  // and calls service.AckDirectedMessages → LREM). So even if this
+  // process crashes between fetch and inject, the message is still on
+  // the platform side and will redeliver on the next poll. We dedup
+  // re-deliveries by messageID below.
+  //
+  // MAX_INJECT_ATTEMPTS protects against a permanently broken inject
+  // path (e.g. opencode wedged on a session id we can't replace) by
+  // eventually giving up and acking the message anyway, so the queue
+  // doesn't grow forever. The platform-side TTL (10 min) is the
+  // ultimate safety net.
+  const MAX_INJECT_ATTEMPTS = 5
+  type PendingEntry = {
+    msg: any
+    attempts: number
+    status: 'inflight' | 'awaiting_ack'
+  }
+  const pending = new Map<string, PendingEntry>()
+  let pendingNoIdCounter = 0
+
+  function extractMsgId(msg: any): string {
+    const id = msg?.header?.messageID || msg?.header?.MessageID || msg?.header?.message_id
+    if (typeof id === 'string' && id.length > 0) return id
+    // Older platform builds and some test fixtures don't stamp a
+    // messageID. We synthesise a process-local one so the entry is
+    // deduplicated within this run, but we cannot ack it server-side
+    // (the platform won't find an LREM match). Best-effort: log and
+    // inject opportunistically.
+    pendingNoIdCounter++
+    return `__noid_${pendingNoIdCounter}`
+  }
+
+  function isAckable(msgId: string): boolean {
+    return !msgId.startsWith('__noid_')
+  }
+
+  poller.setAckProvider(() => {
+    const acks: string[] = []
+    for (const [id, entry] of pending) {
+      if (entry.status === 'awaiting_ack' && isAckable(id)) {
+        acks.push(id)
+      }
+    }
+    return acks
+  })
+
+  poller.setAckConfirmedHandler((acked) => {
+    // Server has LREM'd these — drop them from local state. The
+    // pending entries with status=inflight are NOT in this list and
+    // will be retried on the next broadcast tick.
+    for (const id of acked) {
+      pending.delete(id)
+    }
+  })
+
   poller.setBroadcastHandler(async (messages) => {
-    console.error('[Broadcast] Received %d messages', messages.length)
-    let sessionId = await oc.getLatestSession()
+    console.error('[Broadcast] Received %d messages (pending=%d)', messages.length, pending.size)
+
+    // 1. Add fresh messages to the pending map. Skip dupes — they
+    //    may already be 'awaiting_ack' (server LREM not yet applied)
+    //    or 'inflight' (we got them again because last cycle's inject
+    //    failed and we couldn't ack them).
+    for (const msg of messages) {
+      const id = extractMsgId(msg)
+      if (!pending.has(id)) {
+        pending.set(id, { msg, attempts: 0, status: 'inflight' })
+      }
+    }
+
+    // 2. Drain pending. Any 'inflight' entry gets one inject attempt.
+    //    Ack-confirmed cleanup happens in setAckConfirmedHandler above.
+    const sessionId = await oc.getLatestSession()
     if (!sessionId) {
-      console.error('[Broadcast] No active OpenCode session found')
+      console.error('[Broadcast] No active OpenCode session; %d msgs queued for retry', pending.size)
       return
     }
-    for (const msg of messages) {
-      const eventType = msg.header?.type || msg.header?.Type || 'unknown'
-      const payload = msg.payload || msg
+
+    for (const [id, entry] of pending) {
+      if (entry.status === 'awaiting_ack') continue
+
+      if (entry.attempts >= MAX_INJECT_ATTEMPTS) {
+        const eventType = entry.msg?.header?.type || entry.msg?.header?.Type || 'unknown'
+        console.error('[Broadcast] Giving up on %s (id=%s) after %d attempts; will ack to free queue',
+          eventType, id, entry.attempts)
+        if (isAckable(id)) {
+          entry.status = 'awaiting_ack'
+        } else {
+          pending.delete(id)
+        }
+        continue
+      }
+
+      const eventType = entry.msg?.header?.type || entry.msg?.header?.Type || 'unknown'
+      const payload = entry.msg?.payload || entry.msg
       const text = `📡 [A3C BROADCAST] Event: ${eventType}\n\n${JSON.stringify(payload, null, 2)}`
-      oc.injectMessage(sessionId, text)
-      console.error('[Broadcast] Injected to session %s: %s', sessionId, eventType)
+      const ok = await oc.injectMessage(sessionId, text)
+      if (ok) {
+        if (isAckable(id)) {
+          entry.status = 'awaiting_ack'
+        } else {
+          // No id we can ack server-side; just drop locally.
+          pending.delete(id)
+        }
+        console.error('[Broadcast] Injected to session %s: %s (id=%s)', sessionId, eventType, id)
+      } else {
+        entry.attempts++
+        console.error('[Broadcast] Inject failed for %s (id=%s) attempt=%d; will retry next tick',
+          eventType, id, entry.attempts)
+      }
     }
   })
 

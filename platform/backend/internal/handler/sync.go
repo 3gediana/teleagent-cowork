@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -108,6 +109,24 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 		c.JSON(401, gin.H{"success": false, "error": gin.H{"code": "AUTH_INVALID_KEY", "message": "Agent not found"}})
 		return
 	}
+
+	// Optional body: { "acked_directed_ids": ["dir_xxx", ...] }
+	// MCP clients send this on subsequent polls so the platform can
+	// LREM messages they've successfully injected. Body is permitted
+	// to be empty (back-compat with older clients) — we only parse
+	// when there's a Content-Length, and we accept and ignore unknown
+	// fields. Bind errors are silently ignored: a malformed body must
+	// not break the heartbeat half of /poll.
+	var pollReq struct {
+		AckedDirectedIDs []string `json:"acked_directed_ids"`
+	}
+	if c.Request.ContentLength > 0 {
+		_ = c.ShouldBindJSON(&pollReq)
+	}
+	if len(pollReq.AckedDirectedIDs) > 0 {
+		service.AckDirectedMessages(agentID, pollReq.AckedDirectedIDs)
+	}
+
 	agent, _ := repoGetAgentByID(agentID)
 
 	now := time.Now()
@@ -115,7 +134,9 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 	if agent != nil {
 		agent.LastHeartbeat = &now
 		agent.Status = "online"
-		model.DB.Save(agent)
+		if err := model.DB.Save(agent).Error; err != nil {
+			log.Printf("[Poll] save agent heartbeat for %s: %v", agent.ID, err)
+		}
 		model.RDB.Set(model.DB.Statement.Context, "a3c:agent:"+agent.ID+":heartbeat", now.Unix(), 7*time.Minute)
 		heartbeatOk = true
 	}
@@ -137,11 +158,12 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 		}
 	}
 
-	// Also fetch directed messages (e.g. audit results) for this agent
+	// Also fetch directed messages (e.g. audit results) for this agent.
+	// These stay in the per-agent Redis queue until acked via
+	// AckedDirectedIDs above; that's the durability guarantee that
+	// covers MCP-side restarts mid-inject.
 	directedMessages := service.GetDirectedMessages(agentID)
-	for _, dm := range directedMessages {
-		messages = append(messages, dm)
-	}
+	messages = append(messages, directedMessages...)
 
 	// Note: the native runner is stateless per session, so we no
 	// longer inject "[Project Updates]" into a live agent serve

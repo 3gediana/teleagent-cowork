@@ -318,14 +318,17 @@ func Run(ctx context.Context, sess *agent.Session, reg *Registry, opts RunOption
 			if turn.Text != "" {
 				finalText.WriteString(turn.Text)
 			}
-			// Append the final assistant message (useful for audit
-			// logs even though we don't send it back to the model).
-			if len(assistantBlocks) > 0 {
-				messages = append(messages, llm.Message{
-					Role:    llm.RoleAssistant,
-					Content: assistantBlocks,
-				})
-			}
+			// We used to append a final assistant message to `messages`
+			// here "for audit logs", but the function returns 30 lines
+			// below and `messages` is a local slice that's never read
+			// after this branch — the append was dead. The real audit
+			// trail lives in:
+			//   - rsess.Journal (per-tool-call entries, returned in
+			//     RunResult.Journal and persisted by the dispatcher)
+			//   - finalText / RunResult.FinalText (echoed in CHAT_UPDATE
+			//     below and persisted onto AgentSession.Output)
+			// If we ever want a real per-message audit log, the right
+			// home is rsess.Journal, not this slice.
 			// Broadcast the final reply so the chat panel updates and
 			// a clean AGENT_DONE so "running" badges flip to "complete".
 			// Shape of CHAT_UPDATE matches opencode's exactly — no

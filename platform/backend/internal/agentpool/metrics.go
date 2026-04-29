@@ -202,11 +202,3 @@ func (m *Manager) recordEvent(instanceID, eventType, detail string) {
 	})
 }
 
-// purgeMetrics drops an instance's rings when it's hard-removed
-// from the pool (Manager.Purge). Leaving them behind would slowly
-// leak memory for operators who spawn+purge many test agents.
-func (m *Manager) purgeMetrics(instanceID string) {
-	m.mu.Lock()
-	delete(m.metrics, instanceID)
-	m.mu.Unlock()
-}

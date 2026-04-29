@@ -258,41 +258,6 @@ func (p prefixWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// ----- virtualHandle (no subprocess) ------------------------------------
-
-// virtualHandle is used when pool agents share the operator's local
-// opencode serve (port 4096) instead of spawning their own subprocess.
-// It always reports healthy immediately and never exits on its own.
-type virtualHandle struct {
-	port int
-}
-
-func (v *virtualHandle) PID() int { return -1 }
-
-func (v *virtualHandle) WaitHealthy(_ context.Context, _ time.Duration) bool {
-	// Check that the shared opencode serve is actually running.
-	client := &http.Client{Timeout: 2 * time.Second}
-	url := fmt.Sprintf("http://127.0.0.1:%d/global/health", v.port)
-	resp, err := client.Get(url)
-	if err != nil {
-		log.Printf("[Pool] virtual agent: opencode serve on port %d not reachable: %v", v.port, err)
-		return false
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == 200
-}
-
-func (v *virtualHandle) Wait() <-chan int {
-	ch := make(chan int, 1)
-	// Virtual agents never exit on their own; the channel stays
-	// open until Terminate is called.
-	return ch
-}
-
-func (v *virtualHandle) Terminate(_ time.Duration) {
-	// Nothing to terminate — no subprocess exists.
-}
-
 // defaultOpencodeCommand is what we exec when no override is
 // configured. Resolvable through PATH, matching how the user already
 // runs opencode from their shell. Operators with a custom binary

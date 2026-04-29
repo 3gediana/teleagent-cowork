@@ -87,9 +87,7 @@ func (r *SSEReader) Next() (*SSEEvent, error) {
 		value := line[idx+1:]
 		// Per spec, strip ONE leading space from the value; real
 		// providers always add exactly one.
-		if strings.HasPrefix(value, " ") {
-			value = value[1:]
-		}
+		value = strings.TrimPrefix(value, " ")
 
 		switch field {
 		case "event":

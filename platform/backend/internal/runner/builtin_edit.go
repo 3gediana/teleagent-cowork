@@ -301,7 +301,7 @@ func (EditTool) Execute(ctx context.Context, sess *RunnerSession, raw json.RawMe
 		updated = strings.Replace(content, in.OldText, in.NewText, 1)
 	}
 	if updated == content {
-		return fmt.Sprintf("Error: no-op edit (old_text and new_text produce identical file content)"), true, nil
+		return "Error: no-op edit (old_text and new_text produce identical file content)", true, nil
 	}
 	if err := writeAtomic(abs, []byte(updated)); err != nil {
 		return fmt.Sprintf("Error: write: %v", err), true, nil
