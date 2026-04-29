@@ -1,0 +1,81 @@
+name: check
+
+# Cheap-to-run quality gate. Triggers on every push and PR. The job
+# is intentionally split between Go and the TypeScript MCP client so
+# a failure in one surface produces a clear, isolated failure
+# annotation. Anything more elaborate (e2e, miniredis-against-real-
+# Redis, frontend visual diffs) lives in dedicated workflows that
+# can be tagged or scheduled separately.
+#
+# What's covered:
+#   * go vet ./...                       — language-level issues
+#   * go test -short -race -count=1 ./... — unit tests with race
+#                                           detector. -short skips
+#                                           a3c-tagged slow tests.
+#   * staticcheck ./...                  — SA/U/S checks (no
+#                                           experiments, no tests).
+#   * tsc --noEmit (client/mcp)          — typescript correctness.
+#
+# What's NOT covered (deliberately):
+#   * gofmt — golangci already enforces; running it twice doubles
+#     wall time and we already converged on tabs/idiomatic style.
+#   * frontend (platform/frontend) — vitest harness still being
+#     restructured; will be added once stable.
+#   * e2e binaries under platform/backend/experiments/* — those
+#     hit live providers and need API keys.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: platform/backend/go.sum
+
+      - name: vet
+        working-directory: platform/backend
+        run: go vet ./...
+
+      - name: test
+        working-directory: platform/backend
+        # -race catches the broadcast / pool concurrency that
+        # caused the directed-message-loss bug; cheap on Linux.
+        # -short skips integration tests that need real Redis/DB.
+        run: go test -short -race -count=1 ./...
+
+      - name: staticcheck
+        working-directory: platform/backend
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          # Skip experiments/* (offline smokes that pull in
+          # live-provider deps) and the test files. Anything that
+          # *ships* must be clean.
+          staticcheck $(go list ./... | grep -v '/experiments/')
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: client/mcp/package-lock.json
+
+      - name: install
+        working-directory: client/mcp
+        run: npm ci
+
+      - name: typecheck
+        working-directory: client/mcp
+        run: npx tsc --noEmit

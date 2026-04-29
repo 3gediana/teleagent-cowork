@@ -401,7 +401,7 @@ func (h *TaskHandler) Delete(c *gin.Context) {
 	now := time.Now()
 	task.Status = "deleted"
 	task.DeletedAt = &now
-	model.DB.Save(&task)
+	model.SaveOrLog(&task, "handler/task")
 
 	c.JSON(200, gin.H{
 		"success": true,

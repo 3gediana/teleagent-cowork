@@ -105,7 +105,7 @@ func (r *Refinery) RunWithID(runID, projectID string, lookbackHours int, trigger
 		if err := model.DB.Where("id = ?", runID).First(&existing).Error; err == nil {
 			existing.Status = "running"
 			existing.StartedAt = time.Now()
-			model.DB.Save(&existing)
+			model.SaveOrLog(&existing, "refinery/existing-artifact")
 			run = &existing
 		}
 	}
@@ -166,7 +166,7 @@ func (r *Refinery) RunWithID(runID, projectID string, lookbackHours int, trigger
 	if b, err := json.Marshal(allStats); err == nil {
 		run.PassStats = string(b)
 	}
-	model.DB.Save(run)
+	model.SaveOrLog(run, "refinery/run")
 
 	// Apply artifact lifecycle rules after all passes complete
 	promoted, deprecated, _ := PromoteAndDeprecateArtifacts(projectID)
@@ -175,7 +175,7 @@ func (r *Refinery) RunWithID(runID, projectID string, lookbackHours int, trigger
 		if b, err := json.Marshal(allStats); err == nil {
 			run.PassStats = string(b)
 		}
-		model.DB.Save(run)
+		model.SaveOrLog(run, "refinery/run")
 	}
 
 	return run, lastErr

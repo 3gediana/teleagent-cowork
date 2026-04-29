@@ -192,7 +192,7 @@ func (h *PRHandler) ApproveReview(c *gin.Context) {
 	}
 
 	pr.Status = "evaluating"
-	model.DB.Save(&pr)
+	model.SaveOrLog(&pr, "handler/pr")
 
 	// Broadcast evaluation started
 	service.BroadcastEvent(pr.ProjectID, "PR_EVALUATION_STARTED", map[string]interface{}{
@@ -240,12 +240,12 @@ func (h *PRHandler) ApproveMerge(c *gin.Context) {
 	}
 
 	pr.Status = "merging"
-	model.DB.Save(&pr)
+	model.SaveOrLog(&pr, "handler/pr")
 
 	// Execute merge
 	if err := service.ExecuteMerge(pr.BranchID); err != nil {
 		pr.Status = "merge_failed"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "handler/pr")
 
 		// Broadcast merge failed
 		service.BroadcastEvent(pr.ProjectID, "PR_MERGE_FAILED", map[string]interface{}{
@@ -262,7 +262,7 @@ func (h *PRHandler) ApproveMerge(c *gin.Context) {
 	now := time.Now()
 	pr.Status = "merged"
 	pr.MergedAt = &now
-	model.DB.Save(&pr)
+	model.SaveOrLog(&pr, "handler/pr")
 
 	// Determine version upgrade
 	var versionSuggestion string
@@ -280,7 +280,7 @@ func (h *PRHandler) ApproveMerge(c *gin.Context) {
 		if versionBlock != nil {
 			versionBlock.Content = newVersion
 			versionBlock.Version++
-			model.DB.Save(versionBlock)
+			model.SaveOrLog(versionBlock, "handler/pr-merge-version")
 		}
 		service.GitTagVersion(pr.ProjectID, newVersion)
 	} else {
@@ -328,7 +328,7 @@ func (h *PRHandler) Reject(c *gin.Context) {
 	}
 
 	pr.Status = "rejected"
-	model.DB.Save(&pr)
+	model.SaveOrLog(&pr, "handler/pr")
 
 	// Broadcast PR rejected
 	service.BroadcastEvent(pr.ProjectID, "PR_REJECTED", map[string]interface{}{

@@ -113,16 +113,16 @@ func (h *StatusHandler) Poll(c *gin.Context) {
 	// Optional body: { "acked_directed_ids": ["dir_xxx", ...] }
 	// MCP clients send this on subsequent polls so the platform can
 	// LREM messages they've successfully injected. Body is permitted
-	// to be empty (back-compat with older clients) — we only parse
-	// when there's a Content-Length, and we accept and ignore unknown
-	// fields. Bind errors are silently ignored: a malformed body must
-	// not break the heartbeat half of /poll.
+	// to be empty / absent / chunked (back-compat with older clients).
+	// We accept and ignore unknown fields; bind errors are swallowed
+	// because a malformed body must not break the heartbeat half of
+	// /poll. We deliberately do NOT gate on Content-Length: clients
+	// using chunked transfer-encoding (curl -T, fetch streams) have
+	// ContentLength=-1 and would otherwise silently lose their acks.
 	var pollReq struct {
 		AckedDirectedIDs []string `json:"acked_directed_ids"`
 	}
-	if c.Request.ContentLength > 0 {
-		_ = c.ShouldBindJSON(&pollReq)
-	}
+	_ = c.ShouldBindJSON(&pollReq)
 	if len(pollReq.AckedDirectedIDs) > 0 {
 		service.AckDirectedMessages(agentID, pollReq.AckedDirectedIDs)
 	}

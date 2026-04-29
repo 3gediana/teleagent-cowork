@@ -180,7 +180,7 @@ func approveChange(change *model.Change) error {
 		// Auto-complete task when change is approved
 		task.Status = "completed"
 		task.CompletedAt = &now
-		model.DB.Save(&task)
+		model.SaveOrLog(&task, "audit/task")
 		log.Printf("[Audit] Task %s auto-completed (change approved)", task.ID)
 	}
 
@@ -296,7 +296,7 @@ func ProcessAuditOutput(changeID string, result *AuditResult) error {
 				if task.Status == "claimed" && task.AssigneeID != nil && *task.AssigneeID == agentID {
 					task.Status = "pending"
 					task.AssigneeID = nil
-					model.DB.Save(&task)
+					model.SaveOrLog(&task, "audit/task")
 					log.Printf("[Audit] Task %s reset to pending: no heartbeat/resubmit for 10 minutes after rejection", task.ID)
 				}
 			}
@@ -360,7 +360,7 @@ func ProcessFixOutput(changeID string, result *FixResult) error {
 		now := time.Now()
 		change.ReviewedAt = &now
 		change.AuditReason = result.RejectReason
-		model.DB.Save(&change)
+		model.SaveOrLog(&change, "audit/change")
 
 		log.Printf("[Audit] Change %s rejected by fix agent", changeID)
 	}
@@ -384,7 +384,7 @@ func ProcessAudit2Output(changeID string, result *Audit2Result) error {
 	} else {
 		change.Status = "rejected"
 		change.AuditReason = result.RejectReason
-		model.DB.Save(&change)
+		model.SaveOrLog(&change, "audit/change")
 	}
 
 	log.Printf("[Audit] Change %s final decision: %s", changeID, result.Result)

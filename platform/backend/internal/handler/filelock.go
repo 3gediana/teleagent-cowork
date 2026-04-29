@@ -201,18 +201,18 @@ func (h *FileLockHandler) Release(c *gin.Context) {
 			if releasedInLock {
 				if len(remaining) == 0 {
 					locks[i].ReleasedAt = &now
-					model.DB.Save(&locks[i])
+					model.SaveOrLog(&locks[i], "filelock")
 				} else {
 					remainingJSON, _ := json.Marshal(remaining)
 					locks[i].Files = string(remainingJSON)
-					model.DB.Save(&locks[i])
+					model.SaveOrLog(&locks[i], "filelock")
 				}
 			}
 		}
 	} else {
 		for i := range locks {
 			locks[i].ReleasedAt = &now
-			model.DB.Save(&locks[i])
+			model.SaveOrLog(&locks[i], "filelock")
 			var lockFiles []string
 			json.Unmarshal([]byte(locks[i].Files), &lockFiles)
 			released = append(released, lockFiles...)
@@ -293,7 +293,7 @@ func (h *FileLockHandler) Renew(c *gin.Context) {
 	renewed := make([]gin.H, 0)
 	for i := range locks {
 		locks[i].ExpiresAt = expiresAt
-		model.DB.Save(&locks[i])
+		model.SaveOrLog(&locks[i], "filelock")
 		var files []string
 		json.Unmarshal([]byte(locks[i].Files), &files)
 		renewed = append(renewed, gin.H{

@@ -98,7 +98,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		}()
 	} else {
 		project.Status = "ready"
-		model.DB.Save(&project)
+		model.SaveOrLog(&project, "handler/project")
 	}
 
 	c.JSON(200, gin.H{
@@ -155,7 +155,7 @@ func (h *ProjectHandler) SetAutoMode(c *gin.Context) {
 	}
 
 	project.AutoMode = req.AutoMode
-	model.DB.Save(&project)
+	model.SaveOrLog(&project, "handler/project")
 
 	c.JSON(200, gin.H{
 		"success": true,

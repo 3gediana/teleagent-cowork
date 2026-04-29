@@ -240,7 +240,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 	case "approved":
 		// Tech review passed → trigger maintain agent for biz review
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 
 		// Trigger maintain agent for business evaluation
 		go func() {
@@ -251,7 +251,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 
 	case "needs_work":
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_NEEDS_WORK", map[string]interface{}{
 			"pr_id":  pr.ID,
 			"title":  pr.Title,
@@ -262,7 +262,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 		conflictFilesJSON, _ := json.Marshal(args["conflict_files"])
 		pr.ConflictFiles = string(conflictFilesJSON)
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_HAS_CONFLICTS", map[string]interface{}{
 			"pr_id":          pr.ID,
 			"title":          pr.Title,
@@ -271,7 +271,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 
 	case "high_risk":
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_HIGH_RISK", map[string]interface{}{
 			"pr_id":  pr.ID,
 			"title":  pr.Title,
@@ -282,7 +282,7 @@ func HandleEvaluateOutput(sessionID, projectID string, args map[string]interface
 		// Unknown result: treat as needs_work and flag for human review so PR
 		// doesn't silently get stuck at status=evaluated with no downstream action.
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_NEEDS_WORK", map[string]interface{}{
 			"pr_id":  pr.ID,
 			"title":  pr.Title,
@@ -329,7 +329,7 @@ func HandleMergeOutput(sessionID, projectID string, args map[string]interface{})
 		now := time.Now()
 		pr.Status = "merged"
 		pr.MergedAt = &now
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 
 		BroadcastEvent(projectID, "PR_MERGED", map[string]interface{}{
 			"pr_id": pr.ID,
@@ -338,7 +338,7 @@ func HandleMergeOutput(sessionID, projectID string, args map[string]interface{})
 
 	case "failed":
 		pr.Status = "merge_failed"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 
 		BroadcastEvent(projectID, "PR_MERGE_FAILED", map[string]interface{}{
 			"pr_id":  pr.ID,
@@ -391,7 +391,7 @@ func HandleBizReviewOutput(sessionID, projectID string, args map[string]interfac
 	switch result {
 	case "approved":
 		pr.Status = "pending_human_merge"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_BIZ_APPROVED", map[string]interface{}{
 			"pr_id":             pr.ID,
 			"title":             pr.Title,
@@ -400,7 +400,7 @@ func HandleBizReviewOutput(sessionID, projectID string, args map[string]interfac
 
 	case "rejected":
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_BIZ_REJECTED", map[string]interface{}{
 			"pr_id":  pr.ID,
 			"title":  pr.Title,
@@ -409,7 +409,7 @@ func HandleBizReviewOutput(sessionID, projectID string, args map[string]interfac
 
 	case "needs_changes":
 		pr.Status = "evaluated"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "pr_agent")
 		BroadcastEvent(projectID, "PR_NEEDS_CHANGES", map[string]interface{}{
 			"pr_id":  pr.ID,
 			"title":  pr.Title,

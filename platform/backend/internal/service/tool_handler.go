@@ -457,7 +457,7 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 			return fmt.Errorf("PR %s is not pending_human_review (status=%s)", prID, pr.Status)
 		}
 		pr.Status = "evaluating"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "tool_handler/pr")
 		log.Printf("[Chief] Approved review for PR %s: %s", prID, reason)
 
 		go func() {
@@ -471,12 +471,12 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 			return fmt.Errorf("PR %s is not pending_human_merge (status=%s)", prID, pr.Status)
 		}
 		pr.Status = "merging"
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "tool_handler/pr")
 		log.Printf("[Chief] Approved merge for PR %s: %s", prID, reason)
 
 		if err := ExecuteMerge(pr.BranchID); err != nil {
 			pr.Status = "merge_failed"
-			model.DB.Save(&pr)
+			model.SaveOrLog(&pr, "tool_handler/pr")
 			BroadcastEvent(projectID, "PR_MERGE_FAILED", map[string]interface{}{
 				"pr_id":  pr.ID,
 				"title":  pr.Title,
@@ -488,7 +488,7 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 		now := time.Now()
 		pr.Status = "merged"
 		pr.MergedAt = &now
-		model.DB.Save(&pr)
+		model.SaveOrLog(&pr, "tool_handler/pr")
 
 		// Honor the version_suggestion from biz review before falling back to
 		// auto-increment. Previously the Chief path always minor-incremented
@@ -499,7 +499,7 @@ func handleApprovePR(projectID string, args map[string]interface{}) error {
 			if vb, _ := repo.GetContentBlock(pr.ProjectID, "version"); vb != nil {
 				vb.Content = newVersion
 				vb.Version++
-				model.DB.Save(vb)
+				model.SaveOrLog(vb, "tool_handler/version-block")
 			}
 			GitTagVersion(pr.ProjectID, newVersion)
 		} else {
@@ -534,7 +534,7 @@ func handleRejectPR(projectID string, args map[string]interface{}) error {
 	}
 
 	pr.Status = "rejected"
-	model.DB.Save(&pr)
+	model.SaveOrLog(&pr, "tool_handler/pr")
 	log.Printf("[Chief] Rejected PR %s: %s", prID, reason)
 
 	BroadcastEvent(projectID, "PR_REJECTED", map[string]interface{}{
@@ -559,7 +559,7 @@ func handleSwitchMilestone(projectID string, args map[string]interface{}) error 
 		now := time.Now()
 		current.Status = "completed"
 		current.CompletedAt = &now
-		model.DB.Save(&current)
+		model.SaveOrLog(&current, "tool_handler/milestone-current")
 		log.Printf("[Chief] Completed milestone %s", current.ID)
 	}
 
@@ -569,7 +569,7 @@ func handleSwitchMilestone(projectID string, args map[string]interface{}) error 
 		return fmt.Errorf("milestone not found: %s", milestoneID)
 	}
 	target.Status = "in_progress"
-	model.DB.Save(&target)
+	model.SaveOrLog(&target, "tool_handler/milestone-target")
 	log.Printf("[Chief] Switched to milestone %s: %s", milestoneID, reason)
 
 	return nil

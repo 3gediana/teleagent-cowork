@@ -340,7 +340,7 @@ func (h *DashboardHandler) Confirm(c *gin.Context) {
 	} else {
 		cb.Content = input.Content
 		cb.Version++
-		model.DB.Save(&cb)
+		model.SaveOrLog(&cb, "handler/dashboard-confirm")
 	}
 
 	deletePendingInput(req.InputID)

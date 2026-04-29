@@ -58,7 +58,7 @@ func (h *RollbackHandler) Rollback(c *gin.Context) {
 	if versionBlock != nil {
 		versionBlock.Content = targetVersion
 		versionBlock.Version++
-		model.DB.Save(versionBlock)
+		model.SaveOrLog(versionBlock, "handler/rollback-version-block")
 	}
 
 	service.BroadcastEvent(projectID, "VERSION_ROLLBACK", gin.H{

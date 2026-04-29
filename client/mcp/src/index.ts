@@ -500,10 +500,17 @@ async function main() {
   // doesn't grow forever. The platform-side TTL (10 min) is the
   // ultimate safety net.
   const MAX_INJECT_ATTEMPTS = 5
+  // Hard upper bound on how long an entry can sit in the pending Map.
+  // The platform-side queue TTL is 10 min, so any messageID we still
+  // hold after 30 min is guaranteed to never get LREM'd (the server
+  // already dropped it). Keeping it would just leak memory; emit a
+  // warning and drop it locally too.
+  const PENDING_MAX_AGE_MS = 30 * 60 * 1000
   type PendingEntry = {
     msg: any
     attempts: number
     status: 'inflight' | 'awaiting_ack'
+    enqueuedAt: number  // Date.now() when first added; used for TTL eviction
   }
   const pending = new Map<string, PendingEntry>()
   let pendingNoIdCounter = 0
@@ -546,6 +553,8 @@ async function main() {
   poller.setBroadcastHandler(async (messages) => {
     console.error('[Broadcast] Received %d messages (pending=%d)', messages.length, pending.size)
 
+    const now = Date.now()
+
     // 1. Add fresh messages to the pending map. Skip dupes — they
     //    may already be 'awaiting_ack' (server LREM not yet applied)
     //    or 'inflight' (we got them again because last cycle's inject
@@ -553,8 +562,28 @@ async function main() {
     for (const msg of messages) {
       const id = extractMsgId(msg)
       if (!pending.has(id)) {
-        pending.set(id, { msg, attempts: 0, status: 'inflight' })
+        pending.set(id, { msg, attempts: 0, status: 'inflight', enqueuedAt: now })
       }
+    }
+
+    // 1b. TTL sweep: drop any entry older than PENDING_MAX_AGE_MS.
+    //     Server-side TTL is 10 min, so anything still here at 30 min
+    //     can no longer be acked anyway — keeping it just leaks memory.
+    //     We log so operators can see if this fires regularly (which
+    //     would indicate a real downstream problem).
+    let evicted = 0
+    for (const [id, entry] of pending) {
+      if (now - entry.enqueuedAt > PENDING_MAX_AGE_MS) {
+        const eventType = entry.msg?.header?.type || entry.msg?.header?.Type || 'unknown'
+        console.error('[Broadcast] TTL eviction: %s (id=%s, status=%s, attempts=%d, age=%dmin)',
+          eventType, id, entry.status, entry.attempts,
+          Math.floor((now - entry.enqueuedAt) / 60_000))
+        pending.delete(id)
+        evicted++
+      }
+    }
+    if (evicted > 0) {
+      console.error('[Broadcast] Evicted %d stuck entries (>%dmin old)', evicted, PENDING_MAX_AGE_MS / 60_000)
     }
 
     // 2. Drain pending. Any 'inflight' entry gets one inject attempt.

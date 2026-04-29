@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/a3c/platform/internal/llm"
@@ -81,7 +82,16 @@ var DefaultCompactionPolicy = CompactionPolicy{
 // already-stripped entries.
 type CompactionState struct {
 	consecutiveFailures int
-	microCompactedIDs   map[string]bool
+	// lastFailureAt is set whenever consecutiveFailures is bumped.
+	// Used by maybeCompact to auto-recover the breaker after a
+	// cooldown — a transient blip (provider rate limit, network
+	// hiccup, malformed response) shouldn't disable compaction
+	// for the rest of the session lifetime. After
+	// circuitBreakerCooldown elapsed since the last bump, we reset
+	// the streak to 0 and let the next call try summarize again.
+	lastFailureAt time.Time
+
+	microCompactedIDs map[string]bool
 
 	// lastTerminalToolTurnIx: index of the assistant turn that emitted
 	// a terminal output tool (audit_output, chief_output, ...). Set
@@ -99,6 +109,66 @@ type CompactionState struct {
 	// session. Operator telemetry + guard against pathological
 	// clear-every-turn loops.
 	clearsFired int
+}
+
+// circuitBreakerCooldown is how long the breaker stays open after the
+// last failure. Picked at 5min so we recover faster than a session's
+// 15-min wall-clock timeout but still well past a typical provider
+// rate-limit window.
+const circuitBreakerCooldown = 5 * time.Minute
+
+// Compaction-level operator metrics. The fields are read via
+// CompactionMetricsSnapshot (no setter exposed; only maybeCompact
+// mutates them). /metrics endpoint reads this for visibility.
+//
+// We use sync/atomic so /metrics can read without taking a
+// lock that would contend with the Loop. Counters are monotonic
+// for the lifetime of the process.
+var (
+	compactionTrips        atomic.Int64
+	compactionFailures     atomic.Int64
+	compactionSuccess      atomic.Int64
+	compactionMicroSuccess atomic.Int64
+	compactionAutoRecover  atomic.Int64
+)
+
+// CompactionMetricsSnapshot is what /metrics reads. Snapshot is
+// trivially atomic — each field reads independently — but values
+// taken in the same call may correspond to slightly different points
+// in time. That's fine: this is operator-grade telemetry, not
+// audit-grade.
+type CompactionMetricsSnapshot struct {
+	// CircuitBreakerTrips counts the number of times a session's
+	// breaker tripped (i.e., the moment consecutiveFailures crossed
+	// MaxConsecutiveFailures). Each trip = one session whose
+	// compaction was disabled until cooldown.
+	CircuitBreakerTrips int64
+	// SummarizeFailures counts every summarize() error, including
+	// failures that didn't yet trip the breaker. Diff against
+	// CircuitBreakerTrips to see how often the streak resets cleanly.
+	SummarizeFailures int64
+	// SummarizeSuccess counts every successful tier-2 summarize.
+	SummarizeSuccess int64
+	// MicrocompactSuccess counts tier-1 strips that brought tokens
+	// below the threshold without needing summarize.
+	MicrocompactSuccess int64
+	// AutoRecover counts how many times the breaker self-healed
+	// after circuitBreakerCooldown. High value = transient
+	// upstream issue; low value with high Trips = persistent
+	// summarize failure (operator should investigate).
+	AutoRecover int64
+}
+
+// CompactionMetrics returns the current snapshot. Safe to call from
+// any goroutine.
+func CompactionMetrics() CompactionMetricsSnapshot {
+	return CompactionMetricsSnapshot{
+		CircuitBreakerTrips: compactionTrips.Load(),
+		SummarizeFailures:   compactionFailures.Load(),
+		SummarizeSuccess:    compactionSuccess.Load(),
+		MicrocompactSuccess: compactionMicroSuccess.Load(),
+		AutoRecover:         compactionAutoRecover.Load(),
+	}
 }
 
 func newCompactionState() *CompactionState {
@@ -129,8 +199,22 @@ func maybeCompact(
 	if pol.ContextWindow == 0 {
 		return messages, CompactionOutcome{Action: "disabled"}
 	}
+	// Circuit breaker with auto-recover. Used to be unconditional —
+	// once consecutiveFailures crossed the threshold, the session
+	// silently grew its context for the rest of its life. Now we
+	// give the breaker a cooldown: if the last failure was long
+	// enough ago that the upstream is plausibly healthy again,
+	// reset the streak and try once more. The next failure will
+	// re-trip immediately, so we don't risk runaway retries.
 	if cs.consecutiveFailures >= pol.MaxConsecutiveFailures {
-		return messages, CompactionOutcome{Action: "circuit-broken"}
+		if !cs.lastFailureAt.IsZero() && time.Since(cs.lastFailureAt) > circuitBreakerCooldown {
+			log.Printf("[Compaction] breaker auto-recovering after %v cooldown", time.Since(cs.lastFailureAt).Round(time.Second))
+			cs.consecutiveFailures = 0
+			compactionAutoRecover.Add(1)
+			// Fall through to a real compaction attempt.
+		} else {
+			return messages, CompactionOutcome{Action: "circuit-broken"}
+		}
 	}
 	threshold := autoCompactThreshold(pol)
 	// Use the larger of measured-tokens or a conservative estimate;
@@ -150,6 +234,7 @@ func maybeCompact(
 		newEst := estimateMessageTokens(micro)
 		if newEst < threshold {
 			cs.consecutiveFailures = 0
+			compactionMicroSuccess.Add(1)
 			return micro, CompactionOutcome{
 				Action: "microcompact",
 				Tokens: newEst,
@@ -165,11 +250,22 @@ func maybeCompact(
 	summary, summErr := summarizeConversation(ctx, endpointID, model, messages, pol.ReserveForSummary)
 	if summErr != nil {
 		cs.consecutiveFailures++
+		cs.lastFailureAt = time.Now()
+		compactionFailures.Add(1)
+		// Did this bump just trip the breaker? Count it once per
+		// transition so we can tell apart "many failures, one trip"
+		// from "many sessions, many trips".
+		if cs.consecutiveFailures == pol.MaxConsecutiveFailures {
+			compactionTrips.Add(1)
+			log.Printf("[Compaction] circuit-breaker TRIPPED for this session after %d failures; will auto-recover after %v cooldown",
+				cs.consecutiveFailures, circuitBreakerCooldown)
+		}
 		log.Printf("[Compaction] summarize failed (streak=%d): %v",
 			cs.consecutiveFailures, summErr)
 		return messages, CompactionOutcome{Action: "summarize-failed", Error: summErr.Error()}
 	}
 	cs.consecutiveFailures = 0
+	compactionSuccess.Add(1)
 	replaced := replaceWithSummary(messages, summary)
 	return replaced, CompactionOutcome{
 		Action:    "summarized",

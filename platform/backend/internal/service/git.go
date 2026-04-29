@@ -179,7 +179,7 @@ func IncrementVersion(projectID string) (string, error) {
 	if versionBlock != nil {
 		versionBlock.Content = newVersion
 		versionBlock.Version++
-		model.DB.Save(versionBlock)
+		model.SaveOrLog(versionBlock, "git/version-block")
 	} else {
 		vb := model.ContentBlock{
 			ID:        model.GenerateID("cb"),
@@ -244,7 +244,7 @@ func SwitchMilestoneVersion(projectID string) (string, error) {
 	if versionBlock != nil {
 		versionBlock.Content = newVersion
 		versionBlock.Version++
-		model.DB.Save(versionBlock)
+		model.SaveOrLog(versionBlock, "git/version-block")
 	} else {
 		vb := model.ContentBlock{
 			ID:        model.GenerateID("cb"),

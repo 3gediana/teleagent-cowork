@@ -90,7 +90,7 @@ func (h *MilestoneHandler) Switch(c *gin.Context) {
 
 	currentMilestone.Status = "completed"
 	currentMilestone.CompletedAt = &now
-	model.DB.Save(currentMilestone)
+	model.SaveOrLog(currentMilestone, "handler/milestone-switch-current")
 
 	for _, t := range tasks {
 		model.DB.Delete(&t)
@@ -100,7 +100,7 @@ func (h *MilestoneHandler) Switch(c *gin.Context) {
 	model.DB.Where("project_id = ? AND released_at IS NULL", projectID).Find(&locks)
 	for i := range locks {
 		locks[i].ReleasedAt = &now
-		model.DB.Save(&locks[i])
+		model.SaveOrLog(&locks[i], "handler/milestone-switch-lock")
 	}
 
 	newVersion, _ := service.SwitchMilestoneVersion(projectID)

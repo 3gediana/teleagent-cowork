@@ -39,31 +39,64 @@ export class Poller {
     this.onAcksConfirmed = fn
   }
 
-  async start() {
-    if (this.running) return
-    this.running = true
-    this.parentPid = process.ppid
+  // Backoff state. The poller used to fire every 5s no matter what,
+  // which meant a platform outage caused 12 errors per minute in the
+  // operator's stderr — drowning out anything actionable. Now: stay
+  // at the configured base interval while polls succeed; on each
+  // consecutive failure double the delay (capped at 60s); reset to
+  // base on the next success. Heartbeat and alive-check intervals
+  // run independently and are NOT subject to backoff (they're cheap
+  // and matter for liveness detection on the platform side).
+  private static readonly BASE_POLL_MS = 5_000
+  private static readonly MAX_POLL_MS = 60_000
+  private currentPollDelay = Poller.BASE_POLL_MS
+  private consecutivePollFailures = 0
 
-    this.pollInterval = setInterval(async () => {
+  private scheduleNextPoll() {
+    if (!this.running) return
+    this.pollInterval = setTimeout(async () => {
       const acks = this.ackProvider ? this.ackProvider() : []
       try {
         const data = await this.api.poll(acks)
-        // Acks were durably accepted by the server: notify the
-        // broadcast handler so it clears matching entries from its
-        // pending map. Done before broadcasting so the handler sees
-        // the cleanest state when processing fresh inbound messages.
+        // Success path: acks were durably accepted by the server,
+        // notify broadcast handler so it clears matching entries.
+        // Done before broadcasting so the handler sees the cleanest
+        // state when processing fresh inbound messages.
         if (acks.length > 0 && this.onAcksConfirmed) {
           this.onAcksConfirmed(acks)
         }
         if (data?.data?.messages?.length > 0 && this.onBroadcast) {
           this.onBroadcast(data.data.messages)
         }
+        if (this.consecutivePollFailures > 0) {
+          console.error('[Poller] Recovered after %d failures; resetting interval to %dms',
+            this.consecutivePollFailures, Poller.BASE_POLL_MS)
+        }
+        this.consecutivePollFailures = 0
+        this.currentPollDelay = Poller.BASE_POLL_MS
       } catch (e) {
-        console.error('[Poller] Poll error:', e)
-        // acks remain in the provider's queue and will be retried
-        // on the next tick; no manual rollback needed here.
+        this.consecutivePollFailures++
+        // Exponential backoff: 5s → 10s → 20s → 40s → 60s (capped).
+        // Acks remain queued in the provider for the next attempt.
+        this.currentPollDelay = Math.min(this.currentPollDelay * 2, Poller.MAX_POLL_MS)
+        // Throttle the noise: log full error every 10 consecutive
+        // failures, otherwise just emit a brief notice.
+        if (this.consecutivePollFailures === 1 || this.consecutivePollFailures % 10 === 0) {
+          console.error('[Poller] Poll error (failure #%d, next retry in %ds):',
+            this.consecutivePollFailures, Math.floor(this.currentPollDelay / 1000), e)
+        }
+      } finally {
+        this.scheduleNextPoll()
       }
-    }, 5000)
+    }, this.currentPollDelay) as unknown as NodeJS.Timeout
+  }
+
+  async start() {
+    if (this.running) return
+    this.running = true
+    this.parentPid = process.ppid
+
+    this.scheduleNextPoll()
 
     // Heartbeat slightly before the server's 5-minute timeout window to
     // tolerate network jitter. Also renews active filelocks so long-running

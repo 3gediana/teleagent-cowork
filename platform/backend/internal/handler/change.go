@@ -548,7 +548,7 @@ func (h *ChangeHandler) ApproveForReview(c *gin.Context) {
 
 	// Update status to pending and start audit
 	change.Status = "pending"
-	model.DB.Save(&change)
+	model.SaveOrLog(&change, "handler/change-approve-for-review")
 
 	go func() {
 		result, err := service.StartAuditWorkflowAndWait(change.ID, 120*time.Second)

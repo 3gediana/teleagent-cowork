@@ -150,7 +150,7 @@ func EnterBranch(branchID, agentID string) error {
 	now := time.Now()
 	branch.OccupantID = &agentID
 	branch.LastActiveAt = &now
-	model.DB.Save(&branch)
+	model.SaveOrLog(&branch, "branch")
 
 	// Update agent's current branch
 	model.DB.Model(&model.Agent{}).Where("id = ?", agentID).Update("current_branch_id", branchID)
@@ -220,7 +220,7 @@ func CloseBranch(branchID string) error {
 	branch.Status = "closed"
 	branch.ClosedAt = &now
 	branch.OccupantID = nil
-	model.DB.Save(&branch)
+	model.SaveOrLog(&branch, "branch")
 
 	log.Printf("[Branch] Closed branch %s (%s)", branch.Name, branchID)
 	return nil
@@ -256,12 +256,12 @@ func SyncMain(branchID string) ([]string, error) {
 	versionBlock, _ := repo.GetContentBlock(branch.ProjectID, "version")
 	if versionBlock != nil {
 		branch.BaseVersion = versionBlock.Content
-		model.DB.Save(&branch)
+		model.SaveOrLog(&branch, "branch")
 	}
 
 	now := time.Now()
 	branch.LastActiveAt = &now
-	model.DB.Save(&branch)
+	model.SaveOrLog(&branch, "branch")
 
 	log.Printf("[Branch] Synced main into branch %s (%s)", branch.Name, branchID)
 	return nil, nil
@@ -411,7 +411,7 @@ func ExecuteMerge(branchID string) error {
 	branch.Status = "merged"
 	branch.MergedAt = &now
 	branch.OccupantID = nil
-	model.DB.Save(&branch)
+	model.SaveOrLog(&branch, "branch")
 
 	// Remove worktree
 	branchRepoPath := getBranchRepoPath(branch.ProjectID, branchID)

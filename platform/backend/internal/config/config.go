@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,4 +155,153 @@ func Load(path string) *Config {
 // don't bootstrap through main.go). Callers must nil-check.
 func Get() *Config {
 	return loaded
+}
+
+// Validate sanity-checks the loaded config and returns the first
+// problem. Run immediately after Load() in main(); fail-fast on
+// error. Catches typos (port=0, empty host, blank DataDir) that
+// would otherwise crash much later with an opaque message.
+// Optional fields (LLM creds, opencode URL, git repo) are NOT
+// validated here — they get checked at use-time with surfaceable
+// errors. The point of this is to catch wiring mistakes at boot.
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil (Load returned no config?)")
+	}
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port=%d out of range [1, 65535]", c.Server.Port)
+	}
+	if c.Server.Mode == "" {
+		return fmt.Errorf("server.mode is empty (expected 'release', 'test', or 'debug')")
+	}
+	if c.Database.Host == "" {
+		return fmt.Errorf("database.host is empty")
+	}
+	if c.Database.DBName == "" {
+		return fmt.Errorf("database.dbname is empty")
+	}
+	if c.Database.Port < 1 || c.Database.Port > 65535 {
+		return fmt.Errorf("database.port=%d out of range [1, 65535]", c.Database.Port)
+	}
+	if c.Redis.Host == "" {
+		return fmt.Errorf("redis.host is empty")
+	}
+	if c.Redis.Port < 1 || c.Redis.Port > 65535 {
+		return fmt.Errorf("redis.port=%d out of range [1, 65535]", c.Redis.Port)
+	}
+	if c.DataDir == "" {
+		return fmt.Errorf("data_dir is empty (must point to a writable directory)")
+	}
+	return nil
+}
+
+// recognisedEnvVars lists every A3C_/OPENCODE_ env var the backend
+// actually reads. Kept in code so LogEffective can iterate it and
+// operators see at boot what knobs exist without grepping source.
+// Add a row when you add a new os.Getenv call. (Test-only flags
+// like A3C_RUN_E2E_TESTS are intentionally omitted from the boot
+// log to keep production output focused.)
+var recognisedEnvVars = []struct {
+	Name string
+	Help string
+}{
+	{"A3C_AUTOPILOT", "1/true/yes/on enables agent pool + auto-audit (default off)"},
+	{"A3C_OPENCODE_CMD", "override path to opencode binary for pool spawner"},
+	{"A3C_OPENCODE_ARGS", "extra args for spawned opencode subprocesses"},
+	{"A3C_EMBEDDER_URL", "bge-base-zh-v1.5 sidecar URL (default http://127.0.0.1:8081)"},
+	{"A3C_RETENTION_DAYS", "tool_call_trace / dialogue_message retention in days (default 90)"},
+}
+
+// redactCreds returns "(set)" for non-empty values and "(empty)" for
+// blanks, hiding the actual secret. Used by LogEffective so we can
+// confirm at boot which providers have credentials loaded WITHOUT
+// echoing them to disk / journald / wherever stdout goes.
+func redactCreds(v string) string {
+	if v == "" {
+		return "(empty)"
+	}
+	return "(set)"
+}
+
+// LogEffective writes the loaded config + every recognised env var
+// to the standard logger, with secrets redacted. Call from main()
+// right after Validate() so operators see exactly what booted —
+// the most common confusion is "which provider creds are loaded
+// but blank?", which this answers in one log line.
+func (c *Config) LogEffective() {
+	if c == nil {
+		return
+	}
+	log.Printf("[Config] server: port=%d mode=%s", c.Server.Port, c.Server.Mode)
+	log.Printf("[Config] database: host=%s port=%d user=%s dbname=%s password=%s",
+		c.Database.Host, c.Database.Port, c.Database.User, c.Database.DBName, redactCreds(c.Database.Password))
+	log.Printf("[Config] redis: host=%s port=%d db=%d prefix=%q password=%s",
+		c.Redis.Host, c.Redis.Port, c.Redis.DB, c.Redis.Prefix, redactCreds(c.Redis.Password))
+	log.Printf("[Config] data_dir: %s", c.DataDir)
+	if c.Git.RepoPath != "" {
+		log.Printf("[Config] git.repo_path: %s", c.Git.RepoPath)
+	}
+	log.Printf("[Config] opencode: serve_url=%s default_provider=%s default_model=%s",
+		c.OpenCode.ServeURL, c.OpenCode.DefaultModelProvider, c.OpenCode.DefaultModelID)
+
+	// LLM provider bootstrap creds. Steady-state these come from the
+	// llm_endpoint DB table (operator registers via the dashboard);
+	// these YAML slots only matter for the offline smoke harness and
+	// for first-boot seeding. Surface the load state regardless so
+	// operators can see "minimax key set, openai blank" at a glance.
+	log.Printf("[Config] llm.minimax: api_key=%s base_url=%s",
+		redactCreds(c.LLM.MiniMax.APIKey), c.LLM.MiniMax.BaseURL)
+	log.Printf("[Config] llm.openai: api_key=%s base_url=%s",
+		redactCreds(c.LLM.OpenAI.APIKey), c.LLM.OpenAI.BaseURL)
+	log.Printf("[Config] llm.anthropic: api_key=%s base_url=%s",
+		redactCreds(c.LLM.Anthropic.APIKey), c.LLM.Anthropic.BaseURL)
+	log.Printf("[Config] llm.deepseek: api_key=%s base_url=%s",
+		redactCreds(c.LLM.DeepSeek.APIKey), c.LLM.DeepSeek.BaseURL)
+
+	// Recognised env vars: show "set" / "unset" + a one-line help.
+	// Don't dump the value (could contain a token / path with PII).
+	log.Printf("[Config] env vars (set/unset):")
+	for _, e := range recognisedEnvVars {
+		v := strings.TrimSpace(os.Getenv(e.Name))
+		state := "unset"
+		if v != "" {
+			state = "set"
+			// Truthy/numeric flags are safe to display verbatim, so
+			// operators can confirm "did A3C_AUTOPILOT actually take?".
+			// Anything that LOOKS like a secret stays redacted.
+			if isNonSecretValue(e.Name, v) {
+				state = "set=" + v
+			}
+		}
+		log.Printf("[Config]   %s [%s] — %s", e.Name, state, e.Help)
+	}
+}
+
+// isNonSecretValue reports whether the env var's literal value is
+// safe to log. Names containing KEY/TOKEN/PASSWORD/SECRET are always
+// redacted; the rest are safe (boolean toggles, paths, URLs without
+// embedded creds). Conservative: anything we're unsure about stays
+// hidden.
+func isNonSecretValue(name, value string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"KEY", "TOKEN", "PASSWORD", "SECRET", "CRED"} {
+		if strings.Contains(upper, marker) {
+			return false
+		}
+	}
+	// URLs with embedded basic-auth: redact if "user:pass@" pattern is
+	// in there. (Operators occasionally inline creds into A3C_EMBEDDER_URL.)
+	if strings.Contains(value, "@") && (strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) {
+		// crude heuristic — if there's a colon before the @ in the
+		// authority section, treat as basic-auth and redact.
+		schemeEnd := strings.Index(value, "://")
+		if schemeEnd > 0 {
+			rest := value[schemeEnd+3:]
+			at := strings.Index(rest, "@")
+			if at > 0 && strings.Contains(rest[:at], ":") {
+				return false
+			}
+		}
+	}
+	return true
 }

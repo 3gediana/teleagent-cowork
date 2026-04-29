@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +27,13 @@ import (
 
 func main() {
 	cfg := config.Load("")
-	log.Printf("Config loaded: DataDir=%s", cfg.DataDir)
+	if err := cfg.Validate(); err != nil {
+		// Fail-fast on config typos. Without this, the platform would
+		// crash much later with an opaque "DSN parse failed" or "redis:
+		// can't dial localhost:0" message far from the actual cause.
+		log.Fatalf("[Config] validation failed: %v", err)
+	}
+	cfg.LogEffective()
 
 	if err := model.InitDB(&cfg.Database); err != nil {
 		log.Fatalf("Database init failed: %v", err)
@@ -73,6 +83,11 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// /metrics is open (no auth) by Prometheus convention. Operator
+	// firewall is the gate. Only exposes operational counters/gauges
+	// (no PII, no per-project user data) — see metricsHandler.Prometheus.
+	r.GET("/metrics", handler.NewMetricsHandler().Prometheus)
 
 	v1 := r.Group("/api/v1")
 
@@ -204,11 +219,22 @@ func main() {
 		auth.POST("/filelock/renew", lockHandler.Renew)
 		auth.POST("/filelock/check", lockHandler.Check)
 
-		auth.POST("/change/submit", changeHandler.Submit)
+		// /change/submit is the most expensive write path because in
+		// autopilot mode it spawns the full audit_1 → fix → audit_2
+		// LLM chain. In collaboration-hub mode it just persists the
+		// change; either way capping the per-agent burst is cheap
+		// insurance. Tuning: 1 rps + burst 5 — a normal commit-loop
+		// shouldn't touch this; an attacker with a hot key gets
+		// boxed at ~60 attempts per minute.
+		auth.POST("/change/submit",
+			middleware.AgentRateLimit("change", 1, 5),
+			changeHandler.Submit)
 		auth.GET("/change/list", changeHandler.List)
 		auth.GET("/change/status", changeHandler.Status)
 		auth.POST("/change/review", changeHandler.Review)
-		auth.POST("/change/approve_for_review", changeHandler.ApproveForReview)
+		auth.POST("/change/approve_for_review",
+			middleware.AgentRateLimit("change_approve", 0.5, 3),
+			changeHandler.ApproveForReview)
 
 		auth.POST("/file/sync", fileSyncHandler.Sync)
 
@@ -253,8 +279,16 @@ func main() {
 		auth.POST("/pr/approve_merge", prHandler.ApproveMerge)
 		auth.POST("/pr/reject", prHandler.Reject)
 
-		// Chief Agent APIs
-		auth.POST("/chief/chat", chiefHandler.Chat)
+		// Chief Agent APIs.
+		// /chief/chat is gated by a per-agent rate limit because it
+		// spawns LLM work — a misbehaving MCP client (or stolen
+		// access_key) used to be able to hammer this and rack up cost.
+		// Read-only routes (sessions/traces/policies) stay unmetered.
+		// Tuning: 0.2 rps ≈ 1 chat per 5s, burst=3 covers a normal
+		// "type → retry → resend" UX without throttling humans.
+		auth.POST("/chief/chat",
+			middleware.AgentRateLimit("chief", 0.2, 3),
+			chiefHandler.Chat)
 		auth.GET("/chief/sessions", chiefHandler.Sessions)
 		auth.GET("/chief/traces", chiefHandler.ToolTraces)
 		auth.GET("/chief/policies", chiefHandler.Policies)
@@ -274,7 +308,13 @@ func main() {
 		auth.POST("/policy/:id/deactivate", policyHandler.Deactivate)
 
 		// Refinery pipeline (M1): multi-pass knowledge distillation.
-		auth.POST("/refinery/run", refineryHandler.Run)
+		// /refinery/run is the only LLM-spawning entry; the rest are
+		// metadata reads. Tuning: 0.05 rps ≈ 1 every 20s, burst=2 —
+		// generous for the dashboard "Run Refinery" button but blocks
+		// any client that tries to chain triggers.
+		auth.POST("/refinery/run",
+			middleware.AgentRateLimit("refinery", 0.05, 2),
+			refineryHandler.Run)
 		auth.GET("/refinery/runs", refineryHandler.Runs)
 		auth.GET("/refinery/artifacts", refineryHandler.Artifacts)
 		auth.GET("/refinery/growth", refineryHandler.Growth)
@@ -332,6 +372,11 @@ func main() {
 	service.StartAnalyzeTimer()
 	service.StartRefineryTimer()
 	service.StartTaskEmbeddingBackfillTimer()
+	// Retention worker prunes tool_call_trace + dialogue_message rows
+	// older than A3C_RETENTION_DAYS (default 90). High-volume volatile
+	// tables that grow unbounded otherwise. Long-term signal lives in
+	// KnowledgeArtifact (Refinery output) which is NOT pruned.
+	service.StartRetentionTimer()
 	// Task dispatcher is the matcher that pulls pending tasks from
 	// the DB and pushes TASK_ASSIGN broadcasts to idle pool agents.
 	// It only ever assigns to is_platform_hosted=true agents
@@ -345,7 +390,95 @@ func main() {
 		log.Printf("[Dispatcher] Task dispatcher NOT started (autopilot=off)")
 	}
 
-	if err := r.Run(addr); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	// Graceful shutdown.
+	//
+	// Before this, main ended with `r.Run(addr)` which blocks until
+	// SIGKILL. That meant:
+	//   * pool subprocesses (opencode serves) became orphans on
+	//     parent exit, sometimes wedging their listening ports
+	//     until manually killed,
+	//   * in-flight LLM calls / audit pipelines got their goroutines
+	//     yanked mid-write, which left agent_sessions stuck in
+	//     `running` forever (only the heartbeat checker eventually
+	//     reset them, after a 7-minute lag),
+	//   * the operator's tmux logs ended on a SIGINT line with no
+	//     "shutting down" trace, making "did the platform stop
+	//     cleanly?" a guessing game.
+	//
+	// Shutdown order matters:
+	//   1. Stop the HTTP server first (Server.Shutdown drains
+	//      in-flight requests, refuses new connections). This is
+	//      what bounds shutdown by the configured timeout.
+	//   2. Cancel the long-running pool background loops so they
+	//      don't race with us tearing down their dependencies. The
+	//      context cancel is what their inner select-loops watch.
+	//   3. Terminate pool subprocesses (ShutdownAll). Best-effort
+	//      SIGTERM with a short grace; if it doesn't exit, the manager
+	//      escalates to SIGKILL.
+	//
+	// We deliberately do NOT call into the DB / Redis client
+	// shutdowns: GORM and go-redis both flush idle connections at
+	// process exit, and forcing a Close before in-flight saves
+	// finish would defeat the point of waiting for the HTTP server
+	// to drain.
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
 	}
+
+	// poolCtx wraps every pool background loop so they can be
+	// cancelled together. Previously each .Start* received a fresh
+	// context.Background(), making them un-cancellable from main.
+	// We lazily replace those contexts only at shutdown time —
+	// the Start* calls above already happened with Background()
+	// and that's fine because the inner loops re-derive their own
+	// stop signals via Stop* methods. poolCtx is here for any
+	// future loops we add and want to participate.
+	poolCtx, poolCancel := context.WithCancel(context.Background())
+	_ = poolCtx // reserved; see comment above
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	log.Printf("[Boot] HTTP server listening on %s", addr)
+
+	// SIGINT and SIGTERM: SIGINT is what an operator's Ctrl-C
+	// sends; SIGTERM is what process supervisors (systemd, k8s)
+	// send. SIGHUP is intentionally not handled — keep the
+	// "reload config" semantics open for a future restart-free
+	// flow.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+	log.Printf("[Shutdown] received %s, draining (timeout=20s)...", sig)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// 1. HTTP server: stops accepting new conns, waits for in-flight
+	//    handlers to finish (including SSE long-poll connections).
+	//    SSE clients with `event-source` will reconnect when the
+	//    server comes back, so abruptly closing here is OK.
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[Shutdown] HTTP server shutdown returned: %v (proceeding anyway)", err)
+	} else {
+		log.Printf("[Shutdown] HTTP server drained")
+	}
+
+	// 2. Pool background loops. The Stop* methods are safe to call
+	//    even if the corresponding Start* never ran (autopilot=off).
+	poolManager.StopBroadcastConsumer()
+	poolManager.StopDormancyDetector()
+	poolCancel()
+	log.Printf("[Shutdown] pool background loops stopped")
+
+	// 3. Pool subprocesses. Each one gets a SIGTERM with a short
+	//    grace; if it doesn't exit, the manager escalates to SIGKILL.
+	//    No-op when no instances are running.
+	poolManager.ShutdownAll()
+	log.Printf("[Shutdown] pool subprocesses terminated")
+
+	log.Printf("[Shutdown] complete")
 }
